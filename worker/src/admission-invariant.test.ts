@@ -184,6 +184,136 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     assert.match(agent, /runtime\.trade\(scope, \{ mode: row\.requested_mode, intent, autonomousRevision: Number\(row\.revision\), signal: options\.signal \}\)/);
   });
 
+  /**
+   * The body of a function declared at `indent` in `code`, from its declaration
+   * to the first closing brace at that indent.
+   */
+  const body = (code: string, declaration: string, indent = "") => {
+    const at = code.indexOf(declaration);
+    assert.ok(at >= 0, `${declaration.trim()} must exist for this pin to mean anything`);
+    const end = code.indexOf(`\n${indent}}\n`, at);
+    assert.ok(end > at, `${declaration.trim()} has no closing brace`);
+    return code.slice(at, end);
+  };
+  /** Solana sends go through SolanaLiveRpc.send; these are every module allowed to call it, and how often. */
+  const SOLANA_SENDERS: Record<string, number | "owner-run"> = {
+    // execute (after recordSigned) and reconcileSolanaSubmission's rebroadcast of the saved bytes.
+    "solana-executor.ts": 2,
+    // submitOwner (after saveSetup) and ownerStatus's rebroadcast of the saved bytes.
+    "solana-app-runtime.ts": 2,
+    // The owner-run recovery tool: the owner's own key, the owner's chosen RPC, no
+    // server state. Its sends are its own track's to pin; here it must stay unreachable
+    // from the server (below).
+    "solana-recover.ts": "owner-run",
+  };
+
+  it("EVERY SOLANA SEND SITE IS ONE OF THE PINNED ONES: no other worker module broadcasts a Solana transaction", () => {
+    const offenders: string[] = [];
+    const counts: Record<string, number> = {};
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { if (e.name !== "node_modules") walk(p); continue; }
+        if (!e.name.endsWith(".ts") || e.name.endsWith(".test.ts")) continue;
+        const rel = path.relative(HERE, p), code = codeOf(readFileSync(p, "utf8"));
+        // The raw RPC method exists only in the transport, which sends nothing on its own.
+        if (rel !== "solana-live-rpc.ts" && /["'`]sendTransaction["'`]/.test(code)) offenders.push(`${rel} (raw sendTransaction)`);
+        if (!/solana-live-rpc|SolanaLiveRpc/.test(code)) continue;
+        const sends = (code.match(/\.send\(/g) ?? []).length;
+        if (!sends) continue;
+        counts[rel] = sends;
+        if (!Object.hasOwn(SOLANA_SENDERS, rel)) offenders.push(rel);
+      }
+    };
+    walk(HERE);
+    assert.deepEqual(offenders, [], `these modules can broadcast a Solana transaction outside the pinned sites: ${offenders.join(", ")}`);
+    for (const [file, expected] of Object.entries(SOLANA_SENDERS)) {
+      if (expected === "owner-run") continue;
+      assert.equal(counts[file], expected, `${file}: every send is pinned below; a new one needs its own durable-record pin`);
+    }
+    // The transport's read path cannot send: sendTransaction is not a read method.
+    const transport = codeOf(readFileSync(path.join(HERE, "solana-live-rpc.ts"), "utf8"));
+    const reads = transport.slice(transport.indexOf("const READ_METHODS"), transport.indexOf("] as const"));
+    assert.ok(reads.includes("getAccountInfo") && !reads.includes("sendTransaction"));
+  });
+
+  it("the owner-run recovery tool is unreachable from the server, and no browser module sends", () => {
+    const importers: string[] = [];
+    const walk = (dir: string, root: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { if (e.name !== "node_modules") walk(p, root); continue; }
+        if (!/\.(ts|tsx)$/.test(e.name) || /\.test\.tsx?$/.test(e.name)) continue;
+        const code = codeOf(readFileSync(p, "utf8"));
+        if (/from\s+["'][^"']*solana-recover["']/.test(code)) importers.push(path.relative(root, p));
+        if (root !== HERE && /\bsignAndSendTransaction\b|["'`]sendTransaction["'`]/.test(code)) importers.push(`${path.relative(root, p)} (browser send)`);
+      }
+    };
+    walk(HERE, HERE);
+    walk(path.join(HERE, "..", "..", "web", "src"), path.join(HERE, "..", "..", "web", "src"));
+    // Only its own command and entry point use it; the CLI runs them as a separate process.
+    assert.deepEqual(importers.sort(), ["solana-recover-cli.ts", "solana-recover-command.ts"], `unexpected importers: ${importers.join(", ")}`);
+  });
+
+  it("each Solana send broadcasts only bytes already in a durable record, after that record", () => {
+    const app = codeOf(readFileSync(path.join(HERE, "solana-app-runtime.ts"), "utf8"));
+    const executor = codeOf(readFileSync(path.join(HERE, "solana-executor.ts"), "utf8"));
+    // Neither module can sign for the owner: the owner signs in the browser or the recovery tool.
+    assert.doesNotMatch(app, /\bsignTransaction\b|partiallySignTransaction/);
+
+    // 1. execute: recordSigned commits the exact bytes, a conflict returns before any send.
+    const execute = executor.slice(executor.indexOf("await options.journal.recordSigned(submission)"));
+    const executeSend = execute.indexOf("await options.rpc.send(");
+    assert.ok(executeSend > 0);
+    assert.match(execute.slice(0, executeSend), /return fail\("conflict"\)/);
+    assert.match(execute.slice(executeSend, executeSend + 120), /options\.rpc\.send\(submission\.signedTransactionBase64, submission\.minContextSlot/);
+
+    // 2. reconcileSolanaSubmission: rebroadcasts the journal's own pending record, never new bytes,
+    //    and only after both providers were asked and neither has seen it.
+    const reconcile = body(executor, "export async function reconcileSolanaSubmission(");
+    const loaded = reconcile.indexOf("const record = await journal.get(owner, requestId)");
+    const notPending = reconcile.indexOf(`if (!record || record.status !== "pending") return record`);
+    const fromRecord = reconcile.indexOf("const submission = record.submission");
+    const quorum = reconcile.indexOf("await readSolanaQuorum(rpc,");
+    const unseen = reconcile.indexOf("if (quorum.values.every(item => !item.seen && !item.settlement)");
+    const rebroadcast = reconcile.indexOf("await rpc.send(submission.signedTransactionBase64, submission.minContextSlot");
+    assert.ok(loaded > 0 && notPending > loaded && fromRecord > notPending && quorum > fromRecord && unseen > quorum && rebroadcast > unseen,
+      "reconcileSolanaSubmission: load the durable record, stop unless pending, ask both providers, then resend only unseen saved bytes");
+    assert.match(reconcile.slice(unseen, rebroadcast), /nowMs < signedDeadlineMs\(submission\)/, "never after the signed deadline");
+    assert.equal((reconcile.match(/\.send\(/g) ?? []).length, 1);
+    assert.doesNotMatch(reconcile, /sign(?:Transaction|Bytes)?\(|KeyPair/);
+
+    // 3. submitOwner: the signed bytes are saved first; only the first save sends.
+    const submit = body(app, "  async function submitOwner(", "  ");
+    const saved = submit.indexOf("const first = await s.saveSetup(signed)");
+    const ownerSend = submit.indexOf("await rpc().send(input.signedTransactionBase64, 1)");
+    assert.ok(saved > 0 && ownerSend > saved);
+    assert.match(submit.slice(saved, ownerSend), /if \(first\)/);
+    assert.match(submit.slice(0, saved), /signedTransactionBase64: input\.signedTransactionBase64, status: "pending"/);
+    assert.equal((submit.match(/\.send\(/g) ?? []).length, 1);
+
+    // 4. ownerStatus: rebroadcasts the saved setup's own signed bytes, only while
+    //    every provider has not seen them and their blockhash can still land.
+    const status = body(app, "  async function ownerStatus(", "  ");
+    const savedBytes = status.indexOf("signed = setup.signedTransactionBase64");
+    const finished = status.indexOf(`if (setup.status === "finalized" || setup.status === "failed") return`);
+    const asked = status.indexOf("await readSolanaQuorum(live,");
+    const canLand = status.indexOf(`if (quorum.values.every(view => view.outcome === "pending" && !view.seen && view.canLand))`);
+    const resend = status.indexOf("await live.send(signed, 1,");
+    assert.ok(savedBytes > 0 && finished > savedBytes && asked > finished && canLand > asked && resend > canLand,
+      "ownerStatus: saved bytes, finished outcomes return, both providers asked, then resend only unseen bytes that can land");
+    assert.equal((status.match(/\.send\(/g) ?? []).length, 1);
+    // ownerStatus is handed only setups just read back from the store.
+    const calls = [...app.matchAll(/ownerStatus\(s, (\w+)\)/g)];
+    assert.ok(calls.length >= 3, "status, activateLive and submitOwner each ask");
+    for (const call of calls) {
+      assert.equal(call[1], "setup");
+      const read = app.lastIndexOf("setup = await s.setup()", call.index);
+      assert.ok(read > 0, `ownerStatus at offset ${call.index} is not handed a stored setup`);
+      assert.doesNotMatch(app.slice(read + "setup = await s.setup()".length, call.index), /\bsetup\s*=(?!=)/, "nor one changed after reading it");
+    }
+  });
+
   it("and the executor is built in one place, which hands it to `active` — the funnel's own handle", () => {
     const at = sites(/\bcreateAgentExecutor\(/);
     assert.equal(at.length, 1, "one executor factory call in index.ts");
