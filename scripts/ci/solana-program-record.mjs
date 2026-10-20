@@ -16,10 +16,13 @@
 // GitHub step summary when there is one, and prints the SHA-256 on stdout.
 //
 // A release artifact comes only from a CI run on refs/heads/main of
-// millw14/merrymen: a push to main or a manual run on main (RELEASE_RULE).
-// CI never runs on a tag push, and a manual run on a tag or another branch is
-// not a candidate. Every other run's artifact, every pull request run's
-// included, is marked not-a-release, and so is its artifact name in ci.yml.
+// millw14/merrymen (a push to main or a manual run on main) whose pinned
+// Linux build matched the committed build manifest (RELEASE_RULE). CI never
+// runs on a tag push, and a manual run on a tag or another branch is not a
+// candidate. This script cannot know the manifest outcome yet, so its record
+// always says not-a-release; in solana · test, solana-linux-manifest.mjs
+// report compares the manifest, rewrites the record's release with
+// releaseStatus(run, outcome), and gives ci.yml the artifact name's label.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -100,7 +103,8 @@ export const RELEASE_REPOSITORY = "millw14/merrymen";
  */
 export const RELEASE_REF = "refs/heads/main";
 export const RELEASE_RULE = `A release artifact comes only from a CI run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}: `
-  + "a push to main, or a manual (workflow_dispatch) run on main, whose app check passed, so solana · rebuild reproduced its hash. "
+  + "a push to main, or a manual (workflow_dispatch) run on main, whose pinned Linux build matched the committed "
+  + "contracts/solana/build-manifests/Linux-x86_64.json and whose app check passed, so solana · rebuild reproduced its hash. "
   + "CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate. "
   + "Every other artifact, every pull request run's included, is not a release artifact. "
   + "Confirm the run on GitHub itself (event, branch, commit): this record and the artifact name are written by the run and prove nothing alone.";
@@ -126,12 +130,37 @@ export function provenance(env) {
   };
 }
 
-/** Whether a run can produce a release artifact (RELEASE_RULE); ci.yml names the artifact with `label`. */
-export function releaseStatus(p) {
-  const candidate = p?.repository === RELEASE_REPOSITORY
+/** Why releaseStatus decided as it did, by the run and the Linux manifest outcome. */
+const RELEASE_REASONS = {
+  matches: "a run on main whose pinned Linux build matched the committed manifest",
+  uncommitted: "no Linux build manifest is committed yet",
+  differs: "its pinned Linux build differs from the committed manifest",
+  removed: "the committed Linux build manifest was deleted",
+};
+
+/**
+ * Whether a run's artifact is a release candidate (RELEASE_RULE): a push or
+ * manual run on refs/heads/main of RELEASE_REPOSITORY, and `linuxManifest`,
+ * the outcome of solana-linux-manifest.mjs's comparison, is "matches". Any
+ * other outcome, or none yet (null), is not-a-release. ci.yml names the
+ * uploaded artifact with `label`.
+ */
+export function releaseStatus(p, linuxManifest = null) {
+  const fromMain = p?.repository === RELEASE_REPOSITORY
     && (p.event === "push" || p.event === "workflow_dispatch")
     && p.ref === RELEASE_REF;
-  return { candidate, label: candidate ? "release-candidate" : "not-a-release", rule: RELEASE_RULE };
+  const candidate = fromMain && linuxManifest === "matches";
+  const reason = !fromMain
+    ? `not a push or manual run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}`
+    : linuxManifest === null
+      ? "its Linux build manifest has not been compared yet"
+      : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
+  return { candidate, label: candidate ? "release-candidate" : "not-a-release", reason, rule: RELEASE_RULE };
+}
+
+/** The step summary's release line. */
+export function releaseLine(release) {
+  return `- release: ${release.candidate ? "**release candidate**" : "**not a release artifact**"} (${release.reason}). ${release.rule}`;
 }
 
 export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null, run = null }) {
@@ -196,7 +225,7 @@ function main(argv) {
       `- toolchain: agave ${t.agave}, platform-tools ${t.platformTools} (rustc ${t.platformToolsRustc}), arch ${t.arch}`,
       `- commit: ${record.commit ?? "unknown"}${run.pullRequestHead ? ` (test merge of pull request head ${run.pullRequestHead})` : ""}`,
       `- run: ${run.runId ?? "unknown"} attempt ${run.runAttempt ?? "?"}, ${run.event ?? "unknown event"} on ${run.ref ?? "unknown ref"} of ${run.repository ?? "unknown repository"}`,
-      `- release: ${record.release.candidate ? "**release candidate**" : "**not a release artifact**"}. ${RELEASE_RULE}`,
+      releaseLine(record.release),
       "",
     ].join("\n"));
   }

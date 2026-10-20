@@ -129,6 +129,8 @@ describe("the CI jobs", () => {
       "node scripts/ci/solana-linux-manifest.mjs verify contracts/solana ",
       // After every cargo-build-sbf run, --record's second build included.
       "run: scripts/ci/solana-toolchain.sh check",
+      // The outcome names the artifact, so it comes before the upload.
+      "release=$(node scripts/ci/solana-linux-manifest.mjs report contracts/solana contracts/solana/target/deploy/merrymen_vault.build.json)",
       "uses: actions/upload-artifact@",
       // Last: a manifest that differs from the committed one is uploaded first.
       "run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana",
@@ -166,11 +168,16 @@ describe("the CI jobs", () => {
     assert.match(on, /^ {2}push:\n {4}branches: \[main\]\n(?! {4})/m);
     assert.doesNotMatch(on, /tags/);
     const upload = /uses: actions\/upload-artifact@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
-    assert.match(upload, /^ {10}name: merrymen-vault-sbf-\$\{\{ steps\.record\.outputs\.release \}\}-\$\{\{ github\.sha \}\}-run\$\{\{ github\.run_id \}\}\.\$\{\{ github\.run_attempt \}\}$/m);
-    // The label comes from the record, and nothing but its two values reaches the name.
+    assert.match(upload, /^ {10}name: merrymen-vault-sbf-\$\{\{ steps\.linux-manifest\.outputs\.release \}\}-\$\{\{ github\.sha \}\}-run\$\{\{ github\.run_id \}\}\.\$\{\{ github\.run_attempt \}\}$/m);
+    // The label comes from the Linux manifest comparison, which decides it
+    // from the run and the outcome (solana-linux-manifest.mjs report), and
+    // nothing but its two values reaches the name. The record step, which
+    // cannot know the outcome, gives no label.
+    const label = steps(test).find(s => s.includes("id: linux-manifest")) ?? "";
+    assert.match(label, /^ {10}release=\$\(node scripts\/ci\/solana-linux-manifest\.mjs report contracts\/solana contracts\/solana\/target\/deploy\/merrymen_vault\.build\.json\)\n {10}case "\$release" in release-candidate\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"$/m);
     const record = steps(test).find(s => s.includes("id: record")) ?? "";
-    assert.match(record, /release=\$\(node -p 'require\(process\.argv\[1\]\)\.release\.label' "\$PWD\/contracts\/solana\/target\/deploy\/merrymen_vault\.build\.json"\)/);
-    assert.match(record, /case "\$release" in release-candidate\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"/);
+    assert.doesNotMatch(record, /release/);
+    assert.doesNotMatch(test, /steps\.record\.outputs\.release/);
   });
 
   it("uploads only the artifact, its record and the Linux manifest, never the throwaway keypair beside them", () => {
@@ -197,14 +204,25 @@ describe("the CI jobs", () => {
       "          CARGO_INCREMENTAL: \"0\"",
       "          VAULT_TESTED_SHA256: ${{ steps.record.outputs.sha256 }}",
     ].join("\n"));
-    // The comparison is the last step, after the upload: a run that fails it
-    // has still handed the owner the manifest to review and commit.
+    // The comparison runs twice: before the upload, where its outcome names
+    // the artifact and nothing fails on it, and as the last step, which fails
+    // on it. So a run that fails it has still handed the owner the manifest
+    // to review and commit, under a name that is never release-candidate.
     assert.equal(all.at(-1), [
       "      - name: Linux manifest matches the committed one",
       "        if: needs.solana-paths.outputs.run == 'true'",
       "        run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana",
     ].join("\n"));
     assert.match(all.at(-2), /uses: actions\/upload-artifact@/);
+    assert.equal(all.at(-3), [
+      "      - name: Linux manifest and release label",
+      "        id: linux-manifest",
+      "        if: needs.solana-paths.outputs.run == 'true'",
+      "        run: |",
+      "          release=$(node scripts/ci/solana-linux-manifest.mjs report contracts/solana contracts/solana/target/deploy/merrymen_vault.build.json)",
+      "          case \"$release\" in release-candidate|not-a-release) ;; *) echo \"::error::the comparison gave no release label\"; exit 1 ;; esac",
+      "          echo \"release=$release\" >> \"$GITHUB_OUTPUT\"",
+    ].join("\n"));
     // The same environment as the Test step, so --record's in-place build is
     // the build test.sh made, not a rebuild with other settings.
     const testStep = steps(test).find(s => s.includes("contracts/solana/test.sh 2>&1")) ?? "";
@@ -1005,10 +1023,28 @@ describe("solana-program-record.mjs", () => {
     for (const { id: other } of named) assert.equal(other, id);
   });
 
-  it("marks a release candidate only for a push or manual run on refs/heads/main of millw14/merrymen", () => {
+  it("marks a release candidate only for a push or manual run on refs/heads/main of millw14/merrymen whose Linux build matched the committed manifest", () => {
     const main = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" };
     const candidates = [main, { ...main, event: "workflow_dispatch" }];
-    for (const p of candidates) assert.deepEqual(releaseStatus(p), { candidate: true, label: "release-candidate", rule: RELEASE_RULE }, JSON.stringify(p));
+    for (const p of candidates) {
+      assert.deepEqual(releaseStatus(p, "matches"), {
+        candidate: true, label: "release-candidate", reason: "a run on main whose pinned Linux build matched the committed manifest", rule: RELEASE_RULE,
+      }, JSON.stringify(p));
+      // Any other outcome, or none yet, is not a release: the artifact's name
+      // follows this, so bytes that fail the comparison never carry the
+      // release-candidate name.
+      const outcomes = {
+        null: "its Linux build manifest has not been compared yet",
+        uncommitted: "no Linux build manifest is committed yet",
+        differs: "its pinned Linux build differs from the committed manifest",
+        removed: "the committed Linux build manifest was deleted",
+        matched: "an unknown Linux manifest outcome \"matched\"",
+      };
+      for (const [outcome, reason] of Object.entries(outcomes)) {
+        assert.deepEqual(releaseStatus(p, outcome === "null" ? null : outcome), { candidate: false, label: "not-a-release", reason, rule: RELEASE_RULE }, outcome);
+      }
+      assert.equal(releaseStatus(p).label, "not-a-release", "the record step's own call, before any comparison");
+    }
     const others = [
       { ...main, event: "pull_request", ref: "refs/pull/7/merge" },
       { ...main, event: "pull_request", ref: "refs/heads/main" },
@@ -1025,8 +1061,12 @@ describe("solana-program-record.mjs", () => {
       {},
       null,
     ];
-    for (const p of others) assert.equal(releaseStatus(p).label, "not-a-release", JSON.stringify(p));
-    assert.match(RELEASE_RULE, /^A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
+    for (const p of others) {
+      assert.deepEqual(releaseStatus(p, "matches"), {
+        candidate: false, label: "not-a-release", reason: "not a push or manual run on refs/heads/main of millw14/merrymen", rule: RELEASE_RULE,
+      }, JSON.stringify(p));
+    }
+    assert.match(RELEASE_RULE, /^A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main, whose pinned Linux build matched the committed contracts\/solana\/build-manifests\/Linux-x86_64\.json and whose app check passed/);
     assert.match(RELEASE_RULE, /CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate\./);
     assert.doesNotMatch(RELEASE_RULE, /or a tag of/);
   });
@@ -1081,14 +1121,22 @@ describe("solana-program-record.mjs", () => {
     assert.deepEqual([prRecord.provenance.event, prRecord.provenance.runId], ["pull_request", "99"]);
     const text = readFileSync(summary, "utf8");
     assert.match(text, /- run: 99 attempt 1, pull_request on refs\/pull\/7\/merge of millw14\/merrymen/);
-    assert.match(text, /- release: \*\*not a release artifact\*\*\. A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
-    const mainRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main" });
+    assert.match(text, /- release: \*\*not a release artifact\*\* \(not a push or manual run on refs\/heads\/main of millw14\/merrymen\)\. A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
+    // A run on main: still not a release here. Only the Linux manifest
+    // comparison (solana-linux-manifest.mjs report) can make it one.
+    const mainSummary = join(root, "main-summary.md");
+    const mainRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: mainSummary });
     assert.equal(mainRun.status, 0, mainRun.stderr);
-    assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "release-candidate");
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, null));
+    assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "not-a-release");
+    assert.match(readFileSync(mainSummary, "utf8"), /- release: \*\*not a release artifact\*\* \(its Linux build manifest has not been compared yet\)\./);
+    assert.doesNotMatch(readFileSync(mainSummary, "utf8"), /release candidate\*\*/);
     // A manual run on a tag: the record says it is not a release.
     const tagRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/tags/vault-v1" });
     assert.equal(tagRun.status, 0, tagRun.stderr);
-    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, { candidate: false, label: "not-a-release", rule: RELEASE_RULE });
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, {
+      candidate: false, label: "not-a-release", reason: "not a push or manual run on refs/heads/main of millw14/merrymen", rule: RELEASE_RULE,
+    });
 
     writeFileSync(so, elf(Buffer.alloc(32, 7)));
     const bad = run(process.execPath, [script, root, so, out]);
@@ -1197,12 +1245,13 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(wrong.status, 1);
     assert.match(wrong.stderr, /^::error::the recorded manifest is for artifact [0-9a-f]{64}, not the tested f{64}/m);
 
-    // None committed: compare passes with a notice, and the summary says how it gets committed.
+    // None committed: compare passes and says so (report, before it, has
+    // annotated the run and written the summary).
     const summary = join(origin, "summary.md");
     const first = call(["compare", dir], { GITHUB_STEP_SUMMARY: summary });
     assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stdout, /^::notice title=Linux build manifest::No build-manifests\/Linux-x86_64\.json is committed/m);
-    assert.match(readFileSync(summary, "utf8"), /Review it and commit it from a run whose app check passed/);
+    assert.match(first.stdout, /^No build-manifests\/Linux-x86_64\.json is committed, so nothing was compared\..*Review it and commit it from a run whose app check passed/m);
+    assert.equal(existsSync(summary), false, "the summary is report's");
 
     // Committed and the same: passes.
     gitIn("add", "contracts/solana/build-manifests/Linux-x86_64.json");
@@ -1234,9 +1283,105 @@ describe("solana-linux-manifest.mjs", () => {
     const outside = run(process.execPath, [script, "compare", loose], { GIT_CEILING_DIRECTORIES: dirname(loose) });
     assert.equal(outside.status, 1);
     assert.match(outside.stderr, /::error::/);
-    for (const args of [[], ["verify", dir], ["compare"], ["compare", dir, soSha], ["check", dir, soSha]]) {
+    for (const args of [[], ["verify", dir], ["compare"], ["compare", dir, soSha], ["check", dir, soSha], ["report", dir], ["report", dir, "a", "b"]]) {
       assert.equal(call(args).status, 2, args.join(" "));
     }
+  });
+
+  it("as a command: report names the artifact release-candidate only for a run on main whose build matches the committed manifest, and never fails on the outcome", () => {
+    const origin = fresh("report-repo");
+    const gitIn = (...args) => {
+      const r = run("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+      }, origin);
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    };
+    const dir = join(origin, "contracts/solana");
+    mkdirSync(join(dir, "build-manifests"), { recursive: true });
+    mkdirSync(join(dir, "target/deploy"), { recursive: true });
+    writeFileSync(join(dir, "build-manifests/Darwin-arm64.json"), text(darwin));
+    gitIn("init", "-q");
+    gitIn("add", "contracts/solana/build-manifests");
+    gitIn("commit", "-q", "-m", "no Linux manifest yet");
+    const manifest = join(dir, LINUX_MANIFEST);
+    const recordPath = join(dir, "target/deploy/merrymen_vault.build.json");
+    const mainRun = { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_SHA: "c".repeat(40) };
+    const prRun = { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" };
+    /** What the job holds after build.sh --record: this build's manifest, and the record step's record (its release not yet decided). */
+    const build = bytes => {
+      writeFileSync(join(dir, ARTIFACT), bytes);
+      writeFileSync(manifest, text(linux({ "artifact.sha256": sha256(bytes), "artifact.bytes": bytes.length })));
+      writeFileSync(recordPath, `${JSON.stringify({ program: "merrymen_vault", sha256: sha256(bytes), release: releaseStatus({}) }, null, 2)}\n`);
+    };
+    const report = (extra, summary = join(fresh("summary"), "summary.md")) => {
+      const r = run(process.execPath, [script, "report", dir, recordPath], { ...extra, GITHUB_STEP_SUMMARY: summary });
+      return { ...r, record: JSON.parse(readFileSync(recordPath, "utf8")), summary: existsSync(summary) ? readFileSync(summary, "utf8") : "" };
+    };
+
+    // None committed: a run on main is not a release; the owner commits the manifest first.
+    build(so);
+    const none = report(mainRun);
+    assert.equal(none.status, 0, none.stderr);
+    assert.equal(none.stdout, "not-a-release\n");
+    assert.match(none.stderr, /^::notice title=Linux build manifest::No build-manifests\/Linux-x86_64\.json is committed.*The artifact is uploaded as not-a-release \(no Linux build manifest is committed yet\)\.$/m);
+    assert.deepEqual(none.record.linuxManifest, { file: LINUX_MANIFEST, status: "uncommitted", problem: null });
+    assert.equal(none.record.release.label, "not-a-release");
+    assert.equal(none.record.program, "merrymen_vault", "the rest of the record is kept");
+
+    // Committed and matching: release-candidate on main, not-a-release on a pull request.
+    gitIn("add", "contracts/solana/build-manifests/Linux-x86_64.json");
+    gitIn("commit", "-q", "-m", "commit the Linux manifest");
+    build(so);
+    const matches = report(mainRun);
+    assert.equal(matches.status, 0, matches.stderr);
+    assert.equal(matches.stdout, "release-candidate\n");
+    assert.deepEqual(matches.record.release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, "matches"));
+    assert.equal(matches.record.release.candidate, true);
+    assert.match(matches.summary, /^### Linux build manifest\n\nThe pinned Linux build matches the committed build-manifests\/Linux-x86_64\.json: /);
+    assert.match(matches.summary, /^- release: \*\*release candidate\*\* \(a run on main whose pinned Linux build matched the committed manifest\)\. A release artifact comes only/m);
+    build(so);
+    const pr = report(prRun);
+    assert.equal(pr.status, 0, pr.stderr);
+    assert.equal(pr.stdout, "not-a-release\n");
+    assert.equal(pr.record.linuxManifest.status, "matches");
+
+    // A main run whose build differs from the committed manifest: uploaded as
+    // not-a-release, the step passes, and compare (the last step) fails.
+    const other = Buffer.from("\x7fELF other vault bytes");
+    build(other);
+    const differs = report(mainRun);
+    assert.equal(differs.status, 0, differs.stderr);
+    assert.equal(differs.stdout, "not-a-release\n");
+    assert.match(differs.stderr, /^::warning title=Linux build manifest::this pinned Linux build differs from the committed build-manifests\/Linux-x86_64\.json: .*The artifact is uploaded as not-a-release \(its pinned Linux build differs from the committed manifest\)\. The job's last step fails on this\.$/m);
+    assert.equal(differs.record.linuxManifest.status, "differs");
+    assert.match(differs.record.linuxManifest.problem, /artifact\.sha256: committed/);
+    assert.deepEqual([differs.record.release.candidate, differs.record.release.label], [false, "not-a-release"]);
+    assert.match(differs.summary, /^- release: \*\*not a release artifact\*\* \(its pinned Linux build differs from the committed manifest\)/m);
+    assert.equal(run(process.execPath, [script, "compare", dir]).status, 1);
+
+    // A main run that deleted the committed manifest: not-a-release too.
+    gitIn("rm", "-q", "-f", "contracts/solana/build-manifests/Linux-x86_64.json");
+    gitIn("commit", "-q", "-m", "drop it");
+    build(so);
+    const removed = report(mainRun);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(removed.stdout, "not-a-release\n");
+    assert.equal(removed.record.linuxManifest.status, "removed");
+    assert.equal(removed.record.release.reason, "the committed Linux build manifest was deleted");
+
+    // Errors fail the step, so nothing is uploaded: a record for another
+    // artifact, a missing record, no recorded manifest.
+    build(so);
+    writeFileSync(recordPath, JSON.stringify({ sha256: "f".repeat(64) }));
+    const mismatched = run(process.execPath, [script, "report", dir, recordPath], mainRun);
+    assert.equal(mismatched.status, 1);
+    assert.match(mismatched.stderr, /^::error::the build record .* is for artifact "f{64}", the Linux manifest for [0-9a-f]{64}$/m);
+    assert.equal(mismatched.stdout, "");
+    const missing = run(process.execPath, [script, "report", dir, join(dir, "nope.json")], mainRun);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /^::error::cannot read the build record/m);
+    rmSync(manifest);
+    assert.equal(run(process.execPath, [script, "report", dir, recordPath], mainRun).status, 1);
   });
 
   it("assess: a manifest HEAD deleted while its first parent has one is removed, and fails the comparison", () => {

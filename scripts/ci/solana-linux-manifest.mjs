@@ -3,6 +3,7 @@
 // artifact the tests ran against, and match the committed one if there is one.
 //
 //   node scripts/ci/solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256>
+//   node scripts/ci/solana-linux-manifest.mjs report <contracts/solana dir> <record.json>
 //   node scripts/ci/solana-linux-manifest.mjs compare <contracts/solana dir>
 //
 // `solana · test` runs verify right after `build.sh --record`, which built the
@@ -14,25 +15,39 @@
 // or not for the tested artifact: its artifact.sha256 must equal
 // <tested sha256>, and target/deploy/merrymen_vault.so must still hash to it,
 // so --record's in-place build left the bytes the runtime tests ran against
-// untouched. Only then does the job upload the artifact and the manifest.
+// untouched.
 //
-// compare runs last, after the upload, so a run whose manifest differs still
-// hands it to the owner. It fails (exit 1) when a Linux manifest is committed
-// at HEAD and differs from the recorded one in any field (a stale one
-// included: packages/core's manifest test fails on it too), and when HEAD has
-// none but its first parent (a pull request's base, or the commit before a
-// push) has one: once committed, the manifest is replaced by the next
-// reviewed one, never deleted, so deleting it cannot turn the comparison off.
-// The job checks out with fetch-depth: 2 for that parent, and a checkout that
-// lacks it fails rather than skipping the check. With none committed on
-// either side it passes, and says (a notice and the step summary) that the
-// uploaded artifact carries the manifest for the owner to review and commit.
-// Committing it is what turns the comparison on.
+// report runs next, before the upload, and fails only on an error, never on
+// what it finds. It compares the recorded manifest with the committed one
+// (the outcomes below: matches, uncommitted, differs, removed), writes the
+// outcome and the release decision into <record.json> (the build record
+// solana-program-record.mjs wrote), adds both to the step summary, and prints
+// the artifact's release label on stdout for the upload's name. Only a run on
+// main whose build matches the committed manifest is release-candidate
+// (solana-program-record.mjs releaseStatus); every other artifact, one whose
+// manifest differs, was deleted or was never committed included, is uploaded
+// as not-a-release. So bytes that fail the comparison still reach the owner,
+// but never under the release-candidate name.
+//
+// compare is the job's last step, after the upload. It fails (exit 1) when a
+// Linux manifest is committed at HEAD and differs from the recorded one in
+// any field (a stale one included: packages/core's manifest test fails on it
+// too), and when HEAD has none but its first parent (a pull request's base,
+// or the commit before a push) has one: once committed, the manifest is
+// replaced by the next reviewed one, never deleted, so deleting it cannot
+// turn the comparison off. The job checks out with fetch-depth: 2 for that
+// parent, and a checkout that lacks it fails rather than skipping the check.
+// With none committed on either side it passes: report has already said (a
+// notice and the step summary) that the uploaded artifact carries the
+// manifest for the owner to review and commit. Committing it is what turns
+// the comparison on, and what lets a run on main be a release candidate.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { provenance, releaseLine, releaseStatus } from "./solana-program-record.mjs";
 
 export const LINUX_HOST = "Linux-x86_64";
 export const LINUX_MANIFEST = `build-manifests/${LINUX_HOST}.json`;
@@ -160,11 +175,55 @@ export function committedManifests(dir) {
   return { committed: at(head), parent: at(first) };
 }
 
-const USAGE = "usage: solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256> | compare <contracts/solana dir>";
+const USAGE = "usage: solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256> | "
+  + "report <contracts/solana dir> <record.json> | compare <contracts/solana dir>";
+
+/** One outcome of assess, for the log and the step summary. */
+export function outcomeLine({ status, manifest, problem = null }) {
+  const built = `source digest ${manifest.source.digest}, artifact ${manifest.artifact.sha256} (${manifest.artifact.bytes} bytes)`;
+  if (status === "matches") return `The pinned Linux build matches the committed ${LINUX_MANIFEST}: ${built}.`;
+  if (status === "uncommitted") {
+    return `No ${LINUX_MANIFEST} is committed, so nothing was compared. This run recorded ${built}; `
+      + "the manifest is in the uploaded vault artifact. Review it and commit it from a run whose app check passed: "
+      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it is a release candidate.";
+  }
+  return `${problem} This run recorded ${built}.`;
+}
+
+/**
+ * The outcome and the release decision, written into the build record; the
+ * label goes to stdout for the artifact's name. Throws only on an error.
+ */
+function report(dir, recorded, recordPath) {
+  const result = assess({ recorded, ...committedManifests(dir) });
+  let record;
+  try {
+    record = JSON.parse(readFileSync(recordPath, "utf8"));
+  } catch (error) {
+    throw new Error(`cannot read the build record ${recordPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (record?.sha256 !== result.manifest.artifact.sha256) {
+    throw new Error(`the build record ${recordPath} is for artifact ${JSON.stringify(record?.sha256)}, the Linux manifest for ${result.manifest.artifact.sha256}`);
+  }
+  const release = releaseStatus(provenance(process.env), result.status);
+  record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem };
+  record.release = release;
+  writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+  const line = outcomeLine(result);
+  const named = `The artifact is uploaded as ${release.label} (${release.reason}).`;
+  // stdout is the label alone; Actions reads workflow commands on stderr too.
+  if (result.status === "matches") console.error(`${line} ${named}`);
+  else if (result.status === "uncommitted") console.error(`::notice title=Linux build manifest::${line} ${named}`);
+  else console.error(`::warning title=Linux build manifest::${line} ${named} The job's last step fails on this.`);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, "", releaseLine(release), ""].join("\n"));
+  }
+  process.stdout.write(`${release.label}\n`);
+}
 
 function main(argv) {
-  const [command, dir, testedSha256] = argv;
-  if (!(command === "verify" && argv.length === 3) && !(command === "compare" && argv.length === 2)) {
+  const [command, dir, third] = argv;
+  if (!(command === "verify" && argv.length === 3) && !(command === "report" && argv.length === 3) && !(command === "compare" && argv.length === 2)) {
     console.error(USAGE);
     process.exit(2);
   }
@@ -172,23 +231,16 @@ function main(argv) {
   if (!existsSync(path)) throw new Error(`no ${LINUX_MANIFEST}: build.sh --record did not write one for this host`);
   const recorded = readFileSync(path, "utf8");
   if (command === "verify") {
-    const m = verifyRecorded({ recorded, testedSha256, artifact: readFileSync(join(dir, ARTIFACT)) });
+    const m = verifyRecorded({ recorded, testedSha256: third, artifact: readFileSync(join(dir, ARTIFACT)) });
     console.log(`${LINUX_MANIFEST} is for the tested artifact: source digest ${m.source.digest}, artifact ${m.artifact.sha256} (${m.artifact.bytes} bytes).`);
     return;
   }
-  const result = compareCommitted({ recorded, ...committedManifests(dir) });
-  const { digest } = result.manifest.source;
-  const { sha256, bytes } = result.manifest.artifact;
-  const line = result.status === "matches"
-    ? `The pinned Linux build matches the committed ${LINUX_MANIFEST}: source digest ${digest}, artifact ${sha256} (${bytes} bytes).`
-    : `No ${LINUX_MANIFEST} is committed, so nothing was compared. This run recorded source digest ${digest}, artifact ${sha256} (${bytes} bytes); `
-      + "the manifest is in the uploaded vault artifact. Review it and commit it from a run whose app check passed: "
-      + "from then on CI fails whenever the pinned Linux build differs from it.";
-  if (result.status === "uncommitted") console.log(`::notice title=Linux build manifest::${line}`);
-  else console.log(line);
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, ""].join("\n"));
+  if (command === "report") {
+    report(dir, recorded, third);
+    return;
   }
+  // compare: report has already annotated and summarised the outcome.
+  console.log(outcomeLine(compareCommitted({ recorded, ...committedManifests(dir) })));
 }
 
 // Real paths on both sides, as in solana-program-record.mjs.

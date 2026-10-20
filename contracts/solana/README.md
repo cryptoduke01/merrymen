@@ -136,28 +136,37 @@ that built it). `solana · rebuild` builds the same source again from `git archi
 another runner, and `app` requires the two hashes to be equal. Both jobs build only when
 a pull request changes a Solana-relevant path; pushes to main and manual runs always do.
 
-`solana · test` then runs `build.sh --record`, checks that the manifest it writes,
-`build-manifests/Linux-x86_64.json`, is for the artifact the runtime tests ran against, and
-uploads it with the artifact. Its last step fails when a committed Linux manifest exists
-and differs from that pinned Linux build, and when the commit under test deleted the
-manifest its first parent has (a pull request's base, or the commit before a push): once
-committed, it is replaced by the next reviewed one, never deleted. While none is committed
-on either side it only reports the recorded values. To commit the first one, take the artifact from a run whose `app` check
-passed, check that the manifest's `source.digest` equals `build.sh --source-digest` at that
-commit and its `artifact.sha256` equals the tested and rebuilt hashes in `app`'s log, and
-commit the file unchanged. `app` prints both hashes before it checks any result, so they
-are in its log on a failing run too; the `solana · test` and `solana · rebuild` step
-summaries carry them as well. From then on a program change needs a new Linux manifest as
-well: its pull request fails (this step, and the TypeScript manifest test) until the
-manifest that run uploaded is committed. Check it against `solana · rebuild`'s hash the
-same way; the next run must then pass, which shows CI reproduced it.
+`solana · test` then runs `build.sh --record` and checks that the manifest it writes,
+`build-manifests/Linux-x86_64.json`, is for the artifact the runtime tests ran against.
+Before the upload it compares that manifest with the committed one
+(`scripts/ci/solana-linux-manifest.mjs report`), writes the outcome into the record, and
+names the artifact from it (below). The job's last step fails on the outcome, after the
+upload, so a run whose manifest differs still hands it over. It fails when a committed
+Linux manifest exists and differs from that pinned Linux build, and when the commit under
+test deleted the manifest its first parent has (a pull request's base, or the commit
+before a push): once committed, it is replaced by the next reviewed one, never deleted.
+While none is committed on either side it only reports the recorded values.
+
+To commit the first one, take the artifact from a run whose `app` check passed, check
+that the manifest's `source.digest` equals `build.sh --source-digest` at that commit and
+its `artifact.sha256` equals the tested and rebuilt hashes in `app`'s log, and commit the
+file unchanged. `app` prints both hashes before it checks any result, so they are in its
+log on a failing run too; the `solana · test` and `solana · rebuild` step summaries carry
+them as well. From then on a program change needs a new Linux manifest as well: its pull
+request fails (this step, and the TypeScript manifest test) until the manifest that run
+uploaded is committed. Check it against `solana · rebuild`'s hash the same way; the next
+run must then pass, which shows CI reproduced it.
 
 A release artifact is `merrymen-vault-sbf-release-candidate-<commit>-run<id>.<attempt>`,
-from a CI run on `refs/heads/main` (a push to main, or a manual run on main) whose `app`
-check passed. Every other run's artifact, every pull request's included, is named
-`merrymen-vault-sbf-not-a-release-…`. CI never runs on a tag push, and a manual run on a
-tag or another branch is not a release. The name and record are written by the run
-itself, so confirm the run's event, branch and commit on GitHub before using it.
+from a CI run on `refs/heads/main` (a push to main, or a manual run on main) whose pinned
+Linux build matched the committed Linux manifest and whose `app` check passed. So the
+first release needs a committed Linux manifest: until one is committed, every artifact is
+`not-a-release`. Every other artifact is named `merrymen-vault-sbf-not-a-release-…`: every
+pull request's, and every one whose build differs from the committed manifest or whose
+commit deleted it, a run on main included. The record's `release` and `linuxManifest`
+fields say why. CI never runs on a tag push, and a manual run on a tag or another branch
+is not a release. The name and record are written by the run itself, so confirm the run's
+event, branch and commit on GitHub, and that its `app` check passed, before using it.
 
 The TypeScript suite also writes `runtime-tests/fixtures/ts-instructions.json` from the
 shared ABI builders (`MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1` rewrites it) and fails while it
