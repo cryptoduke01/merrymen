@@ -1204,9 +1204,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * trade and exit again (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN in
      * solana-trading-store.ts). Each transaction is read on both providers and
      * booked only when they derive the same withdrawal from it
-     * (readSolanaExternalWithdrawal); what the withdrawn position part of wrapped
-     * SOL was worth lowers the high-water mark, as an in-app withdrawal does.
-     * Nothing is signed or sent.
+     * (readSolanaExternalWithdrawal). The withdrawn position part of wrapped SOL
+     * lowers the high-water mark by the lower of what it is worth now and its cost
+     * basis: it is valued when recorded, not when it happened. Nothing is signed or sent.
      */
     async recordExternalWithdrawals(scope: SolanaAccountScope, input: { signatures: unknown }) {
       const signatures = input?.signatures;

@@ -840,6 +840,20 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   });
   // OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-trading-store.ts).
   const outsideSignature = (n: number) => base58Encode(new Uint8Array(64).fill(n));
+  test(`${dialect}: wrapped SOL withdrawn outside Merrymen lowers the high-water mark by the lower of its value now and its cost basis`, options, async t => {
+    for (const [label, cost, usdPerSol] of [["SOL fell since it was bought", 2_000_000n, 500n], ["SOL rose since it was bought", 500_000n, 500n], ["SOL rose after it left", 600_000n, 1_000n]] as const) {
+      const f = await fixture(t, dialect);
+      // 0.004 SOL held at the given cost; the book's peak 20 USDG.
+      await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "20000000",
+        cashRaw: "8000000", wsolRaw: "4000000", costBasisUsdgRaw: cost.toString(), realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW }));
+      const valuation = withdrawValuation("4000000", NOW, (4_000_000n * usdPerSol / 1_000n).toString(), usdPerSol * 100_000_000n);
+      const worth = (() => { const q = BigInt(valuation.quote.minOutAmount), r = BigInt(valuation.reference.referenceOut); return q < r ? q : r; })();
+      const { book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: outsideSignature(7), slot: 1002, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "4000000", valuation } as never] });
+      const out = worth < cost ? worth : cost;
+      assert.equal(book.hwmRaw, (20_000_000n - out).toString(), `${label}: worth ${worth}, cost ${cost}`);
+      assert.equal(book.wsolRaw, "0"); assert.equal(book.costBasisUsdgRaw, "0");
+    }
+  });
   test(`${dialect}: a withdrawal made outside Merrymen is booked once from its own evidence, only after the book's last balances, and never one the app booked`, options, async t => {
     const f = await fixture(t, dialect), s = submission();
     await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
@@ -866,14 +880,16 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal((await f.store.liveBook())!.balancesSlot, 1004);
     const wsol = (slot: number, amountRaw: string, valuation?: object) => ({ signature: outsideSignature(4), slot, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw, ...(valuation ? { valuation } : {}) }) as never;
     await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1004, "1980005")] }), /already reflected/);
-    // All the WSOL out: quarantine first, then the position at its basis; the mark drops by what the position part was worth.
+    // All the WSOL out: quarantine first, then the position at its basis; the mark drops by the lower of what the position
+    // part is worth now and its basis. Here SOL is worth more than it cost (0.985 USDG now against 0.6 paid): recorded later
+    // than it happened, its value now may exceed what left, so the mark drops by the 0.6 USDG of capital that bought it.
     const valuation = withdrawValuation("1980005");
     const value = (() => { const q = BigInt(valuation.quote.minOutAmount), r = BigInt(valuation.reference.referenceOut); return q < r ? q : r; })();
-    const peak = BigInt((await f.store.liveBook())!.hwmRaw);
+    const peak = BigInt((await f.store.liveBook())!.hwmRaw), basis = BigInt((await f.store.liveBook())!.costBasisUsdgRaw);
+    assert.equal(basis, 600_000n); assert.ok(value * 1_980_000n / 1_980_005n > basis);
     const after = (await f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1005, "1980005", valuation)] })).book;
     assert.equal(after.wsolRaw, "0"); assert.equal(after.quarantinedWsolRaw, "0"); assert.equal(after.costBasisUsdgRaw, "0"); assert.equal(after.realizedPnlUsdgRaw, book.realizedPnlUsdgRaw);
-    const out = value * 1_980_000n / 1_980_005n;
-    assert.equal(after.hwmRaw, (peak > out ? peak - out : 0n).toString());
+    assert.equal(after.hwmRaw, (peak > basis ? peak - basis : 0n).toString());
     const flows = await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external' ORDER BY evidence_id").all() as Array<Record<string, string>>;
     assert.deepEqual(flows.map(r => [r.evidence_id, r.mint, r.amount_raw]), [[`external:${outsideSignature(3)}:${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "99000000"],
       [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => a[0]!.localeCompare(b[0]!)));

@@ -676,9 +676,14 @@ export class SolanaTradingStore implements SolanaLiveJournal {
    *
    * USDG out lowers cash and the high-water mark by the amount (floor 0). WSOL
    * out leaves quarantine first, then the position at its prorated basis; the
-   * high-water mark drops by what the position part is worth (`valuation`,
-   * checked fresh here) or not at all without one. No realized P&L. Refused
-   * while a trade or an owner transaction is pending.
+   * high-water mark drops by the lower of what the position part is worth now
+   * (`valuation`, checked fresh here) and that prorated cost basis, or not at
+   * all without a valuation. It is recorded when the owner records it, possibly
+   * days after it happened: had SOL risen since, its value now would lower the
+   * mark by more than the capital that left (understating later drawdown), so
+   * the capital the owner put into that SOL bounds it. An in-app withdrawal is
+   * valued when prepared, about a minute before it lands, and is not bounded
+   * this way. No realized P&L. Refused while a trade or an owner transaction is pending.
    *
    * A withdrawal of more than the book records (solana-recover sweeps the whole
    * balance) also took an inflow no status read booked yet: a deposit, or
@@ -747,7 +752,10 @@ export class SolanaTradingStore implements SolanaLiveJournal {
             const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
             book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
             const value = solanaWithdrawValueUsdg(item.valuation, item.amountRaw, now, this.pythGeneration);
-            if (value !== null) { const out = value * fromPosition / amount, peak = raw(book.hwmRaw); book.hwmRaw = (peak > out ? peak - out : 0n).toString(); }
+            if (value !== null) {
+              const worth = value * fromPosition / amount, out = worth < basis ? worth : basis < 0n ? 0n : basis, peak = raw(book.hwmRaw);
+              book.hwmRaw = (peak > out ? peak - out : 0n).toString();
+            }
           }
         }
         const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-external',?,?,?) ON CONFLICT DO NOTHING")
