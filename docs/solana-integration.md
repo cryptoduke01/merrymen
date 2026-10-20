@@ -592,7 +592,11 @@ drops by the lower of its value when recorded and its prorated cost basis, so
 owners should record promptly. A sweep that also took an unbooked deposit books
 that inflow first (evidence `external-in:<signature>:<mint>`). An in-app
 withdrawal the owner already recorded this way is never submitted or booked
-again.
+again. Recording may lower the book while an in-app withdrawal is prepared;
+the store re-checks every owner withdrawal against the book under its lock,
+when prepared and again when signed, so one that the book no longer covers is
+refused before it is saved or sent ("The withdrawal exceeds the recorded vault
+balance…"), and a withdrawal that lands can always be booked.
 
 **Owner recovery without Merrymen.** `merrymen solana-recover` (or `npm run
 solana:recover`) reads the owner key from a file or standard input, never the

@@ -16,6 +16,7 @@ import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, so
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, solanaOwnerEpochOffset, solanaPendingOwnerScopes,
   solanaPendingOwnerTransactions } from "./solana-trading-store";
 import { SOLANA_SYSTEM_PROGRAM } from "../../packages/core/src/solana-live";
+import { SOLANA_WITHDRAWAL_ABOVE_BOOK } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -1103,6 +1104,29 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal((await g.store.setup())!.status, "finalized");
     assert.equal(BigInt(gStart.cashRaw) - BigInt((await g.store.liveBook())!.cashRaw), 1_000_000n);
     assert.equal(await g.db.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id=?").get(signature), undefined, "no second evidence row");
+  });
+  test(`${dialect}: an owner withdrawal larger than the book is never saved, unsigned or signed, so one that lands can always be booked`, options, async t => {
+    const f = await fixture(t, dialect);
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "90000000",
+      cashRaw: "90000000", wsolRaw: "10", quarantinedWsolRaw: "5", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW }));
+    const withdraw = (mint: string, amountRaw: string, extra: object = {}) => ({ ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint, amountRaw, ...extra });
+    // At prepare: never more than the book (WSOL: position, quarantine and what this transaction syncs).
+    await assert.rejects(f.store.saveSetup(withdraw(SOLANA_USDG_MINT, "90000001")), (error: unknown) => error instanceof Error && error.message === SOLANA_WITHDRAWAL_ABOVE_BOOK);
+    await assert.rejects(f.store.saveSetup(withdraw(SOLANA_WRAPPED_SOL_MINT, "21", { syncedWsolRaw: "5" })), (error: unknown) => error instanceof Error && error.message === SOLANA_WITHDRAWAL_ABOVE_BOOK);
+    assert.equal(await f.store.saveSetup(withdraw(SOLANA_WRAPPED_SOL_MINT, "20", { syncedWsolRaw: "5" })), true);
+    // The book drops under a prepared withdrawal: 60 USDG recorded as withdrawn outside Merrymen meanwhile.
+    const prepared = withdraw(SOLANA_USDG_MINT, "90000000");
+    assert.equal(await f.store.saveSetup(prepared), true);
+    await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: base58Encode(new Uint8Array(64).fill(8)), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "60000000" }] });
+    // Its signed save is refused: saved pending, its landing would exceed the book and hold everything forever.
+    await assert.rejects(f.store.saveSetup({ ...prepared, signature: "withdraw-above-book", signedTransactionBase64: "c2lnbmVk", status: "pending" }),
+      (error: unknown) => error instanceof Error && error.message === SOLANA_WITHDRAWAL_ABOVE_BOOK);
+    assert.equal((await f.store.setup())!.signature, undefined);
+    // What the book still covers is saved and signed as before.
+    const fits = withdraw(SOLANA_USDG_MINT, "30000000");
+    await saveSignedSetup(f.store, fits, "withdraw-fits");
+    await f.store.finishSetup("withdraw-fits", "finalized", 1004);
+    assert.equal((await f.store.liveBook())!.cashRaw, "0");
   });
 }
 

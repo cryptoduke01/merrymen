@@ -401,6 +401,8 @@ export function solanaExpiredAttemptAllowance(env: Readonly<Record<string, strin
   return Number(value);
 }
 /** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
+/** An owner withdrawal larger than the recorded vault balance is never saved: it could not be booked once it landed. */
+export const SOLANA_WITHDRAWAL_ABOVE_BOOK = "The withdrawal exceeds the recorded vault balance, which changed since it was prepared. Prepare it again.";
 export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.";
 /**
  * How proven-expired attempts use one account's daily operations at `nowMs`, by
@@ -1238,6 +1240,18 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (setup.kind !== "revoke" && await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before an owner transaction.");
       if (setup.kind === "withdraw" || setup.kind === "withdraw-sol") {
         if (setup.priorSequence === undefined) refuse("Prepare the withdrawal again.");
+        // Under the lock, at both saves: never more than the book records (plus native SOL this
+        // transaction syncs into WSOL), which finishSetup must be able to book once it lands. Recording a
+        // withdrawal made outside Merrymen may lower the book while this one is prepared (it may be this
+        // very transaction, broadcast by the wallet itself); then its signed save is refused here, so it is
+        // never saved pending with an amount its booking would refuse forever.
+        if (setup.kind === "withdraw" && setup.mint && setup.amountRaw) {
+          const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "book_json");
+          // The signed save is held to what was prepared and measured, whatever copy it is handed.
+          const synced = raw((setup.signature ? previous?.syncedWsolRaw : setup.syncedWsolRaw) ?? "0");
+          const recorded = !book ? null : setup.mint === SOLANA_USDG_MINT ? raw(book.cashRaw) : raw(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
+          if (recorded !== null && raw(setup.amountRaw, false) > recorded) refuse(SOLANA_WITHDRAWAL_ABOVE_BOOK);
+        }
         const trades = await tx.prepare("SELECT sequence,status FROM solana_runtime_submissions WHERE vault=? AND status IN ('pending','finalized')").all(setup.vault) as Array<{ sequence: string; status: string }>;
         // Its sequence was read before this lock; a trade at or after it means the read is stale.
         if (trades.some(t => t.status === "pending" || raw(t.sequence) >= raw(setup.priorSequence!))) refuse("The vault changed while the withdrawal was prepared. Prepare it again.");

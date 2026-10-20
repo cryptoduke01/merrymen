@@ -28,7 +28,8 @@ import { address as kitAddress, getProgramDerivedAddress, appendTransactionMessa
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_ABOVE_BOOK,
+  SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 /** A Token-2022 USDG mint carrying the TransferHook extension (type 14): the issuer holds its authority, `hook` names the program or none. */
@@ -631,6 +632,28 @@ test("an in-app withdrawal the wallet broadcast itself, recorded as made outside
     const store = new SolanaTradingStore(f.db, f.scope);
     assert.equal((await store.liveBook())!.cashRaw, "89000000"); assert.equal((await store.setup())!.signature, undefined);
     assert.equal(f.controls.sends, 0, "nothing was sent");
+  } finally { f.raw.close(); }
+});
+
+test("a withdrawal made outside Merrymen recorded while an in-app one is prepared can never wedge the account: the in-app one, now above the book, is refused before it is saved or sent", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); f.controls.sequence = 3n; await cashBook(f);
+    // The owner prepares a 90 USDG withdrawal: the whole book, and what the vault holds.
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000000" });
+    // Meanwhile 60 USDG left outside Merrymen and a 60 USDG deposit refilled the vault; the owner records the withdrawal.
+    const outside = await outsideWithdrawal(f, SOLANA_USDG_MINT, 60_000_000n, [90_000_000n, 30_000_000n]);
+    f.controls.sequence = 4n;
+    assert.equal((await f.app.recordExternalWithdrawals(f.scope, { signatures: [outside] })).book.cashRaw, "30000000");
+    // The prepared 90 USDG is now above the book: its signed bytes are refused, never saved pending, never sent.
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(prepared.transactionBase64) }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "not-saved" && error.message === SOLANA_WITHDRAWAL_ABOVE_BOOK);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.setup())!.signature, undefined); assert.equal(f.controls.sends, 0);
+    // Nothing is held: no owner transaction awaits confirmation, and the owner prepares again.
+    f.providers.primary = null; f.providers.fallback = null;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction ?? null, null);
+    assert.ok((await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "30000000" })).transactionBase64);
   } finally { f.raw.close(); }
 });
 
