@@ -6033,8 +6033,9 @@ export function setKillConfirmForTest(fn: (tenant: `0x${string}`) => Promise<voi
 
 /**
  * A Telegram kill stops the tenant's Solana strategy as well as its grant
- * (the separate Solana worker reads only the binding). It throws when it
- * cannot, and the kill then stays pending.
+ * (the separate Solana worker reads only the binding). It runs after the
+ * grant's removal, and throws when it cannot: the grant stays removed, and the
+ * kill stays pending until a later pass stops Solana.
  */
 let stopSolana: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => stopSolanaForKill(tenant);
 /** Test seam: replace the Solana stop. */
@@ -6046,8 +6047,9 @@ export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unkn
  * Carry out one tenant's pending Telegram kill, if it has one. Called from
  * reconcile, from the three-second order ferry and on shutdown. They can
  * overlap, which is safe: the DELETE is conditional and atomic, so exactly
- * one call sees `removed` and confirms to the owner. The Solana stop runs
- * first on every pass and is idempotent.
+ * one call sees `removed` and confirms to the owner (or, when its Solana stop
+ * failed, the call that finishes it: honourKillRequest). The Robinhood grant
+ * goes first; the Solana stop runs after it on every pass and is idempotent.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
   const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec, () => stopSolana(tenant));
@@ -6949,6 +6951,13 @@ export async function reconcile(): Promise<void> {
       const current = await getGrantStore().get(tenant as `0x${string}`);
       if (current || localMemoryWriterPresent(tenant)) continue;
       const home = childHome(tenant);
+      // A TELEGRAM KILL NOT CARRIED OUT YET KEEPS ITS HOME. Its grant is removed
+      // first (honourKillRequest), so the tenant is no longer wanted while its
+      // Solana stop may still be failing; the pending request is what retries
+      // that stop, and wiped with the home it would never run again. Carried out
+      // now, the home goes below as before; still failing, it is kept for the
+      // order ferry and the next pass.
+      if (killRequested(home) && (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome === "failed") continue;
       scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true });
       forgetTgGroupsHome(home, log);
       forgetPersonalMemoryHome(home, log);

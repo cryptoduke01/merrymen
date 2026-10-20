@@ -271,10 +271,12 @@ records configuration requirements; no service has been deployed by this work.
 tenant's Solana strategy off as well as removing the RH grant: the strategy is
 saved disabled with a revision bump, which also refuses any autonomous admission
 already in flight. A self-hosted kill stops every strategy in the local accounts
-file. If the Solana write fails the kill is not reported done: the web returns
+file. Both remove the RH grant first, so a Solana fault never keeps it stored.
+If the Solana write fails the kill is not reported done: the web returns
 "Kill incomplete" and a retry is safe, and the orchestrator keeps the Telegram
-request pending (nothing arms, no ✅) and retries on its next pass. A kill does
-not revoke the on-chain session; the owner's revoke does that.
+request pending (nothing arms, no ✅, and the child's home is kept) and retries
+on its next pass, which sends the ✅ once the strategy is off. A kill does not
+revoke the on-chain session; the owner's revoke does that.
 
 An **operator hold** stops all new Solana trades, paper or live, manual or
 automatic, for one tenant or everyone, within one worker tick and without a
