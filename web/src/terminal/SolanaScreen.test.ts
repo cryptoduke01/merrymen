@@ -1937,8 +1937,8 @@ test("a reviewed owner transaction not signed in time is discarded without openi
       if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
       throw new Error("Unexpected fixture route");
     };
-    await render(); await ui.click("Withdraw to my wallet");
-    for (let i = 0; i < 20 && !ui.container.textContent!.includes("Review before your wallet opens"); i++) await act(async () => { await Promise.resolve(); });
+    // press settles on the real clock (WebCrypto and the prepare request), so a slow runner still shows the review.
+    await render(); await press("Withdraw to my wallet");
     assert.match(ui.container.textContent!, /Review before your wallet opens/);
     await act(async () => { mock.timers.tick(30_000); });
     assert.match(ui.container.textContent!, /Sign within about 15 seconds/);
