@@ -23,6 +23,7 @@ import {
   secretScanBudget,
   solanaSecretIn,
   solanaSecretsIn,
+  type SecretScanBudget,
 } from "./ids";
 import { CASH } from "./tokens";
 
@@ -294,6 +295,12 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     return { ok: false, how };
   }
 
+  it("finishes on a run of millions of characters (review RHS, round 1: the run regex threw RangeError)", () => {
+    const run = "a".repeat(6_000_000);
+    assert.deepEqual(onchainIdsIn(`${run} ${SOLANA_USDG_MINT}`, glued).map((h) => h.value), [SOLANA_USDG_MINT]);
+    assert.deepEqual(onchainIdsIn(`${run}${SOLANA_USDG_MINT}`, glued).map((h) => h.value.length), [run.length + SOLANA_USDG_MINT.length], "glued to its end: the whole run");
+  });
+
   it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {
     // Runs that hold no 43- or 44-character key window (short of one, or hex alone), and runs that hold a signature.
     const noKeyRun = (i: number) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9));
@@ -485,6 +492,22 @@ describe("Solana secret detection", () => {
     // A signature glued to words stays a signature, and so does ordinary text.
     assert.deepEqual(solanaSecretsIn(`landed tx${sig}done`), []);
     assert.deepEqual(solanaSecretsIn(`#${"ToTheMoonAndBackAgainAndAgainForeverAndEverFam".repeat(4)}`), []);
+  });
+
+  it("finishes on a run of millions of characters, and reads a scan that cannot finish as a secret", () => {
+    // Review RHS, round 1: the run regex threw RangeError (out of stack) from about 5.6 million characters,
+    // and send_file swallowed the throw and sent the file unscanned.
+    const { secretB58: key } = keypair(67);
+    const run = "a".repeat(6_000_000);
+    assert.deepEqual(solanaSecretsIn(`${run} ${key}`), [key]);
+    assert.deepEqual(solanaSecretsIn(`${run}${key}`), [key], "glued to its end");
+    const mixed = Array.from({ length: 6_000_000 }, (_, i) => "ABCDEFGHJKLMNPQRSTUVWXYZghijkmnopqrstuvwxyz"[(i * 7919) % 42]).join("");
+    assert.deepEqual(solanaSecretsIn(`${mixed} ${key}`), [key], "a run that spends the window budget");
+    const text = `id: ${key}`;
+    const overflow = (): never => { throw new RangeError("Maximum call stack size exceeded"); };
+    const broken = { get left(): number { return overflow(); }, set left(_: number) {}, get windows(): never { return overflow(); } };
+    assert.deepEqual(solanaSecretsIn(text, broken as SecretScanBudget), [text], "fails closed, the whole text");
+    assert.equal(solanaSecretIn(`a signature, no secret: ${keypair(71).sig}`, broken as SecretScanBudget), true);
   });
 
   it("reads a megabyte of key-shaped text in bounded time", () => {

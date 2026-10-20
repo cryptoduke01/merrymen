@@ -253,8 +253,26 @@ const EVM_IN_TEXT = /0x[0-9a-fA-F]{64}(?![0-9a-fA-F])|0x[0-9a-fA-F]{40}(?![0-9a-
 const BASE58_IN_TEXT = /(?<![0-9A-Za-z])[1-9A-HJ-NP-Za-km-z]{32,88}(?![0-9A-Za-z])/g;
 const SOLANA_LINK = /\b(?:https?:\/\/)?(?:www\.)?(?:solscan\.io|explorer\.solana\.com|solana\.fm|solanabeach\.io|orb\.helius\.dev)\/[^\s)>\]]*/gi;
 
-/** A maximal run of base58 characters, wherever it sits (the glued scan). */
-const BASE58_RUN = /[1-9A-HJ-NP-Za-km-z]{32,}/g;
+/** Base58's characters by code (B58): 1 for each. */
+const B58_CODE = Uint8Array.from({ length: 128 }, (_, code) => (B58.includes(String.fromCharCode(code)) ? 1 : 0));
+/**
+ * Every maximal run of base58 characters at least `min` long, wherever it
+ * sits, as [start, end) in order (the glued scans). A loop, never a regex:
+ * V8 runs /[…]{32,}/ out of stack on a run of about 5.6 million characters
+ * and throws RangeError, and a scan that throws is a check skipped wherever
+ * its caller swallows the error (review RHS, round 1).
+ */
+function* base58Runs(text: string, min: number): Generator<[number, number]> {
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && B58_CODE[text.charCodeAt(i)] === 1) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= min) yield [start, i];
+    start = -1;
+  }
+}
 function hexDigit(code: number): boolean {
   return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
 }
@@ -371,9 +389,8 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
   for (const m of text.matchAll(SOLANA_LINK)) hits.push({ family: "solana", shape: "link", value: m[0] });
   if (scan.glued) {
     const budget = { left: GLUED_DECODES };
-    for (const m of text.matchAll(BASE58_RUN)) {
-      const s = m[0];
-      const start = m.index!;
+    for (const [start, end] of base58Runs(text, 32)) {
+      const s = text.slice(start, end);
       // "0x" then hex alone is that hex (an EVM id, or one split at its zeros), never a base58 id
       // glued to anything. With anything else after it the x is the run's own: a key can begin
       // with one ("10x<key>", "CA0x<key>"), and dropping it hid such a key from every window.
@@ -386,7 +403,12 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
         // Glued: the whole run counts only when it is neither hex alone nor filler.
         whole = hexFrom(s, 0) || filler(s) ? null : base58Shape(s);
       }
-      const inside = whole ?? (s.length > 32 ? gluedShape(s, budget) : null);
+      // A run of hex alone or of filler has no window gluedShape would read: skipped whole, in O(n).
+      let inside: "address" | "hash" | "unread" | null = whole;
+      if (!inside && s.length > 32 && !hexFrom(s, 0) && !filler(s)) {
+        // Its tables are O(run): a run too long to allocate them for is an id unread, never no id.
+        try { inside = gluedShape(s, budget); } catch { inside = "unread"; }
+      }
       if (inside) hits.push({ family: "solana", shape: inside === "hash" ? "hash" : "address", value: s });
     }
     return hits;
@@ -571,15 +593,25 @@ function secretWindows(run: string, budget: SecretScanBudget, found: string[]): 
  * its run) is decoded, and a keypair is recognised by its own public key, so
  * a signature, an address or ordinary text is never one. The only false alarm
  * is a run past the budget, read as a secret unread.
+ *
+ * FAIL CLOSED. A scan that cannot finish reads the whole text as a secret:
+ * the Telegram agent's send_file once swallowed a throw here and sent the file
+ * unscanned (review RHS, round 1).
  */
 export function solanaSecretsIn(text: unknown, budget: SecretScanBudget = secretScanBudget()): string[] {
   if (typeof text !== "string" || text.length < 64) return [];
-  const found: string[] = [];
-  for (const m of text.matchAll(BASE58_RUN)) {
-    // 64 bytes never encode shorter than 64 characters, so a shorter run (an
-    // address) is no candidate and costs nothing.
-    if (m[0].length >= 64) secretWindows(m[0], budget, found);
+  try {
+    return secretsIn(text, budget);
+  } catch {
+    return [text];
   }
+}
+
+function secretsIn(text: string, budget: SecretScanBudget): string[] {
+  const found: string[] = [];
+  // 64 bytes never encode shorter than 64 characters, so a shorter run (an
+  // address) is no candidate and costs nothing.
+  for (const [at, end] of base58Runs(text, 64)) secretWindows(text.slice(at, end), budget, found);
   for (const m of text.matchAll(BYTE_ARRAY_64)) {
     if (budget.left-- <= 0) found.push(m[0]);
     else {

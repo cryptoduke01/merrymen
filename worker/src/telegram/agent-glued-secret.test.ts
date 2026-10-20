@@ -29,3 +29,10 @@ test("a glued Solana secret key is redacted and refused, and only the key goes",
     assert.equal(containsSecret(text, []), false);
   }
 });
+
+test("send_file's screen finishes on a file of one 6-million-character run and still finds the 0x key in it", () => {
+  // Review RHS, round 1: the base58 run regex threw RangeError here, and send_file swallowed it and sent the file.
+  const file = `${"a".repeat(6_000_000)}\n0x${"ab".repeat(32)}\n`;
+  assert.equal(containsSecret(file, []), true);
+  assert.equal(redactSecrets(file, []).endsWith("\n[redacted]\n"), true);
+});
