@@ -261,3 +261,14 @@ test("paper write-off refusals are 409s in fixed owner words; other book rules k
   const missing = await solanaResponse(async () => { throw new SolanaPaperServiceError("This Solana paper ledger has no owner write-off."); });
   assert.equal(missing.status, 503); assert.equal((await missing.json()).error, "Solana trading is not available.");
 });
+
+test("prepare-side 'pending' refusals stay 409 refusals: neither notSaved nor an unknown outcome", async () => {
+  const runtime = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-app-runtime.ts", import.meta.url)), "utf8");
+  for (const message of ["Refresh the pending owner transaction before preparing another.", "The permission is awaiting final confirmation."]) {
+    assert.ok(runtime.includes(JSON.stringify(message)), `still raised: ${message}`);
+    const response = await solanaResponse(async () => { throw new SolanaAppRuntimeError("pending", message); });
+    assert.equal(response.status, 409, message);
+    assert.deepEqual(await response.json(), { error: message, ownerFacing: true }, message);
+  }
+  assert.ok(runtime.includes(`fail("Refresh the pending owner transaction before preparing another.", "pending")`));
+});
