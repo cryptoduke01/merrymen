@@ -316,6 +316,30 @@ test("a WSOL withdrawal is valued from the runtime's generation, and a store kee
   assert.equal((await same.setup())!.withdrawValuation?.reference.reference.account, UPGRADED.account);
 });
 
+test("a WSOL withdrawal still prepares while the Pyth generation setting names none: no Pyth read, no valuation, and the [alert] is said", async t => {
+  processGeneration(t, undefined);
+  // The owner's way out never depends on the setting: the valuation is dropped and the high-water mark
+  // stays put (the conservative direction), as for any other unreadable value.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  f.served.set(f.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000)); // the owner pays for its own transaction
+  await clearReferenceAlerts();
+  let prepared: { transactionBase64: string } | undefined;
+  const said = await referenceAlerts(t, async () => {
+    prepared = await f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }).prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
+  });
+  assert.ok(prepared && prepared.transactionBase64.length > 0);
+  assert.deepEqual(f.pythReads, []);
+  const saved = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+  assert.deepEqual([saved.kind, saved.mint, saved.amountRaw, saved.withdrawValuation], ["withdraw", SOLANA_WRAPPED_SOL_MINT, "100000000", undefined]);
+  assert.deepEqual(said, [CONFIG_ALERT]);
+  // The same withdrawal with the setting unset is valued, from the default generation.
+  const valued = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  valued.served.set(valued.scope.owner, () => rpcAccount(Buffer.alloc(0), SYSTEM, false, 1_000_000_000));
+  await valued.runtime().prepareOwnerAction(valued.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
+  assert.deepEqual(valued.pythReads, [CURRENT.account]);
+  assert.equal((await new SolanaTradingStore(valued.db, valued.scope).setup())!.withdrawValuation?.reference.referenceOut, "15000000");
+});
+
 test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {
   // The process names the other generation: a read or check that consulted it would refuse these trades.
   processGeneration(t, "current");
