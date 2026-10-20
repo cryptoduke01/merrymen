@@ -21,6 +21,16 @@
  *   while any provider the operator has not set aside could not be read: an
  *   unreadable answer may be the evidence that it landed (a finalized status
  *   whose receipt cannot be used is refused as unreadable, not as unseen).
+ * - A trade whose vault sequence moved for another reason (an owner withdrawal
+ *   made outside Merrymen takes no expected sequence) can never run again, but
+ *   the move may have been its own. Here alone, each provider is asked to prove
+ *   from the vault's own debit log that it never ran (observeSolanaSubmission's
+ *   proveSequenceConsumed): a landed swap always leaves a debit inside its
+ *   signed deadline window. That expiry ("sequence-consumed") is booked on the
+ *   same terms as any other: two providers on their own hostnames agree, none
+ *   has seen the signature and none could not be read. The worker's automatic
+ *   reconciliation never books it, and the store refuses it from anything but
+ *   a recorded operator decision.
  * - When one provider keeps reporting a final outcome the others contradict,
  *   or cannot be read at all, the operator can set it aside by name (--exclude
  *   primary|fallback|third). Its view is still read, shown and recorded with
@@ -163,6 +173,11 @@ function describeObservation(view: SolanaResolveView): string {
       : `failed on chain at slot ${settlement.slot}, fee ${settlement.feeLamports} lamports, no tokens moved`;
   }
   const proof = settlement.expiryProof;
+  if (proof.reason === "sequence-consumed") {
+    const start = Number(proof.debitWindowStart), from = Number.isSafeInteger(start) && start >= 0 ? new Date(start * 1000).toISOString() : "the start of its signed deadline window";
+    return `never ran: blockhash expired at finalized height ${proof.blockHeight}; the vault sequence moved to ${proof.vaultSequence} outside this trade, `
+      + `and the vault's debit log holds no swap at or after ${from}, the earliest it could have run`;
+  }
   return proof.reason === "session-revoked" ? `never ran: the session was revoked (epoch ${proof.sessionEpoch}) with vault sequence ${proof.vaultSequence} unchanged`
     : `never ran: blockhash expired at finalized height ${proof.blockHeight} with vault sequence ${proof.vaultSequence} unchanged`;
 }
@@ -249,7 +264,7 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   const views: SolanaResolveView[] = [];
   for (const provider of input.providers) {
     const base = { label: provider.label, hostId: hostId(provider.host), ...(provider.label === input.exclude ? { excluded: true as const } : {}) };
-    try { views.push({ ...base, observation: await provider.read(read => observe(read, submission, owner, nowMs)) }); }
+    try { views.push({ ...base, observation: await provider.read(read => observe(read, submission, owner, nowMs, { proveSequenceConsumed: true })) }); }
     catch (error) { views.push({ ...base, error: viewError(error) }); }
   }
   for (const view of views) lines.push(`  ${view.label}: ${describe(view)}`);

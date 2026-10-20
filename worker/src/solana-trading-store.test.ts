@@ -1,6 +1,8 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase64EncodedWireTransaction, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -472,6 +474,23 @@ test("the expired-attempt allowance setting defaults to 0 and accepts only a who
   for (const value of ["", " 1", "01", "-1", "1.5", "97", "100", "1e1", "many"]) {
     assert.throws(() => solanaExpiredAttemptAllowance({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: value }), /allowance setting is misconfigured/, JSON.stringify(value));
   }
+});
+
+/** Signed bytes (unsigned, which is all the store and the deadline decoder read) whose execute_swap carries `deadline` (unix seconds). */
+function bytesWithDeadline(deadline: bigint): string {
+  const data = Buffer.alloc(48); data.writeBigInt64LE(deadline, 40);
+  return getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(24) as Blockhash, lastValidBlockHeight: 1200n },
+    setTransactionMessageFeePayer(address(key(23)), appendTransactionMessageInstructions([{ programAddress: address(PROGRAM), accounts: [], data }], createTransactionMessage({ version: 0 }))))));
+}
+
+test("an expiry proven from the vault's debit log (sequence-consumed) is never booked by automatic settlement", async t => {
+  const f = await fixture(t), pending = submission("consumed");
+  pending.signedTransactionBase64 = bytesWithDeadline(1030n);
+  assert.equal(await f.store.recordSigned(pending), true);
+  const consumed: SolanaLiveSettlement = { status: "expired", signature: pending.signature, slot: 1001, feeLamports: null, amountIn: "0", amountOut: "0", finalizedAtMs: NOW + 1,
+    expiryProof: { vaultSequence: "1", sessionEpoch: "1", blockHeight: "1201", reason: "sequence-consumed", debitWindowStart: "1000" } };
+  await assert.rejects(f.store.settle(OWNER, "consumed", pending.signature, consumed), /Invalid Solana expiry evidence/);
+  assert.equal((await f.store.get(OWNER, "consumed"))!.status, "pending");
 });
 
 /** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */

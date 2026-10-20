@@ -8,7 +8,7 @@ import { openSecret, sealSecret } from "./store-crypto";
 import { applySolanaPaperCommit, applySolanaPaperWriteOff, solanaPaperIntentFingerprint, type SolanaPaperBook,
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOffRecord } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
-import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
+import { solanaDebitWindowStart, type SolanaLiveJournal, type SolanaLiveRecord, type SolanaLiveSettlement, type SolanaSignedSubmission } from "./solana-executor";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
@@ -256,6 +256,10 @@ export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope,
   const rows = await db.prepare("SELECT status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string }>;
   const expired = rows.filter(r => r.status === "expired").length;
   return { expired, counted: Math.max(0, expired - allowance), operations: rows.length - expired };
+}
+/** The debit window a sequence-consumed proof must name for this submission; null when its signed bytes cannot be read. */
+function solanaDebitWindowStartOf(submission: SolanaSignedSubmission): string | null {
+  try { return solanaDebitWindowStart(submission).toString(); } catch { return null; }
 }
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
@@ -659,9 +663,15 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const input = raw(settlement.amountIn), output = raw(settlement.amountOut);
       if (settlement.status === "expired") {
         const proof = settlement.expiryProof;
+        // A sequence another transaction consumed is proven from the vault's debit log (observeSolanaSubmission),
+        // and only an operator's recorded decision books it (solana-resolve.ts): never the worker's own settlement.
+        const consumed = proof?.reason === "sequence-consumed";
         if (settlement.feeLamports !== null || input !== 0n || output !== 0n || !proof ||
-            proof.vaultSequence !== prior.submission.vaultSequence || raw(proof.sessionEpoch) < raw(prior.submission.sessionEpoch) ||
-            !(proof.reason === "session-revoked" && raw(proof.sessionEpoch) > raw(prior.submission.sessionEpoch) ||
+            (consumed ? resolutionId === null || raw(proof.vaultSequence) <= raw(prior.submission.vaultSequence) ||
+              raw(proof.blockHeight) <= raw(prior.submission.lastValidBlockHeight) || proof.debitWindowStart !== solanaDebitWindowStartOf(prior.submission)
+              : proof.vaultSequence !== prior.submission.vaultSequence) ||
+            raw(proof.sessionEpoch) < raw(prior.submission.sessionEpoch) ||
+            !(consumed || proof.reason === "session-revoked" && raw(proof.sessionEpoch) > raw(prior.submission.sessionEpoch) ||
               proof.reason === "blockhash-expired" && raw(proof.blockHeight) > raw(prior.submission.lastValidBlockHeight))) refuse("Invalid Solana expiry evidence.");
         book.unresolvedFeeCount = (book.unresolvedFeeCount ?? 0) + 1;
         book.reservedUnknownFeeLamports = (raw(book.reservedUnknownFeeLamports ?? "0") + raw(prior.submission.feeLamports)).toString();

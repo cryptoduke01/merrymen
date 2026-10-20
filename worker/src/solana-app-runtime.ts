@@ -931,7 +931,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       try { pythGeneration = requireSolanaPythGeneration(env, now()); } catch { return fail("The independent SOL price source (Pyth generation) is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
-      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration, referenceToleranceBps: toleranceBps,
+      // The vault is read no earlier than the book and the latest owner transaction seen to finalize: a lagging
+      // provider cannot hand the executor a sequence a withdrawal already consumed (withdraw-sol moves no book slot).
+      const bookNow = await s.liveBook(), ownerNow = await s.setup();
+      const minSnapshotSlot = Math.max(bookNow?.slot ?? 1, ownerNow?.status === "finalized" && Number.isSafeInteger(ownerNow.finalizedSlot) && ownerNow.finalizedSlot! > 0 ? ownerNow.finalizedSlot! : 1);
+      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration, referenceToleranceBps: toleranceBps, minSnapshotSlot,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
         journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,

@@ -1,10 +1,12 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase58Encoder, getBase64EncodedWireTransaction, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import type { SolanaLiveSettlement, SolanaObservation, SolanaSignedSubmission } from "./solana-executor";
@@ -163,6 +165,78 @@ test("an agreed expiry books the lowest finalized slot any agreeing provider rea
   assert.equal(result.booked, true);
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.settlement!.slot, 1002);
   assert.equal((await f.store.liveBook())!.slot, 1002);
+});
+
+/** Signed bytes (unsigned, which is all the deadline decoder reads) whose execute_swap carries `deadline` (unix seconds). */
+function bytesWithDeadline(deadline: bigint): string {
+  const data = Buffer.alloc(48); data.writeBigInt64LE(deadline, 40);
+  return getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(24) as Blockhash, lastValidBlockHeight: 1200n },
+    setTransactionMessageFeePayer(address(key(23)), appendTransactionMessageInstructions([{ programAddress: address(PROGRAM), accounts: [], data }], createTransactionMessage({ version: 0 }))))));
+}
+/** The vault as a finalized getAccountInfo answer: sequence `seq`, epoch 1, and one debit per cluster timestamp. */
+function vaultAt(seq: bigint, debits: bigint[]) {
+  const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8; b[p++] = 2; b[p++] = 255;
+  for (const v of [OWNER, SESSION]) { Buffer.from(getBase58Encoder().encode(v)).copy(b, p); p += 32; }
+  for (const v of [1n, seq, 4_000n, 10_000_000n, 50_000_000n, 50_000_000n, 120_000_000n]) { b.writeBigUInt64LE(v, p); p += 8; }
+  b.writeUInt16LE(20, p); p += 2; p += 1; b.writeUInt32LE(debits.length, p); p += 4;
+  for (const timestamp of debits) { b.writeBigInt64LE(timestamp, p); b.writeBigUInt64LE(1_000_000n, p + 8); p += 24; }
+  return { owner: PROGRAM, executable: false, lamports: 10_000_000, data: [b.toString("base64"), "base64"], space: b.length };
+}
+/** A provider answering with the executor's own observation over a chain where the trade's blockhash expired and the vault is `vault`. */
+function chainProvider(label: string, vault: ReturnType<typeof vaultAt>): SolanaResolveProvider {
+  const read = async (method: string) => method === "getSignatureStatuses" ? { context: { slot: 1002 }, value: [null] } : method === "getTransaction" ? null
+    : method === "getEpochInfo" ? { absoluteSlot: 1300, blockHeight: 1250 } : method === "getAccountInfo" ? { context: { slot: 1300 }, value: vault } : assert.fail(method);
+  return { label, host: `${label}.example`, read: async operation => operation(read as never) };
+}
+
+test("a trade whose vault sequence moved for another reason is booked expired by the operator only on two providers' debit-log proof (audit live-M1)", async t => {
+  const f = await fixture(t);
+  // The stuck trade's signed bytes carry a deadline of unix 1030: it could have run only at a cluster time from 1000 to 1029.
+  const signed = { ...f.pending, signedTransactionBase64: bytesWithDeadline(1030n) };
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify(signed));
+  // An owner withdrawal outside Merrymen moved the sequence to 1; the debit log holds only a swap from long before.
+  const moved = vaultAt(1n, [500n]);
+  // One provider's log holds a debit inside the window: it may have run. Nothing is booked.
+  const disputed = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value,
+    providers: [chainProvider("primary", moved), chainProvider("fallback", vaultAt(1n, [1010n]))], book: { operator: "milla", reason: "recovery-tool withdrawal" } });
+  assert.equal(disputed.booked, false); assert.match(disputed.lines.join("\n"), /fallback: pending: seen, not finalized/);
+  assert.match(disputed.lines.at(-1)!, /Only one provider reports this final outcome/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
+  // Both providers prove it: shown, then booked on the operator's record.
+  const both = [chainProvider("primary", moved), chainProvider("fallback", moved)];
+  const shown = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value, providers: both });
+  assert.match(shown.lines.join("\n"), /primary: never ran: blockhash expired at finalized height 1250; the vault sequence moved to 1 outside this trade, and the vault's debit log holds no swap at or after 1970-01-01T00:16:40\.000Z/);
+  assert.equal(shown.booked, false);
+  const booked = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", now: () => f.clock.value, providers: both,
+    book: { operator: "milla", reason: "recovery-tool withdrawal; checked the debit log" } });
+  assert.equal(booked.booked, true); assert.match(booked.lines.at(-1)!, /^Booked a proven expiry, recorded as decided by milla\.$/);
+  const record = (await f.store.get(OWNER, "stuck-1"))!;
+  assert.equal(record.status, "expired");
+  assert.ok(record.settlement?.status === "expired" && record.settlement.expiryProof.reason === "sequence-consumed" && record.settlement.expiryProof.debitWindowStart === "1000");
+  // Its unknown fee stays reserved, and the reservation is free for a new trade.
+  assert.equal((await f.store.liveBook())!.unresolvedFeeCount, 1);
+  const next = submission("after-consumed"); next.vaultSequence = "1"; next.risk.slot = 1300; assert.equal(await f.store.recordSigned(next), true);
+});
+
+test("the store re-checks a sequence-consumed proof against the reservation even on an operator's decision", async t => {
+  const f = await fixture(t);
+  const signed = { ...f.pending, signedTransactionBase64: bytesWithDeadline(1030n) };
+  await f.db.prepare("UPDATE solana_runtime_submissions SET submission_json=? WHERE request_id='stuck-1'").run(JSON.stringify(signed));
+  await ensureSolanaResolutionSchema(f.db, false);
+  const valid: SolanaLiveSettlement = { status: "expired", signature: signed.signature, slot: 1300, feeLamports: null, amountIn: "0", amountOut: "0", finalizedAtMs: NOW + 1,
+    expiryProof: { vaultSequence: "1", sessionEpoch: "1", blockHeight: "1250", reason: "sequence-consumed", debitWindowStart: "1000" } };
+  const proof = valid.status === "expired" ? valid.expiryProof : assert.fail();
+  const open = async (id: string) => f.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
+    VALUES(?,?,?,?,?,'expired','milla','test','{}','{}',?)`).run(id, TENANT, OWNER, "stuck-1", signed.signature, NOW);
+  for (const [label, forged] of [["another window", { ...proof, debitWindowStart: "999" }], ["no window", { ...proof, debitWindowStart: undefined }],
+    ["an unmoved sequence", { ...proof, vaultSequence: "0" }], ["a blockhash that could land", { ...proof, blockHeight: "1200" }]] as const) {
+    await open(label);
+    await assert.rejects(f.store.settleResolution(OWNER, "stuck-1", signed.signature, { ...valid, expiryProof: forged } as SolanaLiveSettlement, label), /Invalid Solana expiry evidence/, label);
+  }
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
+  await open("valid");
+  assert.equal(await f.store.settleResolution(OWNER, "stuck-1", signed.signature, valid, "valid"), true);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "expired");
 });
 
 test("an expiry is not booked while a provider has a finalized status whose receipt cannot be read, until the operator sets that provider aside", async t => {

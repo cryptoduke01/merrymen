@@ -825,3 +825,25 @@ test("a first live book's balances and slot come from both providers: a phantom 
     assert.deepEqual(await inflated.submissions(), [], label); assert.equal(inflated.sends.length, 0, label);
   }
 });
+
+test("a live trade reads the vault no earlier than the book and the latest finalized owner transaction, so a lagging provider signs nothing", async t => {
+  // The fixture's providers answer at SLOT. A native SOL withdrawal finalized past it (withdraw-sol moves no book slot).
+  for (const [finalizedSlot, admitted] of [[SLOT + 500, false], [SLOT - 1, true]] as const) {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const vault = f.vault;
+    await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, f.scope.owner, JSON.stringify({
+      kind: "withdraw-sol", amountRaw: "1000", transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800",
+      programId: PROGRAM, vault, session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 60_000, expiresAtMs: NOW - 1, signature: "owner-withdraw-sol",
+      signedTransactionBase64: "c2lnbmVk", status: "finalized", finalizedSlot, priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "1" }));
+    const trade = f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-withdraw-sol") });
+    if (admitted) { const placed = await trade; assert.ok("status" in placed && placed.status === "pending"); assert.equal(f.sends.length, 1); continue; }
+    await assert.rejects(trade, /refused: invalid-state/);
+    assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  }
+  // The book's own slot is a floor too.
+  const ahead = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const row = await ahead.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string };
+  await ahead.db.prepare("UPDATE solana_runtime_live_books SET book_json=?").run(JSON.stringify({ ...JSON.parse(row.book_json), slot: SLOT + 1 }));
+  await assert.rejects(ahead.app.trade(ahead.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "behind-the-book") }), /refused: invalid-state/);
+  assert.deepEqual(await ahead.submissions(), []); assert.equal(ahead.sends.length, 0);
+});
