@@ -30,8 +30,12 @@
  *   signature.
  * - Before booking it records the operator, their reason, the outcome and
  *   every provider's view in solana_operator_resolutions, then books through
- *   the trading store's own settle, which re-checks the evidence against the
- *   reservation. Nothing is ever booked or released any other way: there is no
+ *   the trading store's own settle (settleResolution), which re-checks the
+ *   evidence against the reservation and marks that decision booked in the
+ *   same transaction. A decision is marked booked if and only if it booked
+ *   the trade; one that did not (the worker's automatic settlement booked the
+ *   same evidence first, or its run stopped before settling) is recorded as
+ *   superseded. Nothing is ever booked or released any other way: there is no
  *   override, and the tool never signs or sends a transaction.
  *
  * Output and the durable record carry provider labels and a short hash of each
@@ -175,9 +179,11 @@ export interface SolanaResolveInput {
 }
 export interface SolanaResolveResult {
   owner: string; record: SolanaLiveRecord; views: SolanaResolveView[]; decision: SolanaResolveDecision | null;
-  /** True when this run booked the outcome (or found it already booked with the same evidence and recorded that). */
+  /** True only when this run's decision booked the outcome. */
   booked: boolean; lines: string[];
 }
+/** The refusal recorded on a decision that did not book the trade because something else booked it first. */
+export const SOLANA_RESOLUTION_SUPERSEDED = "Already booked by another path when this decision was settled or rerun; this decision did not book it.";
 
 function tenantOf(value: string | undefined): string {
   if (!value || !/^0x[0-9a-f]{40}$/.test(value)) refuse("Name the tenant as a lowercase 0x address.");
@@ -223,16 +229,20 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
     `  signature ${submission.signature}, vault sequence ${submission.vaultSequence}, last valid block height ${submission.lastValidBlockHeight}, prepared ${new Date(submission.preparedAtMs).toISOString()}`,
   ];
   if (record.status !== "pending") {
-    // A run that booked but stopped before marking its record: mark it now.
-    let marked = false;
-    if (book && record.settlement) {
-      const open = await input.db.prepare("SELECT id,settlement_json FROM solana_operator_resolutions WHERE tenant=? AND owner=? AND request_id=? AND booked_at_ms IS NULL AND refusal IS NULL ORDER BY approved_at_ms DESC")
-        .all(tenant, owner, requestId) as Array<{ id: string; settlement_json: string }>;
-      const match = open.find(row => sameSettlement(record.settlement, JSON.parse(row.settlement_json) as SolanaLiveSettlement));
-      if (match) { await input.db.prepare("UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=? AND booked_at_ms IS NULL").run(now(), match.id); marked = true; }
+    lines.push(`It is already ${record.status}; nothing is booked.`);
+    // A decision is marked booked in the same transaction that books the trade
+    // (settleResolution), so one still open on a booked trade did not book it:
+    // its run stopped before settling, and something else booked the trade.
+    // A book run records that; show writes nothing.
+    if (book) {
+      const superseded = await input.db.prepare("UPDATE solana_operator_resolutions SET refusal=? WHERE tenant=? AND owner=? AND request_id=? AND booked_at_ms IS NULL AND refusal IS NULL")
+        .run(SOLANA_RESOLUTION_SUPERSEDED, tenant, owner, requestId);
+      if (superseded.changes > 0) lines.push(`${superseded.changes === 1 ? "An open operator decision" : `${superseded.changes} open operator decisions`} for it did not book it and ${superseded.changes === 1 ? "is" : "are"} now recorded as superseded.`);
     }
-    lines.push(`It is already ${record.status}; nothing is booked.${marked ? " The operator resolution that booked it is now marked booked." : ""}`);
-    return { owner, record, views: [], decision: null, booked: marked, lines };
+    const booker = await input.db.prepare("SELECT operator,booked_at_ms FROM solana_operator_resolutions WHERE tenant=? AND owner=? AND request_id=? AND booked_at_ms IS NOT NULL")
+      .get(tenant, owner, requestId) as { operator: string; booked_at_ms: number | string } | undefined;
+    lines.push(booker ? `It was booked by an operator decision of ${booker.operator} at ${new Date(Number(booker.booked_at_ms)).toISOString()}.` : "No operator decision booked it.");
+    return { owner, record, views: [], decision: null, booked: false, lines };
   }
   const nowMs = now();
   const views: SolanaResolveView[] = [];
@@ -257,26 +267,36 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
   await input.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, tenant, owner, requestId, submission.signature, decision.settlement.status, book.operator, book.reason,
     JSON.stringify(decision.settlement), JSON.stringify(evidence), now());
-  try { await store.settle(owner, requestId, submission.signature, decision.settlement); }
+  let bookedHere: boolean;
+  try { bookedHere = await store.settleResolution(owner, requestId, submission.signature, decision.settlement, id); }
   catch (error) {
-    // An error after the store committed (a lost reply) must not be recorded as a refusal: read what is booked now.
+    // An error after the store committed (a lost reply) must not be recorded as a refusal. The decision is marked
+    // booked in the store's own transaction, so its record says whether this run booked; read it and the trade.
     // When that read fails too, the outcome is unknown: nothing is recorded, and the operator is told so.
-    let after: SolanaLiveRecord | null;
-    try { after = await store.get(owner, requestId); }
-    catch {
-      refuse("The settlement's reply was lost and the trade could not be read again, so it may or may not be booked. Run show to see its status; if it was booked, "
-        + "running the same book command again marks this decision booked (nothing is ever booked twice).");
+    let mark: { booked_at_ms: number | string | null } | undefined, after: SolanaLiveRecord | null;
+    try {
+      mark = await input.db.prepare("SELECT booked_at_ms FROM solana_operator_resolutions WHERE id=?").get(id) as typeof mark;
+      after = await store.get(owner, requestId);
+    } catch {
+      refuse("The settlement's reply was lost and the trade could not be read again, so it may or may not be booked. Run show to see its status, and history to see "
+        + "whether this decision booked it: a decision is marked booked if and only if it booked the trade (nothing is ever booked twice).");
     }
-    if (!after || after.status === "pending" || !sameSettlement(after.settlement, decision.settlement)) {
+    if (mark && mark.booked_at_ms !== null) bookedHere = true;
+    else if (after && after.status !== "pending" && sameSettlement(after.settlement, decision.settlement)) bookedHere = false;
+    else {
       // The store re-checks the evidence against the reservation; its refusals are fixed text.
       const refusal = error instanceof SolanaTradingStoreError ? error.message : "The settlement could not be written.";
-      await input.db.prepare("UPDATE solana_operator_resolutions SET refusal=? WHERE id=?").run(refusal, id);
+      await input.db.prepare("UPDATE solana_operator_resolutions SET refusal=? WHERE id=? AND booked_at_ms IS NULL").run(refusal, id);
       refuse(`Nothing was booked: ${refusal} The decision is recorded as refused.`);
     }
   }
-  // The outcome is booked from here on: a failure to mark the record must not read as "nothing was booked".
-  try { await input.db.prepare("UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=?").run(now(), id); }
-  catch { refuse(`Booked ${outcome}, but this decision could not be marked booked in its record. Run the same book command again to mark it; nothing is booked twice.`); }
+  if (!bookedHere) {
+    // Booked meanwhile with the same evidence by something else (the worker's automatic settlement): not this decision.
+    try { await input.db.prepare("UPDATE solana_operator_resolutions SET refusal=? WHERE id=? AND booked_at_ms IS NULL AND refusal IS NULL").run(SOLANA_RESOLUTION_SUPERSEDED, id); }
+    catch { /* It stays open, never marked booked; the next book run records it as superseded. */ }
+    lines.push(`It was booked meanwhile with the same evidence by another path, so this decision did not book it and is recorded as superseded.`);
+    return { owner, record, views, decision, booked: false, lines };
+  }
   lines.push(`Booked ${outcome}, recorded as decided by ${book.operator}.`);
   return { owner, record, views, decision, booked: true, lines };
 }

@@ -567,6 +567,23 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     return accepted;
   }
   async settle(owner: string, requestId: string, signature: string, settlement: SolanaLiveSettlement): Promise<void> {
+    await this.settleWith(owner, requestId, signature, settlement, null);
+  }
+  /**
+   * settle, for an operator's recorded decision (solana-resolve.ts): the same
+   * checks, and in the same transaction that books the trade, the decision
+   * `resolutionId` (a row of solana_operator_resolutions, still open) is
+   * marked booked. A decision is therefore marked booked if and only if it
+   * booked the trade, whatever crashes or lost replies come between. Returns
+   * false, marking nothing, when the trade is already booked with the same
+   * evidence (by the worker's automatic settlement or another run). A decision
+   * that cannot be marked books nothing.
+   */
+  async settleResolution(owner: string, requestId: string, signature: string, settlement: SolanaLiveSettlement, resolutionId: string): Promise<boolean> {
+    if (!resolutionId) refuse("The operator resolution to book this settlement is not open.");
+    return this.settleWith(owner, requestId, signature, settlement, resolutionId);
+  }
+  private async settleWith(owner: string, requestId: string, signature: string, settlement: SolanaLiveSettlement, resolutionId: string | null): Promise<boolean> {
     this.owner(owner);
     return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
@@ -575,7 +592,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (!prior || prior.submission.signature !== signature || settlement.signature !== signature) refuse("Solana settlement does not match the reserved transaction.");
       if (prior.status !== "pending") {
         if (JSON.stringify({ ...prior.settlement, finalizedAtMs: 0 }) !== JSON.stringify({ ...settlement, finalizedAtMs: 0 })) refuse("Solana settlement already exists with different evidence.");
-        return;
+        return false;
       }
       if (!["finalized", "failed", "expired"].includes(settlement.status) || !Number.isSafeInteger(settlement.slot) || settlement.slot < prior.submission.minContextSlot) refuse("Invalid finalized Solana settlement.");
       const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
@@ -613,6 +630,13 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
       await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
         .run(settlement.status, JSON.stringify(settlement), tenant, owner, requestId);
+      if (resolutionId !== null) {
+        // Who booked it is part of the booking: no mark, no booking (the transaction rolls back).
+        const marked = await tx.prepare(`UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND request_id=? AND signature=?
+          AND booked_at_ms IS NULL AND refusal IS NULL`).run(clock(this.now), resolutionId, tenant, owner, requestId, signature);
+        if (marked.changes !== 1) refuse("The operator resolution to book this settlement is not open.");
+      }
+      return true;
     });
   }
   async setup(): Promise<SolanaPreparedSetup | null> {

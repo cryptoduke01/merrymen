@@ -10,7 +10,7 @@ import { makePgDb, wrapSqlite, type Db } from "./db";
 import type { SolanaLiveSettlement, SolanaObservation, SolanaSignedSubmission } from "./solana-executor";
 import { pythBound } from "./solana-reference-price-fixture";
 import { ensureSolanaResolutionSchema, listSolanaResolutions, resolveSolanaPendingTrade, runSolanaResolveCommand, solanaResolveDecision, SolanaResolveError,
-  type SolanaResolveProvider, type SolanaResolveView } from "./solana-resolve";
+  SOLANA_RESOLUTION_SUPERSEDED, type SolanaResolveProvider, type SolanaResolveView } from "./solana-resolve";
 import { SolanaRpcError, SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 import { SolanaSettlementError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
@@ -111,7 +111,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     // Run again: already booked, nothing more.
     const again = await resolveSolanaPendingTrade({ db: f.db, postgres: f.postgres, tenant: TENANT, requestId: "stuck-1", providers: three.list, observe: three.observe,
       now: () => f.clock.value, book: { operator: "milla", reason: "again" } });
-    assert.equal(again.booked, false); assert.match(again.lines.join("\n"), /already finalized; nothing is booked/);
+    assert.equal(again.booked, false); assert.match(again.lines.join("\n"), /already finalized; nothing is booked\.\nIt was booked by an operator decision of milla at /);
     assert.equal((await resolutions(f.db)).length, 1);
     assert.deepEqual((await listSolanaResolutions(f.db, TENANT, undefined, f.postgres)).map(r => [r.requestId, r.outcome, r.operator, r.bookedAtMs]), [["stuck-1", "finalized", "milla", NOW + 60_000]]);
   });
@@ -208,31 +208,85 @@ test("an outcome the store refuses is recorded as refused and books nothing", as
   assert.equal(row!.booked_at_ms, null); assert.equal(row!.refusal, "Finalized Solana fees exceed the reserved budget.");
 });
 
-test("a booking whose reply is lost is still marked booked, and one stopped before its mark is marked on the next run", async t => {
+test("a booking whose reply is lost is still marked booked: the store marks the decision in the transaction that books it", async t => {
   const f = await fixture(t), agreed = fill(f.pending);
   const p = providers({ primary: { settlement: agreed, seen: true }, "operator's provider": { settlement: agreed, seen: true } });
   // The store commits, then the reply is lost: the decision is not recorded as a refusal.
-  const settle = SolanaTradingStore.prototype.settle;
-  t.mock.method(SolanaTradingStore.prototype, "settle", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["settle"]>) {
+  const settle = SolanaTradingStore.prototype.settleResolution;
+  t.mock.method(SolanaTradingStore.prototype, "settleResolution", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["settleResolution"]>) {
     await settle.apply(this, args); throw new Error("connection reset after commit");
   });
   const lost = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
     book: { operator: "milla", reason: "reply lost" } });
   t.mock.restoreAll();
   assert.equal(lost.booked, true); assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "finalized");
-  const [row] = await resolutions(f.db); assert.equal(row!.refusal, null); assert.notEqual(row!.booked_at_ms, null);
-  // A run that stopped between the store's commit and its own mark leaves an open record; the next run marks it.
-  const g = await fixture(t);
-  await ensureSolanaResolutionSchema(g.db, false);
-  await g.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("stopped", TENANT, OWNER, "stuck-1", g.pending.signature, "finalized", "milla", "stopped", JSON.stringify(fill(g.pending)), "{}", NOW);
-  await g.store.settle(OWNER, "stuck-1", g.pending.signature, { ...fill(g.pending), finalizedAtMs: NOW + 9 });
-  const shown = await resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: [], now: () => g.clock.value });
-  assert.equal(shown.booked, false, "show writes nothing");
-  const next = await resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: [], now: () => g.clock.value, book: { operator: "milla", reason: "finish" } });
-  assert.equal(next.booked, true); assert.match(next.lines.join("\n"), /already finalized; nothing is booked\. The operator resolution that booked it is now marked booked\./);
-  assert.equal(Number((await resolutions(g.db))[0]!.booked_at_ms), NOW);
+  const [row] = await resolutions(f.db); assert.equal(row!.refusal, null); assert.equal(Number(row!.booked_at_ms), NOW);
 });
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: a decision the automatic settlement beat is recorded as superseded, never as the one that booked`, options, async t => {
+    // A run recorded its decision, then stopped before settling (crash, kill).
+    const f = await fixture(t, dialect), agreed = fill(f.pending);
+    await ensureSolanaResolutionSchema(f.db, f.postgres);
+    await f.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("stopped-run", TENANT, OWNER, "stuck-1", f.pending.signature, "finalized", "milla", "first try", JSON.stringify(agreed), "{}", NOW);
+    // Later the configured pair agrees and the worker's automatic settlement books the same fill.
+    await f.store.settle(OWNER, "stuck-1", f.pending.signature, { ...agreed, finalizedAtMs: NOW + 99 });
+    const p = providers({ primary: { settlement: agreed, seen: true }, fallback: { settlement: agreed, seen: true } });
+    const shown = await resolveSolanaPendingTrade({ db: f.db, postgres: f.postgres, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => NOW + 120_000 });
+    assert.equal(shown.booked, false); assert.match(shown.lines.join("\n"), /already finalized; nothing is booked\.\nNo operator decision booked it\.$/);
+    assert.equal((await resolutions(f.db))[0]!.refusal, null, "show writes nothing");
+    // Another operator runs book: the open decision did not book it, and is recorded so.
+    const again = await resolveSolanaPendingTrade({ db: f.db, postgres: f.postgres, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => NOW + 120_000,
+      book: { operator: "someone-else", reason: "rerun" } });
+    assert.equal(again.booked, false);
+    assert.match(again.lines.join("\n"), /already finalized; nothing is booked\.\nAn open operator decision for it did not book it and is now recorded as superseded\.\nNo operator decision booked it\.$/);
+    const rows = await resolutions(f.db);
+    assert.deepEqual(rows.map(row => [row.id, row.operator, row.booked_at_ms, row.refusal]), [["stopped-run", "milla", null, SOLANA_RESOLUTION_SUPERSEDED]]);
+    assert.deepEqual((await listSolanaResolutions(f.db, TENANT, "stuck-1", f.postgres)).map(row => [row.operator, row.bookedAtMs, row.refusal]), [["milla", null, SOLANA_RESOLUTION_SUPERSEDED]]);
+    await assert.rejects(runSolanaResolveCommand(["book", TENANT, "stuck-1", "--operator", "x", "--reason", "y"], { db: f.db, postgres: f.postgres, env, fetch: network({}).fetch }),
+      (error: unknown) => error instanceof SolanaResolveError && /already finalized; nothing is booked/.test(error.message) && !/superseded/.test(error.message), "nothing more to supersede");
+  });
+  test(`${dialect}: a decision whose settlement finds the trade booked meanwhile books nothing and is recorded as superseded`, options, async t => {
+    const f = await fixture(t, dialect), agreed = fill(f.pending);
+    // While the providers are read, the worker's automatic settlement books the same fill.
+    const p = providers({ primary: { settlement: agreed, seen: true }, fallback: { settlement: agreed, seen: true } });
+    let raced = false;
+    const observe = (async (read: unknown, ...rest: unknown[]) => {
+      if (!raced) { raced = true; await f.store.settle(OWNER, "stuck-1", f.pending.signature, { ...agreed, finalizedAtMs: NOW + 7 }); }
+      return (p.observe as (...args: unknown[]) => Promise<SolanaObservation>)(read, ...rest);
+    }) as never;
+    const result = await resolveSolanaPendingTrade({ db: f.db, postgres: f.postgres, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe, now: () => f.clock.value,
+      book: { operator: "milla", reason: "fallback stuck" } });
+    assert.equal(result.booked, false); assert.match(result.lines.at(-1)!, /^It was booked meanwhile with the same evidence by another path, so this decision did not book it/);
+    const [row] = await resolutions(f.db);
+    assert.equal(row!.booked_at_ms, null); assert.equal(row!.refusal, SOLANA_RESOLUTION_SUPERSEDED);
+    // The trade is booked once, as the automatic settlement booked it.
+    assert.equal((await f.store.get(OWNER, "stuck-1"))!.settlement!.finalizedAtMs, NOW + 7);
+    assert.equal((await f.store.liveBook())!.wsolRaw, "1990000");
+  });
+  test(`${dialect}: the store books an operator decision only together with its mark, and never for a decision that is not open`, options, async t => {
+    const f = await fixture(t, dialect), agreed = fill(f.pending);
+    await ensureSolanaResolutionSchema(f.db, f.postgres);
+    const insert = (id: string, refusal: string | null = null) => f.db.prepare(`INSERT INTO solana_operator_resolutions(id,tenant,owner,request_id,signature,outcome,operator,reason,settlement_json,evidence_json,approved_at_ms,refusal)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, TENANT, OWNER, "stuck-1", f.pending.signature, "finalized", "milla", "r", JSON.stringify(agreed), "{}", NOW, refusal);
+    await insert("refused", "earlier refusal"); await insert("other-trade");
+    await f.db.prepare("UPDATE solana_operator_resolutions SET request_id=? WHERE id=?").run("another-request", "other-trade");
+    for (const id of ["missing", "refused", "other-trade", ""]) {
+      await assert.rejects(f.store.settleResolution(OWNER, "stuck-1", f.pending.signature, agreed, id), /operator resolution to book this settlement is not open/, id);
+      assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending", `${id}: nothing booked`);
+    }
+    await insert("open");
+    assert.equal(await f.store.settleResolution(OWNER, "stuck-1", f.pending.signature, agreed, "open"), true);
+    const open = (await resolutions(f.db)).find(row => row.id === "open")!;
+    assert.equal(Number(open.booked_at_ms), NOW); assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "finalized");
+    // Already booked with the same evidence: false, and no other decision is marked.
+    await insert("late");
+    assert.equal(await f.store.settleResolution(OWNER, "stuck-1", f.pending.signature, { ...agreed, finalizedAtMs: NOW + 1 }, "late"), false);
+    assert.equal((await resolutions(f.db)).find(row => row.id === "late")!.booked_at_ms, null);
+  });
+}
 
 test("the decision needs two hostnames, not two labels, and validates every input before reading anything", async t => {
   const f = await fixture(t), agreed = fill(f.pending);
@@ -364,30 +418,31 @@ test("the command maps --exclude names to providers, the third one included", as
   }
 });
 
-test("a booking that cannot be marked, or whose reply and re-read are both lost, never claims nothing was booked", async t => {
-  // The store books; marking the decision's record fails (the connection drops).
+test("a booking that cannot be marked books nothing, and one whose reply and re-read are both lost never claims nothing was booked", async t => {
+  // The store would book, but marking the decision fails (the connection drops): the booking rolls back with it.
   const f = await fixture(t), agreed = fill(f.pending);
   const p = providers({ primary: { settlement: agreed, seen: true }, "operator's provider": { settlement: agreed, seen: true } });
-  const db: Db = { prepare: sql => {
-    const statement = f.db.prepare(sql);
+  const failMark = (inner: Db): Db => ({ prepare: sql => {
+    const statement = inner.prepare(sql);
     return /^UPDATE solana_operator_resolutions SET booked_at_ms/.test(sql) ? { ...statement, get: statement.get.bind(statement), all: statement.all.bind(statement),
       run: async () => { throw new Error("connection dropped"); } } : statement;
-  }, exec: sql => f.db.exec(sql), tx: fn => f.db.tx(fn) };
-  await assert.rejects(resolveSolanaPendingTrade({ db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+  }, exec: sql => inner.exec(sql), tx: fn => inner.tx(tx => fn(failMark(tx))) });
+  await assert.rejects(resolveSolanaPendingTrade({ db: failMark(f.db), tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
     book: { operator: "milla", reason: "mark lost" } }), (error: unknown) => error instanceof SolanaResolveError
-    && /^Booked a finalized fill, but this decision could not be marked booked in its record\. Run the same book command again/.test(error.message));
-  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "finalized");
-  let [row] = await resolutions(f.db); assert.equal(row!.booked_at_ms, null); assert.equal(row!.refusal, null);
-  // The same command again marks it.
+    && /^Nothing was booked: The settlement could not be written\. The decision is recorded as refused\.$/.test(error.message));
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending", "no booking without its mark");
+  assert.equal((await f.store.liveBook())!.wsolRaw, "0");
+  let [row] = await resolutions(f.db); assert.equal(row!.booked_at_ms, null); assert.equal(row!.refusal, "The settlement could not be written.");
+  // The same command again books it, with its own decision marked.
   const again = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
     book: { operator: "milla", reason: "mark lost" } });
-  assert.equal(again.booked, true); [row] = await resolutions(f.db); assert.notEqual(row!.booked_at_ms, null);
+  assert.equal(again.booked, true); assert.deepEqual((await resolutions(f.db)).map(r => [r.refusal, r.booked_at_ms === null]), [["The settlement could not be written.", true], [null, false]]);
   // The store commits, its reply is lost, and the trade cannot be read again: unknown, and no refusal is recorded.
   const g = await fixture(t);
   const q = providers({ primary: { settlement: fill(g.pending), seen: true }, "operator's provider": { settlement: fill(g.pending), seen: true } });
-  const settle = SolanaTradingStore.prototype.settle, get = SolanaTradingStore.prototype.get;
+  const settle = SolanaTradingStore.prototype.settleResolution, get = SolanaTradingStore.prototype.get;
   let settled = false;
-  t.mock.method(SolanaTradingStore.prototype, "settle", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["settle"]>) {
+  t.mock.method(SolanaTradingStore.prototype, "settleResolution", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["settleResolution"]>) {
     await settle.apply(this, args); settled = true; throw new Error("connection reset after commit");
   });
   t.mock.method(SolanaTradingStore.prototype, "get", async function (this: SolanaTradingStore, ...args: Parameters<SolanaTradingStore["get"]>) {
@@ -397,9 +452,11 @@ test("a booking that cannot be marked, or whose reply and re-read are both lost,
     book: { operator: "milla", reason: "reply lost" } }), (error: unknown) => error instanceof SolanaResolveError && /may or may not be booked/.test(error.message) && !/Nothing was booked/.test(error.message));
   t.mock.restoreAll();
   assert.equal((await g.store.get(OWNER, "stuck-1"))!.status, "finalized");
-  [row] = await resolutions(g.db); assert.equal(row!.refusal, null, "never recorded as refused"); assert.equal(row!.booked_at_ms, null);
-  assert.equal((await resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: q.list, observe: q.observe, now: () => g.clock.value,
-    book: { operator: "milla", reason: "reply lost" } })).booked, true, "the next run marks it");
+  [row] = await resolutions(g.db); assert.equal(row!.refusal, null, "never recorded as refused"); assert.equal(Number(row!.booked_at_ms), NOW, "marked by the booking itself");
+  const next = await resolveSolanaPendingTrade({ db: g.db, tenant: TENANT, requestId: "stuck-1", providers: q.list, observe: q.observe, now: () => g.clock.value,
+    book: { operator: "milla", reason: "reply lost" } });
+  assert.equal(next.booked, false); assert.match(next.lines.join("\n"), /It was booked by an operator decision of milla at /);
+  [row] = await resolutions(g.db); assert.equal(row!.refusal, null, "the decision that booked it is never superseded");
   // The CLI's catch-all never says nothing was booked either.
   const cli = readFileSync(new URL("./solana-resolve-cli.ts", import.meta.url), "utf8");
   assert.doesNotMatch(cli, /nothing was booked/i); assert.match(cli, /may or may not be booked: run show again/);
