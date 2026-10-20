@@ -103,6 +103,24 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
       assert.equal(off.strategy!.enabled, false);
       assert.equal(off.revision, on.revision + 1);
     });
+
+    await t.test("with the table present, a fresh store's kill waits on no open reader of it and on no schema lock", async () => {
+      // Review RHS, round 1: the kill ran the schema step, whose ALTER TABLE takes an ACCESS EXCLUSIVE lock,
+      // so it waited behind this read transaction until the statement timeout (3 s), and in production for
+      // as long as the reader ran.
+      const owner = new SqlSolanaBindingStore(() => makePgDb(scoped("owner2")), "postgres", () => NOW + 2);
+      const before = (await owner.get(TENANT))!;
+      await owner.strategy(TENANT, OWNER, before.revision, strategy);
+      await holder.query("BEGIN");
+      await holder.query("SELECT * FROM solana_wallet_bindings");
+      await holder.query("SELECT pg_advisory_xact_lock($1)", [ADVISORY]);
+      try {
+        const killer = new SqlSolanaBindingStore(() => makePgDb(scoped("killer2")), "postgres", () => NOW + 3);
+        assert.deepEqual(await killer.strategyTenants(), [TENANT]);
+        assert.equal(await killer.disableForKill(TENANT), true);
+      } finally { await holder.query("ROLLBACK"); }
+      assert.equal((await owner.get(TENANT))!.strategy!.enabled, false);
+    });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;

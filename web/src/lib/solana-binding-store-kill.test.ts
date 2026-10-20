@@ -70,25 +70,51 @@ test("a kill on a database without the Solana table creates nothing and finds no
   assert.ok(existsSync(file));
 });
 
-test("a PostgreSQL kill looks the table up with to_regclass and writes nothing when it is absent", async () => {
+test("a PostgreSQL kill looks the table and its column up in the catalog, and never runs the schema step", async () => {
   const sql: string[] = [];
-  let present = false;
+  let table = false, column = false;
   const db: Db = {
     prepare: (text) => {
       sql.push(text);
-      return { run: async () => ({ changes: 0, lastInsertRowid: 0 }), get: async () => (/to_regclass/.test(text) ? { found: present } : undefined), all: async () => [] };
+      return { run: async () => ({ changes: 0, lastInsertRowid: 0 }), get: async () => (/to_regclass/.test(text) ? { found: table, strategy: column } : undefined), all: async () => [] };
     },
     exec: async (text) => { sql.push(text); }, tx: async (fn) => fn(db),
   };
   const store = new SqlSolanaBindingStore(async () => db, "postgres", () => NOW);
   assert.equal(await store.disableForKill(TENANT), false);
   assert.deepEqual(await store.strategyTenants(), []);
-  assert.deepEqual(sql, Array(2).fill("SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found"));
-  // Present: the schema step and the kill's own row lock run, as before.
-  present = true;
+  assert.equal(sql.length, 2);
+  assert.ok(sql.every((s) => /to_regclass\('solana_wallet_bindings'\)/.test(s) && /pg_attribute/.test(s) && /'strategy_json'/.test(s)), sql.join("\n"));
+  // A table from before strategies (no strategy_json): no strategy can exist, and no ALTER adds one.
+  table = true;
+  assert.equal(await store.disableForKill(TENANT), false);
+  assert.deepEqual(await store.strategyTenants(), []);
+  // Both present: the kill's own row lock runs on the connection as it is. No advisory lock, no CREATE, no
+  // ALTER: that ALTER waited behind every open reader of the table (review RHS, round 1).
+  column = true;
   assert.equal(await store.disableForKill(TENANT), false, "no binding row");
-  assert.ok(sql.some((s) => /pg_advisory_xact_lock/.test(s)) && sql.some((s) => /CREATE TABLE IF NOT EXISTS solana_wallet_bindings/.test(s)));
-  assert.ok(sql.some((s) => /^UPDATE solana_wallet_bindings SET revision = revision WHERE tenant = \?$/.test(s)));
+  assert.deepEqual(await store.strategyTenants(), []);
+  assert.deepEqual(writes(sql), ["UPDATE solana_wallet_bindings SET revision = revision WHERE tenant = ?"]);
+  assert.ok(sql.some((s) => /^SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL/.test(s)));
+  // Set up by this process (a Solana route ran first): its schema step, once, then no catalog lookup.
+  await store.get(TENANT);
+  const before = sql.length;
+  assert.equal(await store.disableForKill(TENANT), false);
+  assert.ok(sql.slice(before).every((s) => !/to_regclass|pg_advisory|CREATE|ALTER/.test(s)), sql.slice(before).join("\n"));
+});
+
+test("on SQLite too, a table without strategy_json has nothing to stop, and a kill never adds the column", async (t) => {
+  homeFixture(t);
+  const raw = new DatabaseSync(":memory:"); t.after(() => raw.close());
+  raw.exec(`CREATE TABLE solana_wallet_bindings (tenant TEXT PRIMARY KEY, did TEXT NOT NULL, chain TEXT NOT NULL, owner TEXT NOT NULL UNIQUE,
+    requested_mode TEXT NOT NULL, limits_json TEXT, revision BIGINT NOT NULL, created_at_ms BIGINT NOT NULL, updated_at_ms BIGINT NOT NULL)`);
+  const { db, sql } = recorded(raw);
+  const store = new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW);
+  assert.equal(await store.disableForKill(TENANT), false);
+  assert.deepEqual(await store.strategyTenants(), []);
+  assert.deepEqual(writes(sql), []);
+  const columns = (raw.prepare("PRAGMA table_info(solana_wallet_bindings)").all() as Array<{ name: string }>).map((c) => c.name);
+  assert.equal(columns.includes("strategy_json"), false);
 });
 
 test("once another process made the table, a fresh store's kill stops the strategy", async (t) => {
@@ -100,9 +126,11 @@ test("once another process made the table, a fresh store's kill stops the strate
   await owner.settings(TENANT, OWNER, 0, "paper", limits);
   const on = await owner.strategy(TENANT, OWNER, 1, strategy);
   const reader = new DatabaseSync(file); t.after(() => reader.close());
-  const killer = new SqlSolanaBindingStore(async () => wrapSqlite(reader), "sqlite", () => NOW + 1);
+  const { db, sql } = recorded(reader);
+  const killer = new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW + 1);
   assert.deepEqual(await killer.strategyTenants(), [TENANT]);
   assert.equal(await stopSolanaForKill(TENANT, killer), "stopped");
+  assert.ok(writes(sql).every((s) => /^UPDATE solana_wallet_bindings SET /.test(s)), `only the kill's own writes, no schema step:\n${writes(sql).join("\n")}`);
   const off = (await owner.get(TENANT))!;
   assert.equal(off.strategy!.enabled, false);
   assert.equal(off.revision, on.revision + 1, "the bump fences admission already in flight");

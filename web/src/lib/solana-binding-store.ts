@@ -145,22 +145,28 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
    * below for every tenant, MERRYMEN_SOLANA on or off. database() writes the
    * schema (under an advisory lock on Postgres), so a kill would create Solana
    * tables in a production database that never ran Solana, and a fault there
-   * would report a Robinhood kill incomplete. So the table is looked up first,
-   * read-only, with no lock and no DDL (to_regclass on Postgres, which resolves
-   * the unqualified name on this connection's search path as every query here
-   * does; sqlite_master on SQLite). Absent, no strategy can exist and there is
-   * nothing to stop. Present (or already set up by this process), database()
-   * runs as before, and a failure still fails the kill.
+   * would report a Robinhood kill incomplete. So the table and its
+   * strategy_json column are looked up first, read-only, with no lock and no
+   * DDL (to_regclass and pg_attribute on Postgres, which resolve the
+   * unqualified name on this connection's search path as every query here
+   * does; sqlite_master and pragma_table_info on SQLite). Either absent, no
+   * strategy can exist and there is nothing to stop. Both present, the kill
+   * runs on the connection as it is: it needs only UPDATE and SELECT, and
+   * database()'s ALTER TABLE takes an ACCESS EXCLUSIVE lock that waits behind
+   * every open reader of the table (review RHS, round 1: 3 s and a statement
+   * timeout behind one read transaction). Once this process has set the
+   * schema up, database() answers at once. A failure still fails the kill.
    */
   private async killDb(): Promise<Db | null> {
-    if (!this.ready) {
-      const db = await this.connect();
-      const row = await db.prepare(this.dialect === "postgres"
-        ? "SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found"
-        : "SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'solana_wallet_bindings'").get() as { found?: unknown } | undefined;
-      if (row?.found !== true && row?.found !== 1) return null;
-    }
-    return this.database();
+    if (this.ready) return this.ready;
+    const db = await this.connect();
+    const row = await db.prepare(this.dialect === "postgres"
+      ? `SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found, EXISTS (SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass('solana_wallet_bindings') AND attname = 'strategy_json' AND NOT attisdropped) AS strategy`
+      : `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'solana_wallet_bindings') AS found,
+          EXISTS (SELECT 1 FROM pragma_table_info('solana_wallet_bindings') WHERE name = 'strategy_json') AS strategy`).get() as { found?: unknown; strategy?: unknown } | undefined;
+    const yes = (value: unknown) => value === true || value === 1;
+    return yes(row?.found) && yes(row?.strategy) ? db : null;
   }
   async strategyTenants(): Promise<`0x${string}`[]> {
     const db = await this.killDb();
