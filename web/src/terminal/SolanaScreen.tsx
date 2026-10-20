@@ -77,6 +77,24 @@ export const SOLANA_WRITE_OFF_SLIPPAGE_BPS = 100;
  */
 type DustLot = { mint: string; amountRaw: string; confirming: boolean };
 const RAW = /^(0|[1-9][0-9]*)$/;
+type WrittenOffBook = Partial<SolanaPaperSnapshot> & Pick<SolanaPaperSnapshot, "cashRaw" | "positions">;
+/**
+ * The paper book in a write-off's 200 answer ({ paper, writtenOff }), if it
+ * can be shown as is: its cash and every lot in base units, and no lot of
+ * `mint`, which the write-off removed whole. Null for anything else.
+ */
+function writtenOffBook(answered: unknown, mint: string): WrittenOffBook | null {
+  if (answered === null || typeof answered !== "object") return null;
+  const book = answered as { cashRaw?: unknown; positions?: unknown; version?: unknown };
+  if (typeof book.cashRaw !== "string" || !RAW.test(book.cashRaw) || !Array.isArray(book.positions)) return null;
+  const lots = book.positions as unknown[];
+  for (const lot of lots) {
+    const fields: { mint?: unknown; amountRaw?: unknown; decimals?: unknown } = lot !== null && typeof lot === "object" ? lot : {};
+    if (typeof fields.mint !== "string" || fields.mint === mint || typeof fields.amountRaw !== "string" || !RAW.test(fields.amountRaw) || !Number.isInteger(fields.decimals)) return null;
+  }
+  if (book.version !== undefined && !Number.isSafeInteger(book.version)) return null;
+  return answered as WrittenOffBook;
+}
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
 /** The saved expiry is absolute; the form shows the whole hours left, so an untouched form matches it. */
@@ -345,18 +363,51 @@ function ConnectedSolana() {
     catch (e) { if (offerWholeLot(e, sale)) return; throw e; }
     setDust(null); setNotice("A route still buys this whole lot back, so it is not dust and cannot be written off.");
   };
-  /** Books the confirmed dust lot at zero: the server checks the market's zero-output answer again first. */
+  /**
+   * Books the confirmed dust lot at zero: the server checks the market's zero-output answer again first.
+   *
+   * Its 200 is final: the lot is gone and cannot come back. So the page says so,
+   * and shows the book the answer carries, before it reads the status again. A
+   * read that is paced (the status route answers 429 after a burst) or does not
+   * arrive is reported after the success, never instead of it: the owner is
+   * never told the write-off failed, nor shown the lot as still held.
+   */
   const writeOffDust = async () => {
     const lot = dust;
     if (!lot?.confirming) throw new Error("Check the lot again before writing it off.");
-    try { await api("paper/write-off", { mint: lot.mint }); }
+    let answer: { paper?: unknown };
+    try { answer = await api<{ paper?: unknown }>("paper/write-off", { mint: lot.mint }); }
     catch (e) {
       // A refusal ends the offer (the lot may not be dust, or changed); a paced request keeps it to try again.
       if (!(e instanceof RequestError && e.status === 429)) setDust(null);
       throw e;
     }
-    setDust(null); await refresh();
-    setNotice("The lot was written off at zero and removed from your paper portfolio.");
+    const epoch = accountEpoch.current;
+    setDust(null); showWrittenOff(answer.paper, lot.mint);
+    const done = "The lot was written off at zero and removed from your paper portfolio.";
+    setNotice(done);
+    try { await refresh(); }
+    catch (e) {
+      if (epoch !== accountEpoch.current) return;
+      setNotice(`${done} Your account could not be read again just now: ${e instanceof Error ? e.message : "the status did not load."}`);
+    }
+  };
+  /**
+   * Shows the paper book a write-off answered with: well formed, without the
+   * lot, and no older than the book shown. Otherwise the shown book drops just
+   * that lot, which is what the server's 200 says it removed (a write-off never
+   * splits a lot); the next status read shows the server's book either way.
+   */
+  const showWrittenOff = (answered: unknown, mint: string) => {
+    const book = writtenOffBook(answered, mint);
+    setStatus((shown) => {
+      const current = shown?.runtime?.paper;
+      if (!shown?.runtime || !current) return shown;
+      const fresh = !!book && !(typeof book.version === "number" && typeof current.version === "number" && book.version < current.version);
+      const paper = fresh ? { ...current, ...book, trades: Array.isArray(book.trades) ? book.trades : current.trades }
+        : { ...current, positions: current.positions.filter((position) => position.mint !== mint) };
+      return { ...shown, runtime: { ...shown.runtime, paper: paper as SolanaPaperSnapshot } };
+    });
   };
   /** What the recorded trade itself guaranteed, not the earlier preview. */
   const receiptAmounts = (trade: Receipt): string | null => {

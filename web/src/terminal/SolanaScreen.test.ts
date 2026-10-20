@@ -1249,6 +1249,54 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.doesNotMatch(text(), new RegExp(BONK));
   assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /written off at zero/);
 });
+test("a booked write-off says so and shows the lot gone, even when the status read after it is paced or never arrives", async () => {
+  const lot = { mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" };
+  const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
+  // How the status read after the write-off answers, and what the write-off's 200 carries.
+  let after: "paced" | "unreachable" = "paced";
+  let answer: () => unknown = () => ({ paper: { ...paper, version: 4, positions: [] }, writtenOff: { mint: BONK } });
+  let booked = false;
+  respond = async (path, body) => {
+    if (path === "status") {
+      if (!booked) return json(state);
+      if (after === "paced") return json({ error: PACED, ownerFacing: true }, 429);
+      throw new Error("offline");
+    }
+    if (path === "intent" && body?.action === "preview") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+    if (path === "paper/write-off") { booked = true; return json(answer()); }
+    throw new Error("Unexpected fixture route");
+  };
+  const writeOff = async () => {
+    await ui.click("Check for write-off"); await ui.click("Write off…"); await ui.click("Write off at zero");
+  };
+  for (const [scenario, failure, carries] of [
+    ["paced", PACED, "its book"], ["unreachable", "Can't reach merrymen right now.", "its book"],
+    // An answer without a usable book (none, or one still listing the lot): the shown book drops exactly that lot.
+    ["paced", PACED, "no book"], ["paced", PACED, "the lot"],
+    // A book older than the one shown never replaces it: only the lot is dropped.
+    ["paced", PACED, "an older book"],
+  ] as const) {
+    const label = `${scenario}, ${carries}`;
+    await ui.close(); ui = testDom(); calls = []; booked = false; after = scenario;
+    state.runtime.paper = { ...paper, version: 3, positions: [lot] } as never;
+    answer = carries === "its book" ? () => ({ paper: { ...paper, version: 4, positions: [] }, writtenOff: { mint: BONK } })
+      : carries === "no book" ? () => ({ writtenOff: { mint: BONK } })
+      : carries === "an older book" ? () => ({ paper: { ...paper, cashRaw: "5000000", version: 2, positions: [] }, writtenOff: { mint: BONK } })
+      : () => ({ paper: { ...paper, version: 4, positions: [lot] }, writtenOff: { mint: BONK } });
+    await render(); await writeOff();
+    assert.equal(calls.filter((call) => call.path === "paper/write-off").length, 1, label);
+    assert.equal(calls.at(-1)!.path, "status", label);
+    // The success is said first, the failed read after it, and nothing reads as a failure.
+    assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null, label);
+    assert.equal(ui.container.querySelector(".solana-notice")!.textContent,
+      `The lot was written off at zero and removed from your paper portfolio. Your account could not be read again just now: ${failure}`, label);
+    // The lot is gone from the portfolio, with nothing left to check or write off.
+    assert.doesNotMatch(ui.container.textContent!, new RegExp(BONK), label);
+    assert.match(ui.container.textContent!, /Paper portfolio1000 USDGSimulated cash\. 0 open position\(s\)\./, label);
+    assert.equal(hasButton("Check for write-off"), false, label);
+    assert.equal(hasButton("Write off…"), false, label); assert.equal(hasButton("Write off at zero"), false, label);
+  }
+});
 test("a lot a route still buys is never offered for write-off", async () => {
   state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
   respond = async (path, body) => {
