@@ -952,18 +952,22 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * regressions F3). Redaction takes the glued scan because its one cost, an
  * unbroken base58 run of 43 or more characters (a long camelCase hashtag) read
  * as an id, is a word shown to a model as "[address]", never text withheld.
- * A 64-byte signature that is one whole run is left, as a tx hash is; a glued
- * run the scan reads as a signature is replaced, since a run that long can
- * hold a key beside it. A base58 key cut short does not decode, so unlike a
- * cut 0x run it is not caught.
+ * A Solana signature, standing alone or in a link, is replaced too, by
+ * "[signature]", where a 0x tx hash is left: a base58 run that decodes to 64
+ * bytes cannot be told apart from two keys written together ("<mint><mint>")
+ * or a key with a word glued on ("CA<mint><41 characters>"), and the model
+ * needs no signature (the owner's own report keeps it). A glued run the scan
+ * reads as a signature is replaced by "[address]", as any glued run is. A
+ * base58 key cut short does not decode, so unlike a cut 0x run it is not
+ * caught.
  */
 const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
   let out = text.replace(ADDRESS_RUN, "[address]");
   for (const hit of onchainIdsIn(out, { glued: true })) {
     if (hit.family !== "solana" || hit.shape === "link") continue;
-    if (hit.shape === "hash" && idFamily(hit.value) === "solana") continue;
-    out = out.split(hit.value).join("[address]");
+    // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
+    out = out.split(hit.value).join(hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]");
   }
   return out;
 }

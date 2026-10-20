@@ -135,13 +135,13 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses(`${ACCOUNT}${ACCOUNT.slice(2)}`), `${ACCOUNT}${ACCOUNT.slice(2)}`, "an 80-digit run is not an address");
   });
 
-  it("replaces a Solana key the same way, and leaves a signature as it leaves a tx hash (Solana P0)", () => {
+  it("replaces a Solana key the same way, and a Solana signature as well (Solana P0)", () => {
     const { SOLANA_USDG_MINT, base58Encode } = ids;
     const sig = base58Encode(Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) & 0xff));
     assert.equal(redactAddresses(`send to ${SOLANA_USDG_MINT}.`), "send to [address].");
     assert.equal(redactAddresses(`see https://solscan.io/account/${SOLANA_USDG_MINT}`), "see https://solscan.io/account/[address]");
     assert.equal(redactAddresses(`to ${ACCOUNT} and ${SOLANA_USDG_MINT}`), "to [address] and [address]");
-    assert.equal(redactAddresses(`sig ${sig}`), `sig ${sig}`);
+    assert.equal(redactAddresses(`sig ${sig}`), "sig [signature]");
     assert.equal(redactAddresses("Bought PEPE, the curve looked early."), "Bought PEPE, the curve looked early.");
   });
 
@@ -153,12 +153,31 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses("owner caEEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT, ok"), "owner [address], ok");
     assert.equal(redactAddresses(`${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a and ${SOLANA_USDG_MINT}`), "[address] and [address]");
     assert.equal(redactAddresses(`landed tx${sig}done`), "landed [address]");
-    // A whole signature is still left, as a tx hash is, in a link as well.
-    assert.equal(redactAddresses(`sig ${sig}`), `sig ${sig}`);
-    assert.equal(redactAddresses(`https://solscan.io/tx/${sig}`), `https://solscan.io/tx/${sig}`);
+    // A whole signature is named as one, in a link as well.
+    assert.equal(redactAddresses(`sig ${sig}`), "sig [signature]");
+    assert.equal(redactAddresses(`https://solscan.io/tx/${sig}`), "https://solscan.io/tx/[signature]");
     // Prose, tickers, URLs, hex digests and short hashtags are untouched.
     const plain = "Bought $BONK at https://merrymen.xyz/t/0123456789abcdef #BuyTheDip, digest e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     assert.equal(redactAddresses(plain), plain);
+  });
+
+  it("replaces a signature-length run standing alone, which can be two keys or a key with a word glued on (review GE)", () => {
+    const { SOLANA_USDG_MINT: MINT, base58Decode } = ids;
+    // Each decodes to 64 bytes, as a signature does, with nothing alphanumeric either side.
+    const runs = [`${MINT}${MINT}`, `${MINT}ToTheMoonAndBackAgainAndAgainForeverAndEver`];
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    for (let seed = 0; seed < 200; seed++) {
+      const tail = Array.from({ length: 43 }, (_, i) => B58[(seed * 31 + i * 17 + 7) % 58]).join("");
+      runs.push(`CA${MINT}${tail}`.slice(0, 87));
+    }
+    const signatureLength = runs.filter((run) => base58Decode(run)?.length === 64);
+    assert.ok(signatureLength.length >= 100, `${signatureLength.length} of the runs decode to 64 bytes`);
+    assert.ok(signatureLength.includes(runs[0]!) && signatureLength.includes(runs[1]!));
+    for (const run of runs) {
+      const out = redactAddresses(`token ${run} landed`);
+      assert.ok(!out.includes(MINT.slice(0, 20)), out);
+      assert.match(out, /^token \[(signature|address)\] landed$/, out);
+    }
   });
 
   it("is applied wherever event text is handed to a model — the why narration and the daily journal/digest", () => {
