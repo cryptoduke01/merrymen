@@ -467,8 +467,9 @@ describe("solana-recover", () => {
       assert.deepEqual([...sentIx.data], [...built.data!], "the instruction matches the packages/core builder");
       assert.deepEqual(sentIx.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
     }
-    assert.deepEqual(result!.withdrawals!.map((w) => [w.asset, w.amountRaw, w.outcome?.status, w.error]),
-      [["SOL", 3_000_000n, "finalized", undefined], ["USDG", 2_345_678n, "finalized", undefined], ["WSOL", 600_000_000n, "finalized", undefined]]);
+    assert.deepEqual(result!.withdrawals!.map((w) => [w.asset, w.amountRaw, w.state, w.outcome?.status, w.error]),
+      [["SOL", 3_000_000n, "withdrawn", "finalized", undefined], ["USDG", 2_345_678n, "withdrawn", "finalized", undefined],
+        ["WSOL", 600_000_000n, "withdrawn", "finalized", undefined]]);
 
     // Everything moved to the owner; only rent stays.
     assert.equal(fake.token(vaultUsdg), 0n);
@@ -634,10 +635,16 @@ describe("solana-recover", () => {
       const vaultWsol = fake.atas.get(`${fake.vault}:${SOLANA_WRAPPED_SOL_MINT}:${SOLANA_CLASSIC_TOKEN_PROGRAM}`)!;
       const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
       assert.ok(error instanceof SolanaRecoverError, behavior);
-      assert.match(error.message, /Step 2 did not finish for 12\.345678 USDG; every other asset was withdrawn\..*run the command again/);
-      assert.match(out, behavior === "reject" ? /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) was not confirmed as submitted .*The other assets are sent separately/
+      // Failed on chain or expired cannot land: NOT withdrawn. A first send the
+      // RPC did not confirm may have reached the network (the transport cannot
+      // tell a refusal from a lost answer), so its outcome is unknown.
+      assert.match(error.message, behavior === "reject"
+        ? /Step 2 did not finish for 12\.345678 USDG \(outcome unknown: it may still land; look up its signature above\); every other asset was withdrawn\..*run the command again/
+        : /Step 2 did not finish for 12\.345678 USDG; every other asset was withdrawn\..*run the command again/);
+      assert.match(out, behavior === "reject" ? /Step 2 \(USDG\): outcome unknown, it may still land\. Step 2 \(USDG\) was not confirmed as submitted .*The other assets are sent separately/
         : behavior === "fail" ? /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) failed on chain .*The other assets are sent separately/
           : /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) expired without landing/);
+      if (behavior !== "reject") assert.doesNotMatch(out, /outcome unknown/);
       assert.equal(fake.sent.length, 4, "the WSOL leg was still sent");
       assert.equal(fake.token(vaultUsdg), 12_345_678n, "the blocked USDG stays in the vault");
       assert.equal(fake.token(vaultWsol), 0n, "WSOL was withdrawn");
@@ -652,6 +659,48 @@ describe("solana-recover", () => {
       assert.deepEqual(fake.sent[4]!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM]);
       assert.equal(fake.token(vaultUsdg), 0n);
     }
+  });
+
+  it("a leg sent but whose status cannot be read is 'outcome unknown', never 'NOT withdrawn', and names its signature", async () => {
+    const fake = await chain();
+    // The USDG leg (the third transaction) is accepted and lands, but every
+    // status poll of the owner tool for it fails at the network.
+    const fetchPollFails: typeof fetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "getSignatureStatuses" && body.params?.[1]?.searchTransactionHistory === true && body.params[0][0] === fake.sent[2]?.signature) {
+        throw new TypeError("fetch failed");
+      }
+      return fake.fetch(input, init);
+    };
+    const vaultUsdg = fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+    const { error, out, result } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { fetch: fetchPollFails });
+    assert.ok(error instanceof SolanaRecoverError, String(error));
+    const usdg = fake.sent[2]!.signature;
+    assert.equal(fake.token(vaultUsdg), 0n, "the USDG leg did land: 'NOT withdrawn' would have been false");
+    assert.match(out, new RegExp(`Step 2 \\(USDG\\): outcome unknown, it may still land\\. Step 2 \\(USDG\\) was sent \\(${usdg}\\) but its status could not be read\\.`));
+    assert.doesNotMatch(out, /USDG\): NOT withdrawn/);
+    assert.match(error.message, /Step 2 did not finish for 12\.345678 USDG \(outcome unknown: it may still land; look up its signature above\)/);
+    assert.equal(result, null);
+    assert.equal(fake.sent.length, 4, "the WSOL leg was still sent");
+    // A rerun re-reads finalized state: the landed USDG is not sent again.
+    const again = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(again.error, null, String(again.error));
+    assert.equal(fake.sent.length, 4);
+    assert.match(again.out, /nothing left to withdraw/);
+  });
+
+  it("a leg that does not finalize before the deadline is 'outcome unknown', never 'NOT withdrawn'", async () => {
+    // No revoke needed; SOL and USDG legs. Both are accepted and confirmed, but never finalized in time.
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, noWsolAccount: true });
+    fake.holdFinality = true;
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
+    assert.ok(error instanceof SolanaRecoverError, String(error));
+    assert.equal(fake.sent.length, 2);
+    for (const [index, asset] of [[0, "SOL"], [1, "USDG"]] as const) {
+      assert.match(out, new RegExp(`Step 2 \\(${asset}\\): outcome unknown, it may still land\\. Step 2 \\(${asset}\\) is not finalized yet \\(${fake.sent[index]!.signature}\\)`));
+    }
+    assert.doesNotMatch(out, /NOT withdrawn/);
+    assert.match(error.message, /Step 2 did not finish for 0\.003 SOL \(outcome unknown: [^)]*\) and 12\.345678 USDG \(outcome unknown: [^)]*\); every other asset/);
   });
 
   it("reports a revoke that does not finalize in time, and sends nothing after it", async () => {

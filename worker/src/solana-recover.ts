@@ -42,11 +42,17 @@ import { verifySolanaVaultDeployment } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { SolanaRpcError } from "./solana-rpc";
 
+/**
+ * Whether a transaction that failed to finish can still land: "no" once it is
+ * provably out (failed on chain, or expired), "unknown" once its bytes may have
+ * reached the network without a final answer. Unset: nothing was sent.
+ */
+export type SolanaRecoveryLanding = "no" | "unknown";
 /** Fixed messages only: never key material, RPC URLs or provider text. */
 export class SolanaRecoverError extends Error {
-  constructor(message: string) { super(message); this.name = "SolanaRecoverError"; }
+  constructor(message: string, readonly landing?: SolanaRecoveryLanding) { super(message); this.name = "SolanaRecoverError"; }
 }
-function fail(message: string): never { throw new SolanaRecoverError(message); }
+function fail(message: string, landing?: SolanaRecoveryLanding): never { throw new SolanaRecoverError(message, landing); }
 
 /** Pubkey::default(), which revoke_all writes as the session. */
 const NO_SESSION = SOLANA_SYSTEM_PROGRAM;
@@ -382,6 +388,15 @@ type Outcome = { signature: string; status: "finalized"; slot: number };
  * Sign one owner transaction once, submit it, and wait until it is finalized
  * or provably expired. Only these signed bytes are ever sent: a rebroadcast of
  * identical bytes can land at most once, and nothing is signed again here.
+ *
+ * A failure says whether the transaction can still land (SolanaRecoverError's
+ * `landing`): "no" only when it failed on chain or provably expired; "unknown"
+ * for everything after the first submission began, the RPC errors of the
+ * status polls included. A first submission the RPC did not confirm is
+ * "unknown" too: the transport cannot tell a refusal from an answer lost after
+ * the node received the bytes (a timeout, a dropped connection, and a JSON-RPC
+ * error object all reach here as the same SolanaRpcError). Errors before the
+ * first submission leave `landing` unset: nothing left this process.
  */
 async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner: string, instructions: Instruction[], label: string, io: SolanaRecoveryIo,
   /** What a failure means for the rest of the run, appended to its message. */
@@ -403,14 +418,28 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
   catch (error) {
     if (!(error instanceof SolanaRpcError)) throw error;
     fail(`${label} was not confirmed as submitted (${signature}): the RPC refused it, for example in its simulation, or its answer `
-      + `could not be read. ${consequence}Wait about two minutes, then run the command again: it re-reads the chain before sending anything.`);
+      + `could not be read. ${consequence}Wait about two minutes, then run the command again: it re-reads the chain before sending anything.`, "unknown");
   }
-  if (sent !== signature) fail("The Solana RPC answered with a different signature. Check an explorer before running again.");
+  if (sent !== signature) fail(`The Solana RPC answered ${label} with a different signature than ${signature}. Check an explorer before running again.`, "unknown");
   // Accepted: rebroadcast the same bytes until the RPC sees them confirmed or
   // the blockhash expires, which helps them land under congestion. Whatever
   // this phase reports, the outcome is decided below from the chain alone.
   try { await rpc.send(wire, block.slot, undefined, { untilMs: deadline }); }
   catch (error) { if (!(error instanceof SolanaRpcError)) throw error; }
+  try { return await finalizeOrExpire(rpc, signature, block, label, io, consequence, deadline); }
+  catch (error) {
+    // Sent, so it may still land: an RPC error or an unreadable status while
+    // polling is never "not landed". Name the signature the owner can look up.
+    if (error instanceof SolanaRecoverError && error.landing !== undefined) throw error;
+    if (!(error instanceof SolanaRpcError) && !(error instanceof SolanaRecoverError)) throw error;
+    fail(`${label} was sent (${signature}) but its status could not be read. ${consequence}`
+      + "Check an explorer, wait about two minutes, then run the command again; it re-reads the chain first.", "unknown");
+  }
+}
+
+/** Polls a sent transaction until it is finalized, failed or provably expired, or the deadline passes. */
+async function finalizeOrExpire(rpc: SolanaLiveRpc, signature: string, block: Block, label: string, io: SolanaRecoveryIo, consequence: string,
+  deadline: number): Promise<Outcome> {
   for (;;) {
     type Status = { kind: "failed" } | { kind: "finalized"; slot: number } | { kind: "waiting"; expired: boolean };
     const status = await rpc.read(async (read): Promise<Status> => {
@@ -426,10 +455,10 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
       if (state && state.confirmationStatus === "finalized") return { kind: "finalized", slot: integer(state.slot) };
       return { kind: "waiting", expired: state === null && height > block.lastValidBlockHeight };
     });
-    if (status.kind === "failed") fail(`${label} failed on chain (${signature}). ${consequence}Review the plan and run again.`);
+    if (status.kind === "failed") fail(`${label} failed on chain (${signature}). ${consequence}Review the plan and run again.`, "no");
     if (status.kind === "finalized") { io.log(`${label}: finalized in slot ${status.slot}.`); return { signature, status: "finalized", slot: status.slot }; }
-    if (status.expired) fail(`${label} expired without landing (${signature}). ${consequence}Run the command again.`);
-    if (Date.now() > deadline) fail(`${label} is not finalized yet (${signature}). ${consequence}Check an explorer, then run the command again; it re-reads the chain first.`);
+    if (status.expired) fail(`${label} expired without landing (${signature}). ${consequence}Run the command again.`, "no");
+    if (Date.now() > deadline) fail(`${label} is not finalized yet (${signature}). ${consequence}Check an explorer, then run the command again; it re-reads the chain first.`, "unknown");
     await io.sleep(io.pollMs ?? 2_000);
   }
 }
@@ -474,8 +503,13 @@ export interface SolanaRecoveryResult {
   sent: boolean;
   plan: SolanaRecoveryState;
   revoke?: Outcome;
-  /** Step 2, one entry per asset leg sent: its outcome, or the fixed message it failed with. */
-  withdrawals?: { asset: SolanaRecoveryAsset; amountRaw: bigint; outcome?: Outcome; error?: string }[];
+  /**
+   * Step 2, one entry per asset leg sent: its outcome, or the fixed message it
+   * failed with. `state` is "withdrawn" (finalized), "not-withdrawn" (nothing
+   * was sent, or it failed on chain or provably expired) or "unknown" (it was
+   * submitted, or may have been, and can still land).
+   */
+  withdrawals?: { asset: SolanaRecoveryAsset; amountRaw: bigint; state: "withdrawn" | "not-withdrawn" | "unknown"; outcome?: Outcome; error?: string }[];
   final?: SolanaRecoveryState;
 }
 
@@ -537,21 +571,25 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
     const label = `Step 2 (${leg.asset})`;
     try {
       const outcome = await sendAndFinalize(rpc, options.keyPair!, owner, leg.instructions, label, io, "The other assets are sent separately. ");
-      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, outcome });
+      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, state: "withdrawn", outcome });
       minSlot = Math.max(minSlot, outcome.slot);
     } catch (error) {
       // Fixed messages only. A leg that did not finish never blocks the next asset.
       if (!(error instanceof SolanaRecoverError) && !(error instanceof SolanaRpcError)) throw error;
-      io.log(`${label}: NOT withdrawn. ${error.message}`);
-      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, error: error.message });
+      // "NOT withdrawn" only when it cannot land; a leg that may still land says so.
+      const unknown = error instanceof SolanaRecoverError && error.landing === "unknown";
+      io.log(unknown ? `${label}: outcome unknown, it may still land. ${error.message}` : `${label}: NOT withdrawn. ${error.message}`);
+      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, state: unknown ? "unknown" : "not-withdrawn", error: error.message });
     }
   }
   result.final = await readSolanaRecoveryState(rpc, programId, owner, "finalized", minSlot);
   const left = solanaRecoveryWithdrawal(result.final);
   io.log(`Done. Left in the vault: ${formatSolanaUnits(left.usdgRaw, 6)} USDG, ${formatSolanaUnits(left.wsolRaw, 9)} WSOL, ${formatSolanaUnits(left.solLamports, 9)} SOL above rent.`);
-  const unfinished = result.withdrawals.filter((w) => w.error !== undefined);
+  const unfinished = result.withdrawals.filter((w) => w.state !== "withdrawn");
   if (unfinished.length) {
-    fail(`Step 2 did not finish for ${unfinished.map((w) => `${formatSolanaUnits(w.amountRaw, DECIMALS[w.asset])} ${w.asset}`).join(" and ")}; `
+    const named = unfinished.map((w) => `${formatSolanaUnits(w.amountRaw, DECIMALS[w.asset])} ${w.asset}`
+      + (w.state === "unknown" ? " (outcome unknown: it may still land; look up its signature above)" : ""));
+    fail(`Step 2 did not finish for ${named.join(" and ")}; `
       + "every other asset was withdrawn. See the messages above, wait about two minutes, then run the command again: it re-reads the chain and retries only what is left.");
   }
   return result;
