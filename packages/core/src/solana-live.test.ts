@@ -896,6 +896,93 @@ describe("Solana vault USDG mint screen", () => {
   });
 });
 
+describe("Solana vault USDG mint verdict (check_mint's USDG branch)", () => {
+  type AgaveAccount = { data: { parsed: { info: Record<string, unknown> } } };
+  const fixture = JSON.parse(contractFile("runtime-tests/fixtures/usdg-mainnet-mint.json")) as {
+    variants: { name: string; vault: "accepts" | "refuses"; sha256: string }[];
+  };
+  const agave = JSON.parse(contractFile("runtime-tests/fixtures/usdg-mainnet-mint.jsonparsed.json")) as {
+    variants: { name: string; sha256: string; address: string }[];
+    ledgerToolOutput: { accounts: { pubkey: string; account: AgaveAccount }[] };
+  };
+  /** The mint info Agave's decoder printed for a fixture variant. */
+  const info = (name: string): Record<string, unknown> => {
+    const variant = fixture.variants.find((v) => v.name === name)!;
+    const placed = agave.variants.find((v) => v.name === name && v.sha256 === variant.sha256)!;
+    return agave.ledgerToolOutput.accounts.find((a) => a.pubkey === placed.address)!.account.data.parsed.info;
+  };
+  const copy = (value: Record<string, unknown>) => JSON.parse(JSON.stringify(value)) as {
+    isInitialized?: unknown; decimals?: unknown; extensions?: { extension: string; state?: Record<string, any> }[] | unknown;
+  };
+  const ext = (mint: ReturnType<typeof copy>, name: string) =>
+    (mint.extensions as { extension: string; state: Record<string, any> }[]).find((e) => e.extension === name)!;
+
+  it("gives the compiled vault's verdict on every variant of the mainnet mint, as Agave decodes it", () => {
+    const reasons = new Map<string, string | null>([
+      ["as read", null],
+      ["a newer transfer fee of 25 bps with no maximum", "transfer-fee"],
+      ["a newer transfer fee of 25 bps with the largest maximum", "transfer-fee"],
+      ["a transfer hook program (the Memo program)", "transfer-hook"],
+      ["DefaultAccountState Initialized appended", "extension:defaultAccountState"],
+      ["GroupPointer appended (the issuer as authority, the mint as group)", "extension:groupPointer"],
+      ["9 decimals", "decimals"],
+    ]);
+    assert.deepEqual(fixture.variants.map((v) => v.name).sort(), [...reasons.keys()].sort());
+    for (const variant of fixture.variants) {
+      // custody.rs runs a buy and an exit through the compiled vault for each verdict.
+      const refusal = live.solanaVaultUsdgMintRefusal(info(variant.name));
+      assert.equal(refusal === null ? "accepts" : "refuses", variant.vault, variant.name);
+      assert.equal(refusal, reasons.get(variant.name), variant.name);
+    }
+  });
+  it("refuses any basis points older or newer, an unknown, repeated or unreadable extension, and fails closed", () => {
+    const read = () => copy(info("as read"));
+    assert.equal(live.solanaVaultUsdgMintRefusal(read()), null);
+    const refused: [string, (mint: ReturnType<typeof copy>) => void, string][] = [
+      ["an older fee of 1 bp", (m) => { ext(m, "transferFeeConfig").state.olderTransferFee.transferFeeBasisPoints = 1; }, "transfer-fee"],
+      ["a newer fee of 1 bp with no maximum", (m) => { ext(m, "transferFeeConfig").state.newerTransferFee.transferFeeBasisPoints = 1; }, "transfer-fee"],
+      ["basis points as text", (m) => { ext(m, "transferFeeConfig").state.newerTransferFee.transferFeeBasisPoints = "0"; }, "unreadable"],
+      ["no newer fee", (m) => { delete ext(m, "transferFeeConfig").state.newerTransferFee; }, "unreadable"],
+      ["a fee extension without state", (m) => { delete (ext(m, "transferFeeConfig") as { state?: unknown }).state; }, "unreadable"],
+      ["a hook program", (m) => { ext(m, "transferHook").state.programId = live.SOLANA_JUPITER_PROGRAM; }, "transfer-hook"],
+      ["a hook without its program field", (m) => { delete ext(m, "transferHook").state.programId; }, "transfer-hook"],
+      ["a hook extension without state", (m) => { delete (ext(m, "transferHook") as { state?: unknown }).state; }, "unreadable"],
+      ["an extension Agave cannot parse", (m) => { (m.extensions as unknown[]).push({ extension: "unparseableExtension" }); }, "extension:unparseableExtension"],
+      ["pausable", (m) => { (m.extensions as unknown[]).push({ extension: "pausableConfig", state: {} }); }, "extension:pausableConfig"],
+      ["a repeated extension", (m) => { (m.extensions as unknown[]).push(ext(m, "metadataPointer")); }, "unreadable"],
+      ["an untagged extension", (m) => { (m.extensions as unknown[]).push({ state: {} }); }, "unreadable"],
+      ["extensions that are not a list", (m) => { m.extensions = {}; }, "unreadable"],
+      ["an uninitialized mint", (m) => { m.isInitialized = false; }, "not-initialized"],
+      ["decimals as text", (m) => { m.decimals = "6"; }, "decimals"],
+    ];
+    for (const [label, change, reason] of refused) {
+      const mint = read();
+      change(mint);
+      assert.equal(live.solanaVaultUsdgMintRefusal(mint), reason, label);
+    }
+    // A hook authority, a fee authority and a fee maximum or epoch alone are accepted, as check_mint does.
+    const powers = read();
+    ext(powers, "transferFeeConfig").state.newerTransferFee = { epoch: 9999, maximumFee: 18446744073709552000, transferFeeBasisPoints: 0 };
+    assert.equal(live.solanaVaultUsdgMintRefusal(powers), null);
+    // Agave leaves out an empty extension list: a USDG mint with none is accepted.
+    const bare = read();
+    delete bare.extensions;
+    assert.equal(live.solanaVaultUsdgMintRefusal(bare), null);
+    for (const value of [undefined, null, [], "mint", 6]) assert.equal(live.solanaVaultUsdgMintRefusal(value), "not-initialized");
+  });
+  it("checks a field of exactly the extensions check_mint checks one of", () => {
+    const lib = contractFile("programs/merrymen-vault/src/lib.rs");
+    const body = lib.slice(lib.indexOf("fn check_mint("), lib.indexOf("\nfn ", lib.indexOf("fn check_mint(") + 1));
+    // The arms with a require! of their own; every other accepted extension is `=> {}`.
+    const checked = [...body.matchAll(/ExtensionType::([A-Za-z]+) => \{\s*\n\s*let /g)].map((m) => m[1]);
+    assert.deepEqual(checked, ["TransferFeeConfig", "TransferHook"]);
+    assert.match(body, /older_transfer_fee\.transfer_fee_basis_points\) == 0\s*&& u16::from\(fee\.newer_transfer_fee\.transfer_fee_basis_points\) == 0/);
+    assert.match(body, /Option::<Pubkey>::from\(hook\.program_id\)\.is_none\(\)/);
+    assert.match(body, /require!\(mint\.is_initialized, VaultError::Mint\)/);
+    assert.match(body, /mint\.key\(\) == USDG && program\.key\(\) == spl_token_2022::ID && mint\.decimals == 6/);
+  });
+});
+
 describe("Solana vault release pin", () => {
   it("lists only well-formed releases, one per program, never the local test program", () => {
     assert.ok(Object.isFrozen(live.SOLANA_VAULT_RELEASES));

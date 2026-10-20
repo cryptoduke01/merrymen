@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { SOLANA_VAULT_USDG_MINT_EXTENSIONS } from "../../packages/core/src/solana-live";
+import { SOLANA_VAULT_USDG_MINT_EXTENSIONS, solanaVaultUsdgMintRefusal } from "../../packages/core/src/solana-live";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
 
@@ -135,12 +135,14 @@ async function workerVerdict(account: unknown): Promise<Verdict> {
  * Variants the vault refuses but the worker's screen (worker/src/solana-market.ts
  * mintFromRpc) does not yet refuse for every swap, with what the worker does today:
  * it would sign an exit, or a buy, that fails on chain with VaultError::Mint. The fix
- * is a cross-track change to solana-market.ts: refuse a USDG mint carrying any
- * extension outside SOLANA_VAULT_USDG_MINT_EXTENSIONS, a transfer fee above 0 bps or a
- * transfer hook program. Each gap's test pins today's verdict, so it fails the moment
- * the worker's screen changes either way: when the fix lands, delete the entry (the
- * test then requires the vault's verdict); a regression elsewhere fails too. Nothing
- * here is todo or skipped.
+ * is a cross-track change to solana-market.ts mintFromRpc: refuse (invalid-mint) a USDG
+ * mint that solanaVaultUsdgMintRefusal (packages/core/src/solana-live.ts, check_mint's
+ * USDG branch) refuses: any extension outside SOLANA_VAULT_USDG_MINT_EXTENSIONS, a
+ * transfer fee above 0 bps older or newer, or a transfer hook program. That function
+ * already refuses every gap (checked below). Each gap's test pins today's verdict, so it
+ * fails the moment the worker's screen changes either way: when the fix lands, delete
+ * the entry (the test then requires the vault's verdict); a regression elsewhere fails
+ * too. Nothing here is todo or skipped.
  */
 const WORKER_GAPS = new Map<string, Verdict>([
   ["a newer transfer fee of 25 bps with no maximum", "accepts"],
@@ -163,8 +165,12 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
     for (const { extension } of parsed.extensions as { extension: string }[]) assert.ok(SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(extension), extension);
     assert.ok(fixture.variants.some((v) => v.vault === "refuses"));
     for (const [name, today] of WORKER_GAPS) {
-      assert.ok(fixture.variants.some((v) => v.name === name && v.vault === "refuses"), name);
+      const variant = fixture.variants.find((v) => v.name === name);
+      assert.equal(variant?.vault, "refuses", name);
       assert.notEqual(today, "refuses", `${name}: a gap the worker already closes`);
+      // The check the worker is missing already gives the vault's verdict on Agave's decoding.
+      const info = (agaveAccount(variant!).data as { parsed: { info: unknown } }).parsed.info;
+      assert.notEqual(solanaVaultUsdgMintRefusal(info), null, name);
     }
   });
   it("is decoded by Agave's own jsonParsed decoder, and this file decodes every variant exactly as Agave does", () => {

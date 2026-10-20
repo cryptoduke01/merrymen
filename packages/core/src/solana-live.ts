@@ -72,6 +72,46 @@ export const SOLANA_VAULT_USDG_MINT_EXTENSIONS: readonly string[] = Object.freez
   "metadataPointer",
   "tokenMetadata",
 ]);
+/**
+ * Why the vault program's check_mint (lib.rs) refuses this USDG mint, or null
+ * when it accepts it. `info` is the mint as Agave's jsonParsed account read
+ * presents it (getAccountInfo's value.data.parsed.info, a UiMint). It mirrors
+ * the USDG branch of check_mint: initialized, 6 decimals, only the extensions
+ * in SOLANA_VAULT_USDG_MINT_EXTENSIONS, a transfer fee of 0 bps both older and
+ * newer (whatever its maximum or epoch), and no transfer hook program. A field
+ * it needs and cannot read is a refusal. The caller checks the mint's address
+ * (USDG) and owner (Token-2022). On a mint it refuses, the program fails every
+ * swap, buys and exits alike, with VaultError::Mint (6005), so the worker
+ * must sign none; the owner's withdraw never checks the mint.
+ */
+export function solanaVaultUsdgMintRefusal(info: unknown): string | null {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!record(info) || info.isInitialized !== true) return "not-initialized";
+  if (info.decimals !== 6) return "decimals";
+  // Agave leaves out an empty extension list.
+  const extensions = info.extensions === undefined ? [] : info.extensions;
+  if (!Array.isArray(extensions)) return "unreadable";
+  const seen = new Set<string>();
+  for (const extension of extensions) {
+    if (!record(extension) || typeof extension.extension !== "string" || seen.has(extension.extension))
+      return "unreadable";
+    const name = extension.extension, state = extension.state;
+    seen.add(name);
+    if (!SOLANA_VAULT_USDG_MINT_EXTENSIONS.includes(name)) return `extension:${name}`;
+    if (name === "transferFeeConfig") {
+      if (!record(state)) return "unreadable";
+      for (const fee of [state.olderTransferFee, state.newerTransferFee]) {
+        if (!record(fee) || typeof fee.transferFeeBasisPoints !== "number") return "unreadable";
+        if (fee.transferFeeBasisPoints !== 0) return "transfer-fee";
+      }
+    } else if (name === "transferHook") {
+      if (!record(state)) return "unreadable";
+      if (state.programId !== null) return "transfer-hook";
+    }
+  }
+  return null;
+}
 export const SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR = Uint8Array.from([
   193, 32, 155, 51, 65, 214, 156, 129,
 ]);
