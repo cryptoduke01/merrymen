@@ -378,11 +378,19 @@ export function solanaReferenceBound(intent: { inputMint: string; outputMint: st
  * SOLANA_PYTH_DEFAULT_GENERATION; the app runtime's executor and store pass the
  * one its env names): a bound read from the other generation is refused, never
  * translated.
+ *
+ * `toleranceBps`: the tolerance the bound must have been built with, the app
+ * runtime's MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS (the executor and the store
+ * pass it, by default SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS). A bound carrying
+ * any other tolerance is refused, so evidence cannot widen its own floor. Left
+ * out, any tolerance in the allowed range is recomputed as before (the owner's
+ * withdrawal valuation, which only ever lowers the high-water mark less).
  */
 export function verifySolanaReferenceBound(bound: SolanaReferenceBound, intent: Parameters<typeof solanaReferenceBound>[0], nowMs: number,
-  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION): SolanaReferenceBound {
+  generation: SolanaPythGeneration = SOLANA_PYTH_DEFAULT_GENERATION, toleranceBps?: number): SolanaReferenceBound {
   const feed = solanaPythFeed(generation);
   if (!object(bound) || !object(bound.reference)) return fail("evidence");
+  if (toleranceBps !== undefined && bound.toleranceBps !== toleranceBps) return fail("evidence");
   const r = bound.reference;
   try { address(r.account); } catch { return fail("evidence"); }
   if (r.source !== "pyth" || r.account !== feed.account || r.feedId !== PYTH_SOL_USD_FEED_ID ||

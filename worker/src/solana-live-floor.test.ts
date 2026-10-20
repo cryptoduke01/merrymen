@@ -261,7 +261,7 @@ test("C3: the expired-attempt allowance setting reaches live admission, 0 by def
     const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env });
     const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", `allowance-${expected}`) });
     assert.ok("status" in placed && placed.status === "pending");
-    assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: expected }]);
+    assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: expected, referenceToleranceBps: 300 }]);
   }
   const bad = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "97" } });
   await assert.rejects(bad.app.trade(bad.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "allowance-bad") }), /expired-attempt allowance setting is misconfigured/);
@@ -660,6 +660,37 @@ test("the executor checks a fresh bound against its own generation, not the one 
       assert.deepEqual(recorded, [], label); assert.equal(f.sends.length, 0, label);
     }
     assert.deepEqual(f.pythReads, [], label); // the bound came from assessRisk; the executor itself reads no reference
+  }
+});
+
+test("the configured reference tolerance reaches the executor's check and admission; a bound built at another is refused before signing", async t => {
+  // The runtime builds the bound at its own tolerance and hands that same number to the executor and the store.
+  const { SolanaTradingStore: Store } = await import("./solana-trading-store");
+  const admissions: unknown[] = [], recordSigned = Store.prototype.recordSigned;
+  t.mock.method(Store.prototype, "recordSigned", function (this: InstanceType<typeof Store>, ...args: Parameters<typeof recordSigned>) {
+    admissions.push(args[1]); return recordSigned.apply(this, args);
+  });
+  const wide = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "500" } });
+  const placed = await wide.app.trade(wide.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "tolerance-500") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await wide.submissions())[0]!.submission.risk.reference.toleranceBps, 500);
+  assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: 0, referenceToleranceBps: 500 }]);
+  // An executor configured for 3% (or left at the default) refuses a fresh, self-consistent bound built at 10%: nothing is signed, recorded or sent.
+  const feePayerKeyPair = await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31));
+  for (const configured of [300, undefined]) {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+    const recorded: SolanaSignedSubmission[] = [];
+    const executor = createSolanaExecutor({ programId: PROGRAM, programBinarySha256: f.env.MERRYMEN_SOLANA_VAULT_SHA256, ...(configured ? { referenceToleranceBps: configured } : {}),
+      sessionKeyPair: f.sessionKeys, feePayerKeyPair, rpc: f.rpc, market: createSolanaLiveMarket({ env: f.env, rpc: f.rpc, now: () => f.clock.now }),
+      journal: { get: async () => null, recordSigned: async submission => { recorded.push(submission); return true; }, settle: async () => assert.fail("nothing settles") },
+      maxFeeLamports: "5000000", now: () => f.clock.now,
+      assessRisk: async ({ intent, quote }) => {
+        const reference = solanaReferenceBound(intent, pythReference(f.clock.now, 15_000_000_000n, SLOT), 1000);
+        return { observedAtMs: f.clock.now, slot: SLOT, notionalUsdg: solanaReferenceNotional(intent, quote.outAmount, reference).toString(),
+          equityUsdg: "200000000", peakEquityUsdg: "200000000", cashUsdg: "50000000", wsolRaw: "1000000000", reference };
+      } });
+    await assert.rejects(executor.execute({ ...manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "executor-tolerance"), owner: f.scope.owner, vault: f.vault }), /refused: risk/, String(configured));
+    assert.deepEqual(recorded, []); assert.equal(f.sends.length, 0);
   }
 });
 

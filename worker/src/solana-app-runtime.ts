@@ -894,16 +894,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       // Refused as configuration before anything is signed; the store counts with it at admission.
       const expiredAllowance = expiredAttemptAllowance();
-      const journal: SolanaLiveJournal = { get: (owner, requestId) => s.get(owner, requestId), settle: (...args) => s.settle(...args),
-        recordSigned: submission => s.recordSigned(submission, { expiredAttemptAllowance: expiredAllowance }) };
       const toleranceBps = referenceToleranceBps();
+      // Admission re-checks the bound against this runtime's tolerance, never the one the evidence names.
+      const journal: SolanaLiveJournal = { get: (owner, requestId) => s.get(owner, requestId), settle: (...args) => s.settle(...args),
+        recordSigned: submission => s.recordSigned(submission, { expiredAttemptAllowance: expiredAllowance, referenceToleranceBps: toleranceBps }) };
       // One generation, from this runtime's env, for the read, the executor's check and the store's admission check.
       // Both settings are checked only after a recorded request was returned above: a bad one never blocks its replay.
       let pythGeneration: SolanaPythGeneration;
       try { pythGeneration = requireSolanaPythGeneration(env, now()); } catch { return fail("The independent SOL price source (Pyth generation) is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
-      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration,
+      const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration, referenceToleranceBps: toleranceBps,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
         journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,

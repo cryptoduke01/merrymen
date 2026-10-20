@@ -299,6 +299,17 @@ test("a stored bound must recompute exactly from its own reference and stay fres
   assert.throws(() => verifySolanaReferenceBound(bound, sell, NOW + 121_000), SolanaReferencePriceError);
 });
 
+test("a stored bound is checked against the configured tolerance, never only the one it carries", () => {
+  // Built at 10%, consistently: it recomputes from its own fields, so only the configured tolerance can refuse it.
+  const wide = solanaReferenceBound(sell, pythReference(NOW), 1000);
+  assert.deepEqual(verifySolanaReferenceBound(wide, sell, NOW + 1_000), wide);
+  assert.throws(() => verifySolanaReferenceBound(wide, sell, NOW + 1_000, undefined, 300),
+    (error: unknown) => error instanceof SolanaReferencePriceError && error.reason === "evidence");
+  assert.deepEqual(verifySolanaReferenceBound(wide, sell, NOW + 1_000, undefined, 1000), wide);
+  const configured = solanaReferenceBound(sell, pythReference(NOW), 300);
+  assert.deepEqual(verifySolanaReferenceBound(configured, sell, NOW + 1_000, undefined, 300), configured);
+});
+
 test("the tolerance setting defaults to 3% and refuses out-of-range or malformed values", () => {
   assert.equal(solanaReferenceToleranceBps({}), 300);
   assert.equal(solanaReferenceToleranceBps({ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "500" }), 500);

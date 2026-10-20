@@ -9,7 +9,7 @@ import { applySolanaPaperCommit, applySolanaPaperWriteOff, solanaPaperIntentFing
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOffRecord } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import type { SolanaLiveJournal, SolanaLiveRecord, SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
-import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
+import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
 export class SolanaTradingStoreError extends Error {
@@ -522,10 +522,15 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     this.owner(owner); await this.binding();
     return record(await this.db.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(this.scope.tenant, owner, requestId));
   }
-  /** `admission.expiredAttemptAllowance`: see SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE (the default when omitted). */
-  async recordSigned(s: SolanaSignedSubmission, admission: { expiredAttemptAllowance?: number } = {}): Promise<boolean> {
+  /**
+   * `admission.expiredAttemptAllowance`: see SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE (the default when omitted).
+   * `admission.referenceToleranceBps`: the tolerance the persisted price bound must carry, the app runtime's
+   * MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS when omitted); any other is refused.
+   */
+  async recordSigned(s: SolanaSignedSubmission, admission: { expiredAttemptAllowance?: number; referenceToleranceBps?: number } = {}): Promise<boolean> {
     this.owner(s.intent.owner);
     const allowance = admission.expiredAttemptAllowance ?? SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
+    const toleranceBps = admission.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS;
     if (!Number.isSafeInteger(allowance) || allowance < 0 || allowance > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
     let drawdownRefused = false;
     const accepted = await this.db.tx(async tx => {
@@ -556,7 +561,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // signed minimum may not be below its floor, and a sell is charged at least
       // its reference value however low it was quoted.
       let reference: SolanaReferenceBound;
-      try { reference = verifySolanaReferenceBound(s.risk.reference, s.intent, now, this.pythGeneration?.()); } catch { refuse("The independent SOL price evidence is missing, stale or altered."); }
+      try { reference = verifySolanaReferenceBound(s.risk.reference, s.intent, now, this.pythGeneration?.(), toleranceBps); } catch { refuse("The independent SOL price evidence is missing, stale or altered."); }
       if (reference.reference.slot < s.minContextSlot || s.minOutAmount !== s.quote.minOutAmount ||
           raw(s.minOutAmount, false) < raw(reference.minOutFloor, false)) refuse("The guaranteed output is below the independent SOL price floor.");
       const notional = solanaReferenceNotional(s.intent, s.quote.outAmount, reference);

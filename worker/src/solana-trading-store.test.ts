@@ -509,6 +509,20 @@ test("admission re-checks the independent price floor and charges a cheap sell a
   assert.equal((await f.store.pending()).length, 1);
 });
 
+test("admission re-checks the price bound against the configured tolerance, not the one the evidence carries", async t => {
+  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // A sell bounded at 10% instead of 3%: consistent with itself, and its minimum clears its own (lower) floor.
+  const wide = (id: string) => { const s = sale(id, "1", "1000000", book, "480000"); s.risk.reference = pythBound(s.intent, NOW, undefined, undefined, 1000);
+    s.risk.notionalUsdg = s.risk.reference.valueUsdg; return s; };
+  await assert.rejects(f.store.recordSigned(wide("wide-default")), /independent SOL price evidence/);
+  await assert.rejects(f.store.recordSigned(wide("wide-300"), { referenceToleranceBps: 300 }), /independent SOL price evidence/);
+  assert.deepEqual(await f.store.pending(), []);
+  // The same evidence under a runtime configured for 10% is admitted.
+  assert.equal(await f.store.recordSigned(wide("wide-1000"), { referenceToleranceBps: 1000 }), true);
+});
+
 test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
   const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
   await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
