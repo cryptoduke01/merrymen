@@ -12,7 +12,7 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_BEHIND_BOOK, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED,
   SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -473,6 +473,38 @@ test("below its book, the owner can still withdraw what the vault holds up to th
     assert.ok((await withdraw(SOLANA_WRAPPED_SOL_MINT, "49999999")).transactionBase64);
     await assert.rejects(withdraw(SOLANA_USDG_MINT, "80000000"), /At most 70 USDG/);
     assert.deepEqual(await booked(), book);
+  } finally { f.raw.close(); }
+});
+
+test("an in-app withdrawal that landed is not called a vault below its book while it awaits final confirmation, nor is a balance read from before the book", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 3n; f.controls.cash = 90_000_000n;
+    const book = { hwmRaw: "90000000", cashRaw: "90000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    // It landed (confirmed, not finalized): the vault holds 1 USDG less than the book until both providers' finalized receipts book it.
+    f.controls.cash = 89_000_000n;
+    const settling = await f.app.status(f.scope);
+    assert.ok(settling.live.blockers.includes("An owner transaction is awaiting final confirmation."), settling.live.blockers.join(" | "));
+    assert.ok(!settling.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
+    assert.equal(settling.live.canExit, false, "trading and exits still wait for it");
+    // Finalized on both providers: booked, and the vault matches its book.
+    f.providers.primary = withholding(f); f.providers.fallback = withholding(f);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "finalized");
+    f.providers.primary = null; f.providers.fallback = null; f.controls.sequence = 4n;
+    assert.ok(!(await f.app.status(f.scope)).live.blockers.some(item => item === SOLANA_STATUS_BELOW_BOOK || item === SOLANA_STATUS_BEHIND_BOOK));
+    // Nothing settling, and the vault really short of its book: said as such.
+    f.controls.cash = 88_000_000n;
+    assert.ok((await f.app.status(f.scope)).live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    // A book recorded at a later slot than the balances read (a lagging provider): no shortfall can be shown, and trading still waits.
+    const later = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    await f.db.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify({ ...later, slot: 1001 }), TENANT, f.owner);
+    const behind = await f.app.status(f.scope);
+    assert.ok(behind.live.blockers.includes(SOLANA_STATUS_BEHIND_BOOK)); assert.ok(!behind.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK));
+    assert.equal(behind.live.ready, false);
   } finally { f.raw.close(); }
 });
 

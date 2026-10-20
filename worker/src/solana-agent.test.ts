@@ -531,6 +531,29 @@ test("a live account whose vault holds less than its book is held, and says an [
   status = below; f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 3);
 });
 
+test("a below-book blocker beside the account's own trade or owner transaction awaiting final confirmation pages no one", async t => {
+  const f = await expiryAccount(t, { maxOpsPerDay: 20, expired: 0 });
+  const below = { paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [] as unknown[], ready: false, canExit: false,
+    blockers: [SOLANA_STATUS_BELOW_BOOK], ownerTransaction: null as null | { status: string } } };
+  let status: unknown = { ...below, live: { ...below.live, pending: [{ requestId: "settling", status: "pending" }] } };
+  const runtime = { status: async () => status, trade: async () => { f.control.trades++; return {}; } } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("unused"); } };
+  const agent = createSolanaAgent({ db: f.db, runtime, market, now: () => f.clock.now, log: line => f.lines.push(line) });
+  // A trade that landed leaves the vault short of its book until it is booked: held for it, and no [alert].
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  // So does an owner withdrawal that landed and awaits its receipts.
+  status = { ...below, live: { ...below.live, ownerTransaction: { status: "pending" } } };
+  f.clock.now += 60_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.deepEqual(f.lines, []); assert.equal(f.control.trades, 0);
+  // Short with nothing of its own settling: said.
+  status = below; f.clock.now += 60_000; await agent.tick();
+  assert.equal(f.lines.filter(line => /vault-below-book/.test(line)).length, 1);
+  // Something settles again: the repeat window is cleared, so a shortfall left once it is booked is said at once.
+  status = { ...below, live: { ...below.live, ownerTransaction: { status: "pending" } } }; f.clock.now += 60_000; await agent.tick();
+  status = below; f.clock.now += 60_000; await agent.tick();
+  assert.equal(f.lines.filter(line => /vault-below-book/.test(line)).length, 2);
+});
+
 test("trades and owner transactions still pending three minutes on say one [alert] with counts only, after recovery, until none is", async t => {
   const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
   const clock = { now: NOW }, lines: string[] = [];

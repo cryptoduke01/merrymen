@@ -19,7 +19,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -196,7 +196,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}) }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
-  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app, log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
   /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
   const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
@@ -967,4 +967,37 @@ test("a provider a slot behind the prepared slot is asked again briefly at a tra
   await assert.rejects(behind.runtime({}, split(behind, undefined, read => stuck(read))).trade(behind.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "never-caught-up") }),
     (error: unknown) => error instanceof SolanaRpcError && error.code === "rpc");
   assert.deepEqual(await behind.submissions(), []); assert.equal(behind.sends.length, 0);
+});
+
+test("a live trade that landed is not called a vault below its book, nor paged as one, while it awaits final confirmation", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 7500 } });
+  // The chain as both providers see it: once landed, the confirmed vault holds the sale's result; finalized receipts come later.
+  const chain = { landed: false, finalized: false };
+  const recorded = async () => (await f.submissions())[0]?.submission;
+  const read: SolanaLiveRead = async (method, params = []) => {
+    const submission = await recorded();
+    if (method === "getSignatureStatuses" && chain.landed) return { context: { slot: SLOT + 2 }, value: [{ confirmationStatus: chain.finalized ? "finalized" : "confirmed", slot: SLOT + 1, err: null }] };
+    if (method === "getTransaction") return null;
+    const keys = params[0] as string[];
+    if (chain.landed && method === "getMultipleAccounts" && keys.length === 2 && keys[0] === f.cashAta && keys[1] === f.wsolAta) {
+      return { context: { slot: SLOT + 2 }, value: [rpcAccount(token(SOLANA_USDG_MINT, f.vault, 50_000_000n + BigInt(submission!.minOutAmount)), TOKEN_2022_PROGRAM),
+        rpcAccount(token(SOLANA_WRAPPED_SOL_MINT, f.vault, 1_000_000_000n - BigInt(submission!.intent.amountRaw)), SOLANA_CLASSIC_TOKEN_PROGRAM)] };
+    }
+    return f.read(method, params);
+  };
+  const transport: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async () => "sent" };
+  const app = f.runtime({}, transport), lines: string[] = [];
+  const placed = await app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "settling-sell") });
+  assert.ok("status" in placed && placed.status === "pending");
+  // Landed, confirmed but not finalized: the vault holds 0.1 SOL less than the book until both providers' receipts book the sale.
+  chain.landed = true;
+  const status = await app.status(f.scope);
+  assert.ok(status.live.blockers.includes("A live trade is awaiting final confirmation."), status.live.blockers.join(" | "));
+  assert.ok(!status.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), "its own landing is not tokens leaving outside Merrymen");
+  assert.equal(status.live.canExit, false, "trading and exits still wait for it");
+  // The worker's next tick holds the account for its pending trade and pages no operator to reconcile the book.
+  f.clock.now += 31_000;
+  await f.agent(app, line => lines.push(line)).tick();
+  assert.deepEqual(lines.filter(line => /vault-below-book/.test(line)), []);
+  assert.equal((await f.submissions())[0]!.submission.signature, (await recorded())!.signature);
 });

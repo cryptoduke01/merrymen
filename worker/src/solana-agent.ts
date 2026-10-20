@@ -275,7 +275,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (!status.paper || status.paper.positions.some(p => p.mint !== SOLANA_WRAPPED_SOL_MINT)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
             cashRaw = status.paper.cashRaw; wsolRaw = status.paper.positions.find(p => p.mint === SOLANA_WRAPPED_SOL_MINT)?.amountRaw ?? "0";
           } else {
-            belowBook(scope, status.live.blockers);
+            // Not while one of the account's own trades or owner transactions awaits final confirmation: one that
+            // landed leaves the vault short of its book until it is booked (status holds its blocker back then too).
+            belowBook(scope, status.live.pending.length || status.live.ownerTransaction?.status === "pending" ? undefined : status.live.blockers);
             if (!status.live.balances || !status.live.tradable || status.live.pending.length || (!status.live.ready && !status.live.canExit)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
             // The book's amounts, never the chain's: quarantined SOL is not the strategy's to sell.
             cashRaw = status.live.tradable.cashUsdg; wsolRaw = status.live.tradable.wsolRaw;

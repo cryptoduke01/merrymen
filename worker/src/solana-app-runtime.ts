@@ -117,6 +117,13 @@ export const SOLANA_STATUS_BELOW_BOOK = "Your vault holds less than its recorded
   + "Trading and automated exits are held, so nothing trades on a balance that is not there, until an operator reconciles the records with the vault. "
   + "You can still revoke, and withdraw what the vault holds up to its recorded balances.";
 /**
+ * The status blocker while the vault's balances were read from a bank older
+ * than the book's own slot (a lagging provider): such a read cannot show a
+ * shortfall, so it is never said as SOLANA_STATUS_BELOW_BOOK, and trading
+ * still waits (admission refuses evidence older than the book too).
+ */
+export const SOLANA_STATUS_BEHIND_BOOK = "Vault balances were read from before the latest recorded trade; trading waits for a current read.";
+/**
  * A failed live status read as the owner sees it. This module's own refusals,
  * and the two RPC problems only an operator can fix (no independent fallback
  * provider, or a transport without two providers), are shown by fixed text
@@ -900,7 +907,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
-          if (currentBook && shortOfBook(currentBook, balances)) blockers.push(SOLANA_STATUS_BELOW_BOOK);
+          // Below the book only once nothing of the app's own is still settling: a trade or owner withdrawal that
+          // landed leaves the vault short of its book until both providers' finalized receipts book it, and its own
+          // blocker ("awaiting final confirmation", below) holds trading and exits meanwhile. Saying that tokens left
+          // outside Merrymen then (and the agent's [alert]) would send an operator to reconcile a trade that is about
+          // to book itself. Balances read from before the book's own slot (a lagging provider) show no shortfall either.
+          const owned = await s.setup(), settling = (await s.pending()).length > 0 || (!!owned?.signature && owned.status !== "finalized" && owned.status !== "failed");
+          if (currentBook && shortOfBook(currentBook, balances) && !settling) {
+            blockers.push(balances.slot < currentBook.slot ? SOLANA_STATUS_BEHIND_BOOK : SOLANA_STATUS_BELOW_BOOK);
+          }
           if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
           if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
           // A donation in the next swap's temporary input account goes back to the
