@@ -61,6 +61,12 @@ export interface SolanaPreparedSetup {
    */
   withdrawValuation?: SolanaWithdrawValuation;
   status?: "pending" | "finalized" | "failed";
+  /**
+   * Finalized only: the slot of the finalized transaction, as both providers
+   * agreed. A permission is activated from a vault read no earlier than this.
+   * Absent on setups finalized before it was recorded.
+   */
+  finalizedSlot?: number;
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
 }
@@ -686,6 +692,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         if (inserted.changes !== 1) refuse("Withdrawal evidence was already accounted.");
       }
       setup.status = status;
+      if (status === "finalized" && Number.isSafeInteger(finalizedSlot) && finalizedSlot! > 0) setup.finalizedSlot = finalizedSlot;
       await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
     });
   }

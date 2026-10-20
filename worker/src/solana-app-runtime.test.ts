@@ -11,7 +11,7 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -1108,4 +1108,84 @@ test("misconfigured swap prices block trading and exits but still show the vault
       assert.equal(status.live.recoverable?.nativeLamports, "1234");
     } finally { f.raw.close(); }
   }
+});
+
+/** Rejects with a SolanaAppRuntimeError of `code` whose message matches `message`. */
+async function rejectsWith(promise: Promise<unknown>, code: SolanaAppRuntimeError["code"], message: RegExp, label = "") {
+  await assert.rejects(promise, (error: unknown) => {
+    assert.ok(error instanceof SolanaAppRuntimeError, `${label}: ${String(error)}`);
+    assert.equal(error.code, code, `${label}: ${error.message}`); assert.match(error.message, message, label);
+    return true;
+  });
+}
+
+test("an activation reads the vault no earlier than the slot its permission finalized at, so a lagging RPC cannot refuse a valid permission", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    const first = await f.app.submitSetup(f.scope, { signedTransactionBase64 });
+    // It finalizes at slot 1000 (both providers agree), and the server records that slot.
+    f.controls.initialized = true; f.controls.finalized = true;
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "finalized");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.finalizedSlot, 1000);
+    // The provider that answers single reads lags at slot 999, where the vault still holds an
+    // older permission (another session key). Asked for slot 1000 or later it errors, as a
+    // real RPC does ("minimum context slot has not been reached").
+    const stale = f.state(); keyBytes(key(5)).copy(stale, 42);
+    const floors: unknown[] = [];
+    f.providers.primary = async (method, params = []) => {
+      if (method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "confirmed") {
+        const floor = (params[1] as { minContextSlot?: number }).minContextSlot; floors.push(floor);
+        if ((floor ?? 0) > 999) throw new SolanaRpcError("rpc");
+        return { context: { slot: 999 }, value: account(stale) };
+      }
+      return f.read(method, params);
+    };
+    const activate = () => f.app.activateLive(f.scope, { signature: first.signature, sessionSecretKey: f.sessionSeed.toString("base64") });
+    await assert.rejects(activate(), (error: unknown) => error instanceof SolanaRpcError, "a retry, never a refusal of the signed limits");
+    assert.deepEqual(floors, [1000]);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).session(), null, "nothing registered from a stale read");
+    // Caught up: the same activation succeeds.
+    f.providers.primary = null;
+    assert.deepEqual(await activate(), { registered: true, session: f.session, vault: f.vault });
+  } finally { f.raw.close(); }
+});
+
+test("owner bytes refused before anything is saved are 'not-saved'; trouble with saved bytes is 'pending', never 'invalid'", async () => {
+  const f = await fixture();
+  try {
+    await f.live();
+    const store = () => new SolanaTradingStore(f.db, f.scope);
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64: "AQ==" }), "not-saved", /Prepare this owner transaction/, "nothing prepared");
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    for (const [label, bytes, message] of [
+      ["not base64", "%%%", /Invalid encoded Solana transaction/],
+      ["not a transaction", Buffer.from([1, 2, 3]).toString("base64"), /Invalid encoded Solana transaction/],
+      ["unsigned", setup.transactionBase64, /owner signature or reviewed transaction does not match/],
+    ] as const) {
+      await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64: bytes }), "not-saved", message, label);
+    }
+    // A store refusal (the prepared transaction expired) also saves nothing.
+    f.clock.now += 61_000;
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "not-saved", /expired before submission/, "expired");
+    assert.equal((await store().setup())!.signature, undefined); assert.equal(f.controls.sends, 0);
+    f.clock.now -= 61_000;
+    // Saved and broadcast; then other bytes are refused, not saved.
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "pending"); assert.equal(f.controls.sends, 1);
+    const altered = Buffer.from(signedTransactionBase64, "base64"); altered[1] = altered[1]! ^ 1;
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64: altered.toString("base64") }), "not-saved", /does not match/, "a forged signature");
+    // The saved bytes' confirmation is malformed: their outcome is unknown, so "pending".
+    f.controls.finalized = true; f.controls.malformed = true;
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "pending", /^Invalid owner transaction confirmation\.$|^Owner confirmation does not match the saved transaction\.$/, "malformed");
+    assert.equal((await store().setup())!.status, "pending");
+    // A receipt whose vault effect is missing is not believed: also unknown, also "pending".
+    f.controls.malformed = false;
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "pending", /^Owner confirmation does not match the vault state\.$/, "no vault effect");
+    // And an activation of such a permission is a retry, not a refusal.
+    await rejectsWith(f.app.activateLive(f.scope, { signature: getBase58Decoder().decode(Buffer.from(signedTransactionBase64, "base64").subarray(1, 65)), sessionSecretKey: f.sessionSeed.toString("base64") }),
+      "pending", /does not match the vault state/, "activation");
+    assert.equal(f.controls.sends, 1, "nothing is sent again for a finalized-looking receipt");
+  } finally { f.raw.close(); }
 });

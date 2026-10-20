@@ -300,10 +300,15 @@ export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId:
   if (options.requireDeclaredProgramId && !result.declaresProgramId) return fail("unsafe-program");
   return result;
 }
-export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string, owner: string): Promise<{ vault: string; slot: number; state: SolanaVaultState }> {
+/**
+ * The vault's confirmed state. With `minContextSlot`, only a bank at or after
+ * that slot may answer (an RPC behind it errors instead of answering stale).
+ */
+export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string, owner: string, minContextSlot?: number): Promise<{ vault: string; slot: number; state: SolanaVaultState }> {
   const vault = await deriveSolanaVaultAddress(programId, owner);
+  if (minContextSlot !== undefined && (!Number.isSafeInteger(minContextSlot) || minContextSlot < 1)) return fail();
   return rpc.read(async read => {
-    const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed" }]));
+    const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", ...(minContextSlot === undefined ? {} : { minContextSlot }) }]), minContextSlot ?? 1);
     const data = account(raw.value);
     if (data.owner !== programId || data.executable) return fail();
     const state = decodeSolanaVaultAccount(data.data);

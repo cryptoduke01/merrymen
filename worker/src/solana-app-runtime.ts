@@ -27,11 +27,20 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 
+/**
+ * Codes:
+ * - configuration, permission, invalid: refusals.
+ * - pending: retry later. Also every failure to read or book the outcome of an
+ *   owner transaction that is already saved (and was broadcast): its outcome is
+ *   unknown, never refused.
+ * - not-saved: submitted owner bytes refused before anything was saved or
+ *   sent. The page may discard them; resubmitting the same bytes cannot help.
+ */
 export class SolanaAppRuntimeError extends Error {
-  constructor(readonly code: "configuration" | "permission" | "invalid" | "pending", message: string) {
+  constructor(readonly code: "configuration" | "permission" | "invalid" | "pending" | "not-saved", message: string) {
     super(message); this.name = "SolanaAppRuntimeError";
   }
 }
@@ -388,11 +397,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const signature = setup.signature, signed = setup.signedTransactionBase64;
     if (setup.status === "finalized" || setup.status === "failed") return { signature, status: setup.status };
     const live = rpc();
-    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature), ownerViewKey);
+    // These bytes are saved and were broadcast: an answer about them that cannot
+    // be used, or an outcome the book cannot record yet, leaves the outcome
+    // unknown. It is "pending" (retry), never "invalid": nothing was refused.
+    const unknown: (error: unknown) => never = error => {
+      if ((error instanceof SolanaAppRuntimeError && error.code === "invalid") || error instanceof SolanaTradingStoreError) throw new SolanaAppRuntimeError("pending", error.message);
+      throw error;
+    };
+    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature), ownerViewKey).catch(unknown);
     if (quorum.agreed && quorum.value.outcome !== "pending") {
       const view = quorum.value;
-      if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof); return { signature, status: "failed" }; }
-      await s.finishSetup(signature, view.outcome, view.slot);
+      if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof).catch(unknown); return { signature, status: "failed" }; }
+      await s.finishSetup(signature, view.outcome, view.slot).catch(unknown);
       return { signature, status: view.outcome };
     }
     if (quorum.values.every(view => view.outcome === "pending" && !view.seen && view.canLand)) {
@@ -511,19 +527,23 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
     const s = await store(scope), setup = await s.setup();
-    if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) fail("Prepare this owner transaction before signing it.");
-    const transaction = getTransactionDecoder().decode(encoded(input.signedTransactionBase64));
+    // Until saveSetup succeeds nothing is recorded or sent: every refusal is "not-saved".
+    const notSaved: (message: string) => never = message => fail(message, "not-saved");
+    if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) notSaved("Prepare this owner transaction before signing it.");
+    let transaction: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
+    try { transaction = getTransactionDecoder().decode(encoded(input.signedTransactionBase64)); } catch { return notSaved("Invalid encoded Solana transaction."); }
     const signatureBytes = transaction.signatures[address(scope.owner)];
     if (Object.keys(transaction.signatures).length !== 1 || !signatureBytes ||
       Buffer.from(transaction.messageBytes).toString("base64") !== setup.messageBase64 ||
-      !ed25519.verify(new Uint8Array(signatureBytes), new Uint8Array(transaction.messageBytes), base58Decode(scope.owner)!, { zip215: false })) fail("The owner signature or reviewed transaction does not match.");
+      !ed25519.verify(new Uint8Array(signatureBytes), new Uint8Array(transaction.messageBytes), base58Decode(scope.owner)!, { zip215: false })) notSaved("The owner signature or reviewed transaction does not match.");
     const signature = getBase58Decoder().decode(signatureBytes);
     if (setup.signature) {
-      if (setup.signature !== signature || setup.signedTransactionBase64 !== input.signedTransactionBase64) fail("Another owner transaction is already saved.");
+      if (setup.signature !== signature || setup.signedTransactionBase64 !== input.signedTransactionBase64) notSaved("Another owner transaction is already saved.");
       return ownerStatus(s, setup);
     }
     const signed: SolanaPreparedSetup = { ...setup, signature, signedTransactionBase64: input.signedTransactionBase64, status: "pending" };
-    const first = await s.saveSetup(signed);
+    // The store refuses (expired, changed settings, a pending trade) before it writes anything.
+    const first = await s.saveSetup(signed).catch((error: unknown) => error instanceof SolanaTradingStoreError ? notSaved(error.message) : Promise.reject(error));
     if (first) { try { await rpc().send(input.signedTransactionBase64, 1); } catch { /* Durable pending; retry only reconciles. */ } }
     return { signature, status: "pending" as const };
   }
@@ -748,7 +768,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const status = await ownerStatus(s, setup);
       if (status.status !== "finalized") fail(status.status === "failed" ? "The permission transaction failed. Prepare a new permission." : "The permission is awaiting final confirmation.", "pending");
       await verifyDeployment(cfg);
-      const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner);
+      // Read no earlier than the slot the registration finalized at: an RPC behind
+      // it would show the vault before the permission and refuse a valid one. Such
+      // an RPC errors instead (retry). Setups finalized before the slot was kept
+      // read as before.
+      const registeredAt = (await s.setup())?.finalizedSlot;
+      const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner, registeredAt);
       if (live.vault !== setup.vault || live.state.session !== session || live.state.perTrade !== BigInt(setup.limits.perTradeUsdg)
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
         || live.state.perTradeWsol !== BigInt(setup.limits.perTradeWsol ?? "0") || live.state.dailyWsol !== BigInt(setup.limits.dailyWsol ?? "0")
