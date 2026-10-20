@@ -234,19 +234,46 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     ]) assert.deepEqual(onchainIdsIn(text, glued), [], text);
   });
 
-  it("reads a megabyte of long base58 runs in bounded time and fails closed past its budget", () => {
-    // Runs that hold no 43- or 44-character key window: short of one, or hex alone.
-    const noKey = Array.from({ length: 30_000 }, (_, i) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9))).join(" ");
+  it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {
+    // Runs that hold no 43- or 44-character key window (short of one, or hex alone), and runs that hold a signature.
+    const noKeyRun = (i: number) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9));
+    const keyLikeRun = (i: number) => `${base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256))}x${i}`;
+    const textOf = (count: number, run: (i: number) => string) => Array.from({ length: count }, (_, i) => run(i)).join(" ");
+    const noKey = textOf(30_000, noKeyRun);
     assert.ok(noKey.length > 1_000_000);
     assert.deepEqual(onchainIdsIn(noKey.slice(0, 5_000), glued), [], "none of these runs holds an id");
-    let started = performance.now();
     assert.ok(onchainIdsIn(noKey, glued).length > 0, "past the decode budget, the remaining runs are refused unread");
-    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
-    const keyLike = Array.from({ length: 12_000 }, (_, i) => `${base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256))}x${i}`).join(" ");
+    const keyLike = textOf(12_000, keyLikeRun);
     assert.ok(keyLike.length > 1_000_000);
-    started = performance.now();
     assert.equal(onchainIdIn(keyLike, glued), true);
-    assert.ok(performance.now() - started < 2_000, `took ${Math.round(performance.now() - started)} ms`);
+
+    // BOUNDED TIME, MEASURED AGAINST THIS MACHINE IN THIS RUN, never a wall clock: a fixed 2-second
+    // budget failed at 4.8 s on a runner with a load average near 100. Each figure is the best of
+    // several runs (load only ever adds time), and both sides of a comparison share the machine.
+    // - Linear: 32 times the text costs at most 4 x 32 times the time (measured 17-19x). A scan
+    //   quadratic in its text costs about 1,000x; an exponential one never returns.
+    // - A constant of the default scan over the same text, which decodes every standalone run with
+    //   no budget (measured 4.5-6.6x): a glued scan that grew a large constant fails here too.
+    // The 5 ms is timer and scheduling slack on the smaller figure, not a budget.
+    const best = (runs: number, scan: () => unknown): number => {
+      let least = Infinity;
+      for (let i = 0; i < runs; i++) {
+        const started = performance.now();
+        scan();
+        least = Math.min(least, performance.now() - started);
+      }
+      return least;
+    };
+    for (const [name, big, run, count] of [["no key", noKey, noKeyRun, 30_000], ["key-like", keyLike, keyLikeRun, 12_000]] as const) {
+      const small = textOf(Math.ceil(count / 32), run);
+      best(2, () => onchainIdsIn(small, glued));
+      const tSmall = best(5, () => onchainIdsIn(small, glued));
+      const tBig = best(3, () => onchainIdsIn(big, glued));
+      const tDefault = best(3, () => onchainIdsIn(big));
+      const took = `${name}: ${tBig.toFixed(1)} ms for ${big.length} characters, ${tSmall.toFixed(1)} ms for ${small.length}, default scan ${tDefault.toFixed(1)} ms`;
+      assert.ok(tBig < 4 * 32 * tSmall + 5, `not linear in the text: ${took}`);
+      assert.ok(tBig < 50 * tDefault + 5, `far slower than the default scan: ${took}`);
+    }
   });
 });
 
