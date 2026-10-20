@@ -27,6 +27,12 @@ import { fileURLToPath } from "node:url";
  * execute are committed there too). scripts/ci and ci.yml are the toolchain
  * pins, the scripts and the jobs themselves. The Solana worker and core sources
  * produce those fixtures and the instructions the vault executes.
+ *
+ * Not listed: .github/kaka/gate.cjs and package.json, which the CI script
+ * tests (scripts/ci/*.test.mjs) read but the vault build does not. Those tests
+ * are in npm test, so app · tests runs them on every pull request, a change to
+ * either file included, without building the vault. solana-ci.test.mjs fails
+ * if the tests leave app · tests while reading a file outside this list.
  */
 export const SOLANA_PATHS = [
   /^contracts\/solana\//,

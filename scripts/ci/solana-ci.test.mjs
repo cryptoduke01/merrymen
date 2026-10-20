@@ -66,6 +66,14 @@ function appScript(results) {
     });
 }
 
+/** The quoted file globs of a test command. */
+const quoted = text => [...text.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+/** app · tests' sharded tsx --test command. */
+function appTestCommand() {
+  const shards = steps(job("app-test")).find(s => s.includes("--test-shard=")) ?? "";
+  return /^ {8}run: (npx tsx --test --test-shard=\$\{\{ matrix\.shard \}\}\/4 .*)$/m.exec(shards)?.[1] ?? "";
+}
+
 const scratch = mkdtempSync(join(tmpdir(), "merrymen-solana-ci-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 let n = 0;
@@ -281,11 +289,9 @@ describe("the CI jobs", () => {
   });
 
   it("app · tests runs exactly npm test's file set, these CI script tests included", () => {
-    const quoted = text => [...text.matchAll(/"([^"]+)"/g)].map(m => m[1]);
     const npmTest = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts.test;
     assert.match(npmTest, /^tsx --test "/);
-    const shards = steps(job("app-test")).find(s => s.includes("--test-shard=")) ?? "";
-    const command = /^ {8}run: (npx tsx --test --test-shard=\$\{\{ matrix\.shard \}\}\/4 .*)$/m.exec(shards)?.[1] ?? "";
+    const command = appTestCommand();
     assert.ok(command, "app-test has no sharded tsx --test step");
     assert.deepEqual(quoted(command), quoted(npmTest), "the comment promises the same file set as npm test");
     assert.ok(quoted(npmTest).includes("scripts/ci/*.test.mjs"), "npm test must run scripts/ci/*.test.mjs");
@@ -355,6 +361,21 @@ describe("solana-paths.mjs", () => {
       "xcontracts/solana/a.rs",
     ];
     assert.deepEqual(solanaPaths([...relevant, ...unrelated]), relevant);
+  });
+
+  it("leaves out a file this suite reads only because app · tests runs the suite on every pull request", () => {
+    // A pull request that changes only a file solana · paths does not list
+    // starts no vault job, so this suite would not run in solana · test. It
+    // reads two such files: .github/kaka/gate.cjs (the docs-only lane test)
+    // and package.json (the npm test file set). It still runs on that pull
+    // request because it is in npm test, which app · tests runs on every one.
+    const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const reads = [...new Set([...self.matchAll(/join\(repo, "([^"]+)"\)/g)].map(m => m[1]))];
+    for (const p of [".github/kaka/gate.cjs", ".github/workflows/ci.yml", "contracts/solana/build.sh"]) assert.ok(reads.includes(p), `the scan missed ${p}`);
+    const outside = reads.filter(p => solanaPaths([p, `${p}/x`]).length === 0).sort();
+    assert.deepEqual(outside, [".github/kaka/gate.cjs", "package.json"]);
+    assert.ok(quoted(appTestCommand()).includes("scripts/ci/*.test.mjs"),
+      `app · tests must run scripts/ci/*.test.mjs, or solana · paths must list ${outside.join(" and ")}`);
   });
 
   it("builds on every run that is not a pull request, and on any pull request it cannot bound", () => {
