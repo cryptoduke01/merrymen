@@ -1129,6 +1129,16 @@ test("the recovery card waits for the status, and shows only for a live vault: n
     state = initial("paper"); Object.assign(state.runtime.live, { programId: PROGRAM, vault: "Vau1tAddress1111111111111111111111111111111" });
     await ui.click("Refresh account");
     assert.equal(!!exportCard(), false);
+    // Paper, with the vault's balances read but no live book or session: still no card
+    // (a live binding would show one: the paper restriction is what hides it).
+    Object.assign(state.runtime.live, { balances: { slot: 9, cashUsdg: "5000000", wsolRaw: "0" } });
+    await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    // Paper with a live session still registered: the vault and its session outlive the switch back to paper.
+    Object.assign(state.runtime.live, { session: "Sess1onKey111111111111111111111111111111111" });
+    await ui.click("Refresh account");
+    assert.ok(exportCard());
+    Object.assign(state.runtime.live, { session: null, balances: null });
     // Back to paper after trading live: the funded vault still needs a recovery path.
     Object.assign(state.runtime.live, { book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } });
     await ui.click("Refresh account");

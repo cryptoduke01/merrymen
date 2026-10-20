@@ -346,8 +346,11 @@ function ConnectedSolana() {
   const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
   // The recovery card: a live binding whose vault the server has read, or any
   // binding whose account still has a live book or session (switching back to
-  // paper leaves the vault and its funds). Never paper-only, never before the
-  // status has loaded.
+  // paper leaves the vault and its funds). Never paper-only (a paper binding
+  // whose vault balances were read but that has no book or session gets no
+  // card), never before the status has loaded. Showing it for a paper binding
+  // with a live book or session is an owner decision; the stricter
+  // alternative hides it for every paper binding.
   const recoveryVault = !!binding && !!live?.vault && !!live.programId && (binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session);
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
