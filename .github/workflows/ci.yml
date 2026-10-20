@@ -209,7 +209,8 @@ jobs:
   #
   # ONLY WHEN THE VAULT COULD CHANGE. A pull request that lands nothing the
   # vault jobs read (solana-paths.mjs: contracts/solana, scripts/ci, this file,
-  # the Solana worker and core sources) skips the toolchain download (about
+  # the Solana worker and core sources, and cargo or rustup configuration at
+  # the repository root or in contracts/) skips the toolchain download (about
   # 1.6 GB across the two jobs) and the build. The jobs are not skipped: every
   # step is, except a notice, so each still concludes `success`. A skipped job
   # would fail the Kaka gate, which needs every job of the run to succeed

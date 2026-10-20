@@ -102,7 +102,14 @@ artifact it just built. `build.sh` is the only supported build recipe:
 - It requires `cargo-build-sbf` 2.3.13 and platform-tools v1.48 (rustc 1.84.1-dev, LLVM
   19.1.7, anza-xyz/rust `293a1b6c`) and always passes `--tools-version v1.48 --arch v0`
   and `--locked`. Any other toolchain, an `lto` setting, or ambient `RUSTFLAGS`,
-  `CARGO_PROFILE_*` or `CARGO_TARGET_*` overrides stop the build.
+  `CARGO_PROFILE_*` or `CARGO_TARGET_*` overrides stop the build. So does a
+  `.cargo/config.toml` (or legacy `.cargo/config`) in the program's directory, in any
+  directory above it, or above the directory `build.sh` runs from, other than
+  `CARGO_HOME`'s own: cargo applies such a file to the vault build (a `[profile.release]`
+  table there overrides the workspace's `overflow-checks`), and the source digest does
+  not cover it. A pull request that adds one at the repository root or in `contracts/`
+  starts the vault jobs (`scripts/ci/solana-paths.mjs`), so CI meets this refusal on the
+  pull request itself.
 - It resolves `CARGO_HOME` and the source directory to physical paths. cargo-build-sbf
   remaps rustc's canonical working directory, so a symlinked `CARGO_HOME` (macOS `/tmp`)
   left absolute registry paths in the binary and changed its hash (audit GAP4-2).

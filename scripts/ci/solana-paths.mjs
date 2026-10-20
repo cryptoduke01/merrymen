@@ -28,6 +28,15 @@ import { fileURLToPath } from "node:url";
  * pins, the scripts and the jobs themselves. The Solana worker and core sources
  * produce those fixtures and the instructions the vault executes.
  *
+ * Cargo and rustup configuration above contracts/solana: cargo-build-sbf runs
+ * cargo in the program's directory, and cargo reads .cargo/config.toml (or the
+ * legacy .cargo/config) there and in every parent directory, so a
+ * [profile.release] or [build] table at the repository root or in contracts/
+ * changes the vault binary. build.sh refuses such a file, and listing it here
+ * makes the pull request that adds one run that refusal instead of skipping
+ * the build. rust-toolchain(.toml) picks the host toolchain test.sh's native
+ * and runtime tests run on (the SBF build itself always uses +solana).
+ *
  * Not listed: .github/kaka/gate.cjs and package.json, which the CI script
  * tests (scripts/ci/*.test.mjs) read but the vault build does not. Those tests
  * are in npm test, so app · tests runs them on every pull request, a change to
@@ -40,6 +49,8 @@ export const SOLANA_PATHS = [
   /^\.github\/workflows\/ci\.yml$/,
   /^packages\/core\/src\/solana/,
   /^worker\/src\/solana/,
+  /^(?:contracts\/)?\.cargo\//,
+  /^(?:contracts\/)?rust-toolchain(?:\.toml)?$/,
 ];
 
 export function solanaPaths(paths) {

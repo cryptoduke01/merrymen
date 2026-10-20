@@ -390,6 +390,14 @@ describe("solana-paths.mjs", () => {
       "packages/core/src/solana.ts",
       "worker/src/solana-executor.ts",
       "worker/src/solana-recover.ts",
+      // Cargo reads these from every directory above the program, and a
+      // [profile.release] table there changes the vault binary.
+      ".cargo/config.toml",
+      ".cargo/config",
+      "contracts/.cargo/config.toml",
+      "rust-toolchain.toml",
+      "rust-toolchain",
+      "contracts/rust-toolchain.toml",
     ];
     const unrelated = [
       "README.md",
@@ -405,6 +413,10 @@ describe("solana-paths.mjs", () => {
       ".github/kaka/gate.cjs",
       "package.json",
       "xcontracts/solana/a.rs",
+      "web/.cargo/config.toml",
+      "tools/rust-toolchain.toml",
+      "rust-toolchain.toml.bak",
+      ".cargo-config.toml",
     ];
     assert.deepEqual(solanaPaths([...relevant, ...unrelated]), relevant);
   });
@@ -545,6 +557,127 @@ describe("test.sh, the one vault test recipe", () => {
     assert.deepEqual(rebuilt.filter(f => !f.startsWith('"$')), built.filter(f => !f.startsWith('"$')));
     assert.deepEqual(rebuilt.slice(0, 4), built.slice(0, 4));
     assert.doesNotMatch(buildSh + rebuildSh + testSh, /--force-tools-install|cargo-test-sbf/);
+  });
+});
+
+describe("build.sh, run against a stub toolchain", () => {
+  // No real toolchain: cargo-build-sbf and rustc are stubs on PATH that answer
+  // build.sh's version checks, and the "build" writes fixed bytes. Every run
+  // happens inside a scratch tree, so no cargo configuration of the machine
+  // running these tests is above it.
+  const declared = "EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU";
+  const host = `${spawnSync("uname", ["-s"], { encoding: "utf8" }).stdout.trim()}-${spawnSync("uname", ["-m"], { encoding: "utf8" }).stdout.trim()}`;
+  /** <root>/repo/contracts/solana with build.sh and minimal reviewed inputs, a stub toolchain and an empty CARGO_HOME. */
+  function workspace() {
+    const root = fresh("build");
+    const dir = join(root, "repo/contracts/solana");
+    mkdirSync(join(dir, "programs/merrymen-vault/src"), { recursive: true });
+    writeFileSync(join(dir, "build.sh"), readFileSync(join(repo, "contracts/solana/build.sh")));
+    chmodSync(join(dir, "build.sh"), 0o755);
+    writeFileSync(join(dir, "Cargo.toml"), "[workspace]\nmembers = [\"programs/*\"]\n");
+    writeFileSync(join(dir, "Cargo.lock"), "version = 4\n");
+    writeFileSync(join(dir, "programs/merrymen-vault/Cargo.toml"), "[package]\nname = \"merrymen-vault\"\n");
+    writeFileSync(join(dir, "programs/merrymen-vault/src/lib.rs"), `declare_id!("${declared}");\n`);
+    const tools = join(root, "platform-tools");
+    mkdirSync(join(tools, "rust"), { recursive: true });
+    writeFileSync(join(tools, "version.md"), "293a1b6c60a0b8d92593843c373539e21e3ba087  https://github.com/anza-xyz/rust.git\n");
+    const bin = join(root, "bin");
+    stub(bin, "rustc", `case "$2" in -vV) printf 'rustc 1.84.1-dev (built)\\nLLVM version: 19.1.7\\n' ;; --print) echo "${tools}/rust" ;; *) exit 1 ;; esac`);
+    stub(bin, "cargo-build-sbf", [
+      `if [ "$1" = --version ]; then echo "solana-cargo-build-sbf 2.3.13"; exit 0; fi`,
+      `echo "$*" >> "${root}/builds"`,
+      `while [ $# -gt 0 ]; do if [ "$1" = --sbf-out-dir ]; then out="$2"; fi; shift; done`,
+      `mkdir -p "$out" && printf '\\177ELF stub vault' > "$out/merrymen_vault.so"`,
+    ].join("\n"));
+    const cargoHome = join(root, "cargo-home");
+    mkdirSync(cargoHome);
+    return { root, dir, bin, cargoHome };
+  }
+  /** Runs build.sh with only the stub toolchain's settings: nothing build.sh refuses comes from this process. */
+  function build(w, args = [], { cwd = w.root, cargoHome = w.cargoHome } = {}) {
+    const base = Object.fromEntries(Object.entries(env()).filter(([k]) => !/^(RUSTFLAGS|CARGO_.*|RUSTUP_TOOLCHAIN)$/.test(k)));
+    const r = spawnSync(join(w.dir, "build.sh"), args, {
+      cwd, encoding: "utf8", env: { ...base, PATH: `${w.bin}:${process.env.PATH}`, CARGO_HOME: cargoHome, CARGO_BUILD_SBF: join(w.bin, "cargo-build-sbf") },
+    });
+    return { ...r, builds: existsSync(join(w.root, "builds")) ? readFileSync(join(w.root, "builds"), "utf8").trim().split("\n").length : 0 };
+  }
+
+  it("builds, records a manifest from two identical builds, then finds the next build matches it", () => {
+    const w = workspace();
+    const first = build(w);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(first.builds, 1);
+    assert.match(first.stderr, new RegExp(`note: no ${host} build manifest for this source`));
+    const recorded = build(w, ["--record"]);
+    assert.equal(recorded.status, 0, recorded.stderr);
+    assert.equal(recorded.builds, 3, "--record builds in place and once more from a copy");
+    const manifest = JSON.parse(readFileSync(join(w.dir, `build-manifests/${host}.json`), "utf8"));
+    assert.equal(manifest.artifact.sha256, sha256(Buffer.from("\x7fELF stub vault", "latin1")));
+    assert.equal(manifest.program.declaredId, declared);
+    const again = build(w);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, new RegExp(`^matches build-manifests/${host}\\.json$`, "m"));
+  });
+
+  it("fails on the same source with a different artifact: in CI that is the Test step, before anything is uploaded", () => {
+    const w = workspace();
+    assert.equal(build(w, ["--record"]).status, 0);
+    const path = join(w.dir, `build-manifests/${host}.json`);
+    const m = JSON.parse(readFileSync(path, "utf8"));
+    m.artifact.sha256 = "e".repeat(64);
+    writeFileSync(path, `${JSON.stringify(m, null, 2)}\n`);
+    const r = build(w);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^error: same source, different artifact: manifest e{64}, built [0-9a-f]{64}$/m);
+  });
+
+  it("refuses a cargo config in the program's directory or any directory above it, or above where it runs, before building", () => {
+    const profile = "[profile.release]\noverflow-checks = false\n";
+    const w = workspace();
+    const places = [
+      join(w.dir, "programs/merrymen-vault/.cargo/config.toml"),
+      join(w.dir, ".cargo/config.toml"),
+      join(w.dir, ".cargo/config"),
+      join(w.root, "repo/contracts/.cargo/config.toml"),
+      join(w.root, "repo/.cargo/config.toml"),
+      join(w.root, ".cargo/config"),
+    ];
+    for (const place of places) {
+      mkdirSync(dirname(place), { recursive: true });
+      writeFileSync(place, profile);
+      for (const args of [[], ["--record"]]) {
+        const r = build(w, args);
+        assert.equal(r.status, 1, `${place} ${args}: ${r.stderr}`);
+        assert.ok(r.stderr.includes(`error: remove ${place} for a reproducible build`), r.stderr);
+        assert.equal(r.builds, 0, "refused before cargo-build-sbf ran");
+      }
+      rmSync(dirname(place), { recursive: true, force: true });
+    }
+    // Where build.sh is run from counts too: cargo-build-sbf inherits it.
+    const elsewhere = join(w.root, "elsewhere");
+    mkdirSync(join(elsewhere, ".cargo"), { recursive: true });
+    mkdirSync(join(elsewhere, "sub"));
+    writeFileSync(join(elsewhere, ".cargo/config.toml"), profile);
+    const fromThere = build(w, [], { cwd: join(elsewhere, "sub") });
+    assert.equal(fromThere.status, 1, fromThere.stderr);
+    assert.ok(fromThere.stderr.includes(`error: remove ${join(elsewhere, ".cargo/config.toml")}`), fromThere.stderr);
+    rmSync(elsewhere, { recursive: true, force: true });
+    // A dangling symlink is refused as well.
+    mkdirSync(join(w.dir, ".cargo"));
+    symlinkSync(join(w.root, "missing.toml"), join(w.dir, ".cargo/config.toml"));
+    assert.equal(build(w).status, 1);
+    rmSync(join(w.dir, ".cargo"), { recursive: true, force: true });
+    assert.equal(build(w).status, 0);
+  });
+
+  it("allows CARGO_HOME's own config, even when CARGO_HOME is a .cargo directory above the program", () => {
+    const w = workspace();
+    const home = join(w.root, "repo/.cargo");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.toml"), "[net]\nretry = 3\n");
+    const r = build(w, [], { cargoHome: home });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(build(w).status, 1, "under any other CARGO_HOME the same file is refused");
   });
 });
 
