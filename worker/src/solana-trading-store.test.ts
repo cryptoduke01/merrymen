@@ -932,6 +932,28 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   const signatureOf = (n: number) => base58Encode(new Uint8Array(64).fill(n));
   const flows = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE evidence_id LIKE 'external%' ORDER BY evidence_id").all() as
     Array<Record<string, string>>).map(row => [row.evidence_id, row.kind, row.amount_raw]);
+  test(`${dialect}: inflows are booked from balances: a sweep's unbooked inflow is booked as a status read just before it would, so it leaves the same high-water mark as the in-app path (owner decision)`, options, async t => {
+    // Book 100 USDG, peak 100. Off the books 40 USDG left the vault (a leaked session), then the owner deposited 50: the vault holds 110.
+    const results: Array<{ path: string; hwmRaw: string; cashRaw: string }> = [];
+    for (const path of ["in-app", "outside"] as const) {
+      const f = await fixture(t, dialect);
+      await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, OWNER, JSON.stringify({ hwmRaw: "100000000",
+        cashRaw: "100000000", wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 1001, updatedAtMs: NOW, balancesSlot: 1001 }));
+      if (path === "in-app") {
+        // A status read (or the withdrawal prepare's) books the 10 above the book, then the owner withdraws all 110 in the app.
+        await f.store.reconcileExternalInflows({ cashUsdg: "110000000", wsolRaw: "0", slot: 1002, observedAtMs: NOW, commitment: "finalized" });
+        await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "5", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "110000000" }, signatureOf(20));
+        await f.store.finishSetup(signatureOf(20), "finalized", 1003);
+      } else {
+        // solana-recover sweeps all 110 before any read: its pre-transaction balance books the same 10, then the withdrawal.
+        await f.store.reconcileExternalWithdrawals({ withdrawals: [{ signature: signatureOf(21), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "110000000", preRaw: "110000000" }] });
+      }
+      const book = (await f.store.liveBook())!;
+      results.push({ path, hwmRaw: book.hwmRaw, cashRaw: book.cashRaw });
+    }
+    assert.deepEqual(results, [{ path: "in-app", hwmRaw: "0", cashRaw: "0" }, { path: "outside", hwmRaw: "0", cashRaw: "0" }],
+      "both net the 40 lost against the 50 deposited; neither path keeps the loss in the peak");
+  });
   test(`${dialect}: a sweep outside Merrymen that also took an inflow no status read booked yet books that inflow first, then the withdrawal, and the book is free again`, options, async t => {
     // USDG: 1 USDG deposited after the last read, then solana-recover took the whole balance.
     {

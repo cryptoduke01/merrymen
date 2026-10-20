@@ -663,11 +663,12 @@ export class SolanaTradingStore implements SolanaLiveJournal {
    * withdraw by the vault program, signed by this owner, for this vault, and the
    * vault token account's own net decrease in it (`amountRaw`).
    *
-   * What keeps it from hiding a loss: only an owner-signed withdrawal is booked,
-   * never a balance difference, and only one the book cannot already reflect:
-   * its slot is after the book's last absolute balance (balancesSlot, or the
-   * book's creation), so it is still in the vault's balances and not in the
-   * book. Each is booked once (evidence external:<signature>:<mint>, and never a
+   * What keeps it from hiding a loss: every withdrawal booked is an owner-signed
+   * one, never a shortfall, and only one the book cannot already reflect: its
+   * slot is after the book's last absolute balance (balancesSlot, or the book's
+   * creation), so it is still in the vault's balances and not in the book. The
+   * one balance difference it books is a sweep's unbooked inflow (below), and
+   * only as status books inflows. Each is booked once (evidence external:<signature>:<mint>, and never a
    * signature the app already booked as its own withdrawal). An in-app prepared
    * withdrawal whose wallet broadcast it and that the owner recorded here first
    * is never saved as the app's own afterwards, nor booked again by it
@@ -696,6 +697,26 @@ export class SolanaTradingStore implements SolanaLiveJournal {
    * the withdrawal. Only what the withdrawal needs: any rest still in the vault
    * waits for status's own inflow read. Without a pre-transaction balance at or
    * above the amount it stays refused. An asset short any other way stays held.
+   *
+   * INFLOWS ARE BOOKED FROM BALANCES (owner decision, recorded 2026-10-20). A
+   * deposit is a plain token transfer with no vault instruction to attribute it,
+   * so every inflow is booked as a balance above the book: status's finalized
+   * read, a withdrawal prepare's, and this sweep's pre-transaction balance. An
+   * off-book loss (a leaked session's trade, say) and a deposit that both fall
+   * between two such reads therefore net: book 100 USDG, 40 lost off the books,
+   * 50 deposited, then any of those reads books a deposit of 10, and the loss
+   * leaves the drawdown baseline. The sweep is no different from a status read
+   * just before it (it books what that read would have, then the withdrawal),
+   * and the in-app path gives the same high-water mark (solana-trading-store
+   * test "inflows are booked from balances"). Refusing only the sweep would
+   * change the outcome by whether a page happened to read status in between,
+   * and leave the owner held. The fence that would close it for every path is a
+   * vault-sequence anchor: the sequence the book has accounted for, kept by
+   * trade settlement, owner withdrawals and recorded external ones (native SOL
+   * included), so that a balance is booked as an inflow only when no sequence
+   * the book does not know of moved since. That spans the trade and owner paths
+   * and is not built here; until then a loss off the books shows as a vault
+   * below its book only while no deposit has covered it.
    */
   async reconcileExternalWithdrawals(input: { withdrawals: ReadonlyArray<{ signature: string; slot: number; mint: string; amountRaw: string; preRaw?: string; valuation?: SolanaWithdrawValuation }> }):
     Promise<{ booked: Array<{ signature: string; mint: string; amountRaw: string }>; book: SolanaLiveBook }> {
