@@ -1376,6 +1376,13 @@ test("for a program no release lists, step 2 offers only the read-only plan, whi
 });
 test("the card's release pin is the one the recovery tool trusts by default", async () => {
   const recovery = createRequire(import.meta.url)(recoveryPath) as typeof import("./SolanaRecovery");
+  // The card reads SOLANA_VAULT_RELEASES from core by name (solanaVaultReleases). Once the pin lives in
+  // core (solana-glue-cli), the tool must trust that very array; until then the tool defines its own. A
+  // pin renamed or moved anywhere else fails here, even while it lists no release.
+  const core = createRequire(import.meta.url)("../../../packages/core/src/solana-live") as Record<string, unknown>;
+  const toolSource = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-recover.ts", import.meta.url)), "utf8");
+  if (Object.hasOwn(core, "SOLANA_VAULT_RELEASES")) assert.equal(TOOL_RELEASES, core.SOLANA_VAULT_RELEASES, "the tool trusts core's pin, the one the card reads");
+  else assert.match(toolSource, /^export const SOLANA_VAULT_RELEASES\b/m, "the pin is neither in core, where the card reads it, nor the tool's own");
   // The real pin (no test override): what the page offers to sign for is exactly what the tool signs for.
   assert.deepEqual(recovery.solanaVaultReleases(), TOOL_RELEASES);
   for (const release of TOOL_RELEASES) assert.equal(recovery.releasedProgramSha256(release.programId), release.sha256);

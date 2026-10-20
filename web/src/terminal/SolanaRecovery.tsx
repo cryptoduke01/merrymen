@@ -55,7 +55,10 @@ const SHA256 = /^[0-9a-f]{64}$/;
  * tool's branch: until it is exported, and for any entry that is not a
  * program ID and a SHA-256, no program counts as released, so the card
  * offers only the plan. Never the status answer: a server-reported hash
- * could be copied into the tool's escape hatch.
+ * could be copied into the tool's escape hatch. Once that branch is merged,
+ * this reads it by a typed import instead (`import { SOLANA_VAULT_RELEASES }`),
+ * so a rename fails to compile. Until then SolanaScreen.test.ts fails if the
+ * pin is renamed or moved anywhere but core, even while it lists nothing.
  */
 export function solanaVaultReleases(): readonly SolanaVaultRelease[] {
   const pinned: unknown = Reflect.get(solanaLive, "SOLANA_VAULT_RELEASES");
