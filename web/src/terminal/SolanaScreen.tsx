@@ -55,6 +55,27 @@ type Receipt = { mode?: string; requestId?: string; signature?: string; status?:
 type Preview = { quote: SolanaQuote; key: string; deadline: number; lifetime: number; movedFrom?: string };
 /** The intent route's price-moved refusal, word for word (PRICE_MOVED in web/src/lib/solana-api.ts; a test pins the two together). */
 export const SOLANA_PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
+/** The market's zero-output answer: no route buys this amount (TOO_SMALL in web/src/lib/solana-api.ts; pinned the same way). */
+export const SOLANA_TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
+/** The slippage the server's write-off quotes a lot back with (SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS; a test keeps the two equal). */
+export const SOLANA_WRITE_OFF_SLIPPAGE_BPS = 100;
+/**
+ * A HOSTED PAPER LOT THE OWNER MAY WRITE OFF, AND ONLY AFTER THE MARKET SAID IT IS DUST.
+ *
+ * A dust lot (no route buys it back) keeps its position slot, and while any
+ * lot but wrapped SOL is held the paper strategy holds, so the owner can write
+ * it off: POST /api/solana/paper/write-off books the whole lot at zero, only
+ * on the market's own zero-output answer, and cannot be undone. The page
+ * offers it only for a lot whose whole sale was just answered 400 TOO_SMALL:
+ * selling the whole wrapped SOL lot in the trade form, or, for a lot the form
+ * cannot sell, "Check for write-off" (a preview of selling the whole lot,
+ * which records nothing). An ordinary lot never shows the offer, and nothing
+ * is sent until the owner confirms. The offer holds only while the portfolio
+ * still shows that exact lot. The status has no dust marker to offer it from
+ * (a cross-track request asks for one); the server refuses anything that is
+ * not dust (409, shown verbatim) either way.
+ */
+type DustLot = { mint: string; amountRaw: string; confirming: boolean };
 const RAW = /^(0|[1-9][0-9]*)$/;
 function base64(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)); }
 function fromBase64(value: string): Uint8Array { return Uint8Array.from(atob(value), (byte) => byte.charCodeAt(0)); }
@@ -114,6 +135,7 @@ function ConnectedSolana() {
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   // A pacing answer (429): this request was not processed; the owner waits and tries again. Not a failure.
   const [notice, setNotice] = useState("");
+  const [dust, setDust] = useState<DustLot | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
@@ -183,7 +205,7 @@ function ConnectedSolana() {
   }, [load]);
   useEffect(() => {
     accountEpoch.current++;
-    setStatus(null); setError(""); setNotice(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
+    setStatus(null); setError(""); setNotice(""); setDust(null); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
     discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
@@ -263,7 +285,9 @@ function ConnectedSolana() {
     // Timed on this clock from before the request, so a skewed device clock
     // cannot stretch the quote's lifetime and latency only shortens it.
     const started = Date.now();
-    const result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent });
+    let result: { preview: SolanaQuote | { quote: SolanaQuote } };
+    try { result = await api<{ preview: SolanaQuote | { quote: SolanaQuote } }>("intent", { action: "preview", mode, intent }); }
+    catch (e) { if (offerWholeLot(e, intent)) return; throw e; }
     const quote = "quote" in result.preview ? result.preview.quote : result.preview;
     if (quote.inputMint !== intent.inputMint || quote.outputMint !== intent.outputMint || quote.inAmount !== intent.amountRaw || !RAW.test(quote.minOutAmount)) throw new Error("The preview does not match this trade. Preview again.");
     const lifetime = Math.min(SOLANA_QUOTE_MAX_AGE_MS, Math.max(0, quote.expiresAtMs - quote.quotedAtMs));
@@ -283,6 +307,7 @@ function ConnectedSolana() {
     // nothing, when the fresh quote it would be placed at guarantees less.
     try { result = await api<{ receipt: Receipt }>("intent", { action: "trade", mode, intent: { ...intent, minOutAmount: preview.quote.minOutAmount } }); }
     catch (e) {
+      if (offerWholeLot(e, intent)) { setPreview(null); return; }
       if (!(e instanceof RequestError) || e.status !== 409 || e.message !== SOLANA_PRICE_MOVED) throw e;
       // Refused before anything was signed, sent or recorded, and this minimum can
       // no longer be met: the stale preview goes, so it is never sent again. What
@@ -299,6 +324,39 @@ function ConnectedSolana() {
     setReceipt(result.receipt); await refresh();
   };
   const tokenLabel = (mint: string) => mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+  const paperLots = status?.binding?.requestedMode === "paper" ? status.runtime?.paper?.positions ?? [] : [];
+  /** The market's zero-output answer to selling exactly a whole paper lot: that lot is dust. */
+  const zeroOutputFor = (e: unknown, sale: { mode: string; inputMint: string; outputMint: string; amountRaw: string }) => e instanceof RequestError && e.status === 400 && e.message === SOLANA_TOO_SMALL
+    && sale.mode === "paper" && sale.outputMint === SOLANA_USDG_MINT ? paperLots.find((lot) => lot.mint === sale.inputMint && lot.amountRaw === sale.amountRaw) ?? null : null;
+  /** A whole-lot sale the market answered with zero output: offer the lot for write-off instead of a "try a larger amount" it cannot follow. */
+  const offerWholeLot = (e: unknown, sale: { mode: string; inputMint: string; outputMint: string; amountRaw: string }): boolean => {
+    const lot = zeroOutputFor(e, sale);
+    if (!lot) return false;
+    setDust({ mint: lot.mint, amountRaw: lot.amountRaw, confirming: false });
+    setNotice("No route buys back this whole lot, so it cannot be sold. Nothing was sent or recorded. You can write it off in your paper portfolio.");
+    return true;
+  };
+  /** For a lot the trade form cannot sell: a preview of selling all of it, which records nothing. Only its zero-output answer offers the write-off. */
+  const checkDust = async (lot: { mint: string; amountRaw: string }) => {
+    const sale = { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: crypto.randomUUID(), inputMint: lot.mint, outputMint: SOLANA_USDG_MINT,
+      amountRaw: lot.amountRaw, slippageBps: SOLANA_WRITE_OFF_SLIPPAGE_BPS };
+    try { await api("intent", { action: "preview", mode: "paper", intent: sale }); }
+    catch (e) { if (offerWholeLot(e, sale)) return; throw e; }
+    setDust(null); setNotice("A route still buys this whole lot back, so it is not dust and cannot be written off.");
+  };
+  /** Books the confirmed dust lot at zero: the server checks the market's zero-output answer again first. */
+  const writeOffDust = async () => {
+    const lot = dust;
+    if (!lot?.confirming) throw new Error("Check the lot again before writing it off.");
+    try { await api("paper/write-off", { mint: lot.mint }); }
+    catch (e) {
+      // A refusal ends the offer (the lot may not be dust, or changed); a paced request keeps it to try again.
+      if (!(e instanceof RequestError && e.status === 429)) setDust(null);
+      throw e;
+    }
+    setDust(null); await refresh();
+    setNotice("The lot was written off at zero and removed from your paper portfolio.");
+  };
   /** What the recorded trade itself guaranteed, not the earlier preview. */
   const receiptAmounts = (trade: Receipt): string | null => {
     const out = trade.intent?.outputMint ?? (side === "buy" ? WSOL : SOLANA_USDG_MINT), decimals = out === SOLANA_USDG_MINT ? 6 : 9, label = tokenLabel(out);
@@ -507,7 +565,18 @@ function ConnectedSolana() {
       </form>
       {binding.requestedMode === "paper" ? <div className="solana-card"><h2>Paper portfolio</h2>
         {status?.runtime?.paper ? <><p className="solana-value">{display(status.runtime.paper.cashRaw)} USDG</p><p>Simulated cash. {status.runtime.paper.positions.length} open position(s).</p>
-          {status.runtime.paper.positions.map((position) => <p key={position.mint}>{position.mint === WSOL ? "Wrapped SOL" : position.mint}: {display(position.amountRaw, position.decimals)}</p>)}
+          {status.runtime.paper.positions.map((position) => {
+            const label = position.mint === WSOL ? "Wrapped SOL" : position.mint, amountShown = display(position.amountRaw, position.decimals);
+            const offered = dust && dust.mint === position.mint && dust.amountRaw === position.amountRaw ? dust : null;
+            return <div key={position.mint}><p>{label}: {amountShown}
+              {/* The trade form sells only wrapped SOL; any other lot can be checked for dust here. */}
+              {position.mint !== WSOL && !offered && <> <button type="button" className="solana-secondary" disabled={busy} onClick={() => void act(() => checkDust(position))}>Check for write-off</button></>}</p>
+              {offered && (offered.confirming
+                ? <div className="solana-warning" role="group" aria-label="Confirm the write-off"><p>Write off this whole lot of {amountShown} {position.mint === WSOL ? "wrapped SOL" : "tokens"}? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot. This cannot be undone.</p>
+                  <button type="button" disabled={busy} onClick={() => void act(writeOffDust)}>Write off at zero</button>
+                  <button type="button" className="solana-secondary" disabled={busy} onClick={() => setDust(null)}>Keep it</button></div>
+                : <p>No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold. <button type="button" disabled={busy} onClick={() => setDust({ ...offered, confirming: true })}>Write off…</button></p>)}</div>;
+          })}
           <p>Network fees and account rent are excluded from paper results.</p>
           {!!status.runtime.paper.trades?.length && <details><summary>Recent simulated trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.side === "buy" ? "Buy" : "Sell"} · {trade.requestId} · simulated</li>)}</ul></details>}
           </> : <><label>Starting simulated USDG<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>

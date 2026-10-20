@@ -1086,10 +1086,13 @@ test("a paced preview or trade (429) is a wait, not a failure: nothing more is s
   assert.match(ui.container.textContent!, /Simulated trade recorded/);
 });
 const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
-test("the page's price-moved sentence is the intent route's own", () => {
+test("the page's price-moved and too-small sentences, and its write-off slippage, are the server's own", async () => {
   const api = readFileSync(fileURLToPath(new URL("../lib/solana-api.ts", import.meta.url)), "utf8");
   assert.equal(screen.SOLANA_PRICE_MOVED, PRICE_MOVED);
   assert.ok(api.includes(`const PRICE_MOVED = "${screen.SOLANA_PRICE_MOVED}";`), "solana-api.ts's PRICE_MOVED");
+  assert.ok(api.includes(`const TOO_SMALL = "${screen.SOLANA_TOO_SMALL}";`), "solana-api.ts's TOO_SMALL");
+  const { SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS } = await import("../../../worker/src/solana-paper-store");
+  assert.equal(screen.SOLANA_WRITE_OFF_SLIPPAGE_BPS, SOLANA_PAPER_WRITE_OFF_SLIPPAGE_BPS);
 });
 test("a price-moved refusal drops the stale preview and offers the fresh minimum only for the owner's own click, as the same request", async () => {
   state.runtime.paper = paper;
@@ -1174,6 +1177,89 @@ test("a fresh minimum expires like a preview, and is then never sent", async () 
     assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
     assert.equal(trades.length, 1);
   } finally { mock.timers.reset(); }
+});
+const TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
+const BONK = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+const hasButton = (text: string) => [...ui.container.querySelectorAll("button")].some((item) => item.textContent === text);
+test("a paper lot is offered for write-off only after the market answers its whole sale with zero output, and only once confirmed", async () => {
+  // An ordinary wrapped SOL lot, a wrapped SOL dust lot is what the form sells; another token's lot the form cannot sell.
+  state.runtime.paper = { ...paper, positions: [{ mint: OWNER, decimals: 9, amountRaw: "5", costBasisUsdgRaw: "1" }, { mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  const writeOffs: unknown[] = [];
+  let writeOff: () => Response = () => json({ error: "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.", ownerFacing: true }, 409);
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") {
+      const intent = body.intent as { inputMint: string; amountRaw: string };
+      // The whole wrapped SOL lot and the whole token lot are dust; any other amount is quoted.
+      if ((intent.inputMint === OWNER && intent.amountRaw === "5") || (intent.inputMint === BONK && intent.amountRaw === "1200")) return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+      if (intent.inputMint === OWNER && intent.amountRaw === "4") return json({ error: TOO_SMALL, ownerFacing: true }, 400);
+      return json({ preview: { quote: { ...quoteFor(20_000), inputMint: intent.inputMint, outputMint: SOLANA_USDG_MINT, inAmount: intent.amountRaw } } });
+    }
+    if (path === "paper/write-off") { writeOffs.push(body); return writeOff(); }
+    throw new Error("Unexpected fixture route");
+  };
+  const text = () => ui.container.textContent!;
+  await render();
+  // No write-off for either lot yet; the token lot the form cannot sell can be checked.
+  assert.equal(hasButton("Write off…"), false); assert.equal(hasButton("Write off at zero"), false);
+  assert.equal(hasButton("Check for write-off"), true);
+  assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Check for write-off").length, 1, "never for the wrapped SOL lot the form sells");
+  // Selling part of the wrapped SOL lot is just too small: no offer.
+  const direction = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Direction"))!.querySelector("select")!;
+  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await type("Wrapped SOL to sell", "0.000000004");
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, TOO_SMALL);
+  assert.equal(hasButton("Write off…"), false);
+  // Selling all of it: the market quotes nothing, so the lot is offered for write-off instead of "try a larger amount".
+  await type("Wrapped SOL to sell", "0.000000005");
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+  assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /No route buys back this whole lot, so it cannot be sold\. Nothing was sent or recorded/);
+  assert.match(text(), /Wrapped SOL: 0\.000000005No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold\./);
+  // Nothing is sent until the owner confirms, and "Keep it" sends nothing.
+  await ui.click("Write off…");
+  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot\. This cannot be undone\./);
+  assert.equal(writeOffs.length, 0);
+  await ui.click("Keep it");
+  assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
+  assert.equal(writeOffs.length, 0);
+  // Confirmed: exactly the lot's mint, nothing else. The server's refusal is shown in its own words and ends the offer.
+  await ui.click("Preview trade"); await ui.click("Write off…"); await ui.click("Write off at zero");
+  assert.deepEqual(writeOffs, [{ mint: OWNER }]);
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.");
+  assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
+  // The token lot: its check previews selling all of it at the write-off's slippage, records nothing, and offers it.
+  await ui.click("Check for write-off");
+  const check = calls.filter((call) => call.path === "intent").at(-1)!.body!;
+  assert.equal(check.action, "preview"); assert.equal(check.mode, "paper");
+  assert.deepEqual({ ...(check.intent as Record<string, unknown>), requestId: "id" }, { kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "id", inputMint: BONK,
+    outputMint: SOLANA_USDG_MINT, amountRaw: "1200", slippageBps: 100 });
+  assert.equal(calls.some((call) => call.body?.action === "trade"), false);
+  // A paced write-off is a wait: the offer stays to try again.
+  writeOff = () => json({ error: "Too many Solana paper requests. Nothing was changed. Try again in 4 seconds.", ownerFacing: true }, 429);
+  await ui.click("Write off…"); await ui.click("Write off at zero");
+  assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
+  assert.equal(ui.container.querySelector(".solana-notice")!.textContent, "Too many Solana paper requests. Nothing was changed. Try again in 4 seconds.");
+  assert.equal(hasButton("Write off at zero"), true);
+  // Written off: the portfolio is read again, and the lot is gone.
+  writeOff = () => { state.runtime.paper = { ...paper, positions: [{ mint: OWNER, decimals: 9, amountRaw: "5", costBasisUsdgRaw: "1" }] } as never; return json({ paper: state.runtime.paper, writtenOff: { mint: BONK } }); };
+  await ui.click("Write off at zero");
+  assert.deepEqual(writeOffs.at(-1), { mint: BONK });
+  assert.doesNotMatch(text(), new RegExp(BONK));
+  assert.match(ui.container.querySelector(".solana-notice")!.textContent!, /written off at zero/);
+});
+test("a lot a route still buys is never offered for write-off", async () => {
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return json({ preview: { quote: { ...quoteFor(20_000), inputMint: BONK, outputMint: SOLANA_USDG_MINT, inAmount: "1200" } } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await ui.click("Check for write-off");
+  assert.equal(hasButton("Write off…"), false);
+  assert.equal(ui.container.querySelector(".solana-notice")!.textContent, "A route still buys this whole lot back, so it is not dust and cannot be written off.");
+  assert.equal(calls.some((call) => call.path === "paper/write-off"), false);
 });
 test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
   state.runtime.paper = paper;
