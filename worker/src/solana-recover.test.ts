@@ -24,8 +24,9 @@ import {
 import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
   readSolanaOwnerKey, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust, solanaRecoveryRevokeInstructions,
-  solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
+  solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
+import type { SolanaLiveRpc } from "./solana-live-rpc";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 
@@ -736,6 +737,35 @@ describe("solana-recover program trust", () => {
       assert.equal(swapped.sent.length, 0);
       assert.ok(swapped.calls.includes("getAccountInfo"), "the program account was read again");
     }
+  });
+
+  it("verifies through a view that keeps singleEndpoint and every other transport flag, and drops only the cache key", async () => {
+    const calls: string[] = [];
+    const transport = (flags: Record<string, unknown>) => ({
+      ...flags,
+      read: async <T>(operation: (read: never) => Promise<T>) => { calls.push("read"); return operation((async () => 1) as never); },
+      readEach: async <T>(operation: (read: never) => Promise<T>) => { calls.push("readEach"); return [await operation((async () => 2) as never)]; },
+      send: async () => { calls.push("send"); return "sent"; },
+    }) as unknown as SolanaLiveRpc;
+    // The owner's single endpoint: an every-provider check accepts one provider only with this flag.
+    const owner = solanaRecoveryVerificationRpc(transport({ singleEndpoint: true, providerKey: "cache-key", laterFlag: 7 }));
+    const flags = owner as unknown as Record<string, unknown>;
+    assert.equal(flags.singleEndpoint, true, "the view kept singleEndpoint");
+    assert.equal(flags.laterFlag, 7, "the view keeps transport flags it does not know about");
+    assert.equal("providerKey" in owner, false, "no cache key: the executor's success cache is never consulted");
+    assert.equal(await owner.read(async () => "a"), "a");
+    assert.deepEqual(await owner.readEach!(async () => "b"), ["b"]);
+    assert.throws(() => owner.send("AA==", 1), /never sends a transaction/);
+    assert.deepEqual(calls, ["read", "readEach"], "reads go to the owner's transport; nothing is sent");
+    // A view never invents the flag: a live transport stays a two-provider one.
+    const live = solanaRecoveryVerificationRpc(transport({ providerKey: "cache-key" }));
+    assert.equal("singleEndpoint" in live, false);
+    assert.equal("providerKey" in live, false);
+    // A hand-built transport without readEach gets none.
+    const narrow = solanaRecoveryVerificationRpc({ singleEndpoint: true, read: async (operation) => operation((async () => 3) as never),
+      send: async () => "x" } as unknown as SolanaLiveRpc);
+    assert.equal(narrow.readEach, undefined);
+    assert.equal((narrow as unknown as Record<string, unknown>).singleEndpoint, true);
   });
 
   it("pins releases in packages/core: the tool's default list is the shared one, frozen and well formed", () => {

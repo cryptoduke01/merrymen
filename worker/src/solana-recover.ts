@@ -420,6 +420,28 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
   }
 }
 
+/**
+ * The transport program verification reads through. It keeps every transport
+ * flag of the owner's transport, above all singleEndpoint: an every-provider
+ * check refuses a one-provider transport that does not carry it, so dropping
+ * it would make every verified recovery fail with "no-quorum". It drops only
+ * providerKey: a transport without one never consults the executor's
+ * in-process success cache, so an earlier verification in this process cannot
+ * vouch for this run. It reads through the same transport and cannot send.
+ */
+export function solanaRecoveryVerificationRpc(rpc: SolanaLiveRpc): SolanaLiveRpc {
+  const flags: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(rpc)) {
+    if (name !== "providerKey" && typeof value !== "function") flags[name] = value;
+  }
+  const methods: SolanaLiveRpc = {
+    read: (operation) => rpc.read(operation),
+    ...(typeof rpc.readEach === "function" ? { readEach: (operation) => rpc.readEach!(operation) } : {}),
+    send: () => fail("Program verification never sends a transaction."),
+  };
+  return Object.assign(flags, methods) as SolanaLiveRpc;
+}
+
 export interface SolanaRecoveryOptions {
   rpc: SolanaLiveRpc;
   programId: string;
@@ -451,15 +473,8 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   const trust = solanaRecoveryProgramTrust(options);
   if (trust.sha256 !== undefined) {
     // Immutable (no upgrade authority) and hash-matched, so it cannot change
-    // before the sends. Read fresh on every run: a transport without a
-    // providerKey never consults the executor's in-process success cache, so
-    // an earlier verification in this process cannot vouch for this one.
-    const uncached: SolanaLiveRpc = {
-      read: (operation) => rpc.read(operation),
-      ...(typeof rpc.readEach === "function" ? { readEach: (operation) => rpc.readEach!(operation) } : {}),
-      send: () => fail("Program verification never sends a transaction."),
-    };
-    try { await verifySolanaVaultDeployment(uncached, programId, trust.sha256); }
+    // before the sends. Read fresh on every run (see solanaRecoveryVerificationRpc).
+    try { await verifySolanaVaultDeployment(solanaRecoveryVerificationRpc(rpc), programId, trust.sha256); }
     catch (error) {
       if (error instanceof SolanaRpcError) throw error;
       fail(trust.listed ? "The program at that address is not the immutable released binary. Nothing was signed or sent."
