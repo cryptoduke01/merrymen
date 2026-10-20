@@ -13,3 +13,11 @@ export function displaySolanaAmount(raw: string, decimals = 6): string {
   const fraction = (value % base).toString().padStart(decimals, "0").replace(/0+$/, "");
   return `${signed < 0n ? "-" : ""}${value / base}${fraction ? `.${fraction}` : ""}`;
 }
+/**
+ * A raw amount from a server answer, displayed, or null when it is missing or
+ * not a raw integer. For optional status fields: one malformed value must hide
+ * that line, never throw and blank the whole Solana screen.
+ */
+export function displaySolanaAmountOrNull(raw: unknown, decimals = 6): string | null {
+  return typeof raw === "string" && /^(0|[1-9][0-9]*)$/.test(raw) && raw.length <= 40 ? displaySolanaAmount(raw, decimals) : null;
+}
