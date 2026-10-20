@@ -559,28 +559,43 @@ export async function DELETE(req: Request) {
         return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
       }
     }
-    await getGrantStore().remove(tenant);
-    return solanaKilled(() => stopSolanaForKill(tenant));
+    // The Solana strategy is stopped whatever happens to the Robinhood grant: a store that throws
+    // here still leaves the owner's autonomous Solana trading off.
+    let removal: unknown = null;
+    try { await getGrantStore().remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
+    const solana = await solanaStopped(() => stopSolanaForKill(tenant));
+    if (removal !== null) throw removal;
+    return solanaKilled(solana);
   }
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
+  // The local Solana strategy is stopped first, whatever happens to the Robinhood grant: an
+  // archive it cannot write keeps grant.json (and pauses trading instead), and must never
+  // leave autonomous Solana trading running behind a "paused" answer.
+  const solana = await solanaStopped(() => stopLocalSolanaForKill());
   try {
     await removeSelfHostedGrant();
   } catch (e) {
-    if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
+    if (e instanceof GrantArchiveError) {
+      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}`,
+        paused: e.paused, solana: solana ? "stopped" : "not-stopped" }, { status: 409 });
+    }
     throw e;
   }
-  return solanaKilled(() => stopLocalSolanaForKill());
+  return solanaKilled(solana);
 }
 
 /**
  * "Kill all agents" stops autonomous Solana trading too: the strategy is turned
- * off with a revision bump that fences any admission already in flight. A kill
- * that could not do that is reported incomplete, never as done. A retry is safe.
+ * off with a revision bump that fences any admission already in flight. True
+ * when it is off (or there was none), false when it could not be stopped.
  */
-async function solanaKilled(stop: () => Promise<unknown>): Promise<NextResponse> {
-  try { await stop(); }
-  catch {
+async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
+  try { await stop(); return true; } catch { return false; }
+}
+/** A kill that could not stop the Solana strategy is reported incomplete, never as done. A retry is safe. */
+function solanaKilled(stopped: boolean): NextResponse {
+  if (!stopped) {
     return NextResponse.json({ error: "Kill incomplete: your Robinhood Chain agent is stopped, but your Solana strategy could not be stopped yet. Try the kill again.",
       ownerFacing: true, solana: "not-stopped" }, { status: 503 });
   }

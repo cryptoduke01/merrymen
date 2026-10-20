@@ -23,6 +23,7 @@ let replacementState: "stopped" | "absent" | "changed" = "stopped";
 let replacementError = false;
 const solanaStopped: string[] = [];
 let solanaDown = false;
+let removeDown = false;
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grant-tenant-"));
@@ -39,7 +40,7 @@ before(async () => {
     asked.push(tenant);
     return null;
   });
-  mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { removed.push(tenant); });
+  mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { if (removeDown) throw new Error("database unavailable"); removed.push(tenant); });
   mock.method(grants.getGrantStore(), "stopForReplacement", async (...args: unknown[]) => {
     replacements.push(args);
     if (replacementError) throw new Error("database unavailable");
@@ -61,7 +62,7 @@ after(() => {
   }
   rmSync(home, { recursive: true, force: true });
 });
-beforeEach(() => { asked.length = 0; removed.length = 0; replacements.length = 0; replacementState = "stopped"; replacementError = false; solanaStopped.length = 0; solanaDown = false; });
+beforeEach(() => { asked.length = 0; removed.length = 0; replacements.length = 0; replacementState = "stopped"; replacementError = false; solanaStopped.length = 0; solanaDown = false; removeDown = false; });
 
 it("binds an empty hosted grant response to the tenant authenticated by the cookie", async () => {
   for (const tenant of [A, B]) {
@@ -93,6 +94,16 @@ it("a stop cannot remove a different tenant after a login switches", async () =>
   assert.equal((await DELETE(request(B))).status, 200);
   assert.deepEqual(removed, [B]);
   assert.deepEqual(solanaStopped, [B], "kill all agents stops the same tenant's Solana strategy");
+});
+
+it("kill all agents stops the Solana strategy even when the Robinhood grant cannot be removed", async () => {
+  const request = new Request(`${ORIGIN}/api/grants`, {
+    method: "DELETE", headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(A)}`, "content-type": "application/json" },
+    body: JSON.stringify({ expectedTenant: A, purpose: "delete-agent" }),
+  });
+  removeDown = true;
+  await assert.rejects(DELETE(request), /database unavailable/, "the Robinhood failure is still an error");
+  assert.deepEqual(removed, []); assert.deepEqual(solanaStopped, [A], "but the Solana strategy is off");
 });
 
 it("kill all agents is reported incomplete, never done, while the Solana strategy could not be stopped", async () => {
