@@ -33,14 +33,16 @@ import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaExpiredAttemptAllowance
 /**
  * Codes:
  * - configuration, permission, invalid: refusals.
- * - pending: retry later. Also every failure to read or book the outcome of an
- *   owner transaction that is already saved (and was broadcast): its outcome is
- *   unknown, never refused.
+ * - pending: retry later.
+ * - outcome-unknown: a failure to read or book the outcome of an owner
+ *   transaction that is already saved (and was broadcast). Its outcome is
+ *   unknown, never refused: the web answers it as the unknown-outcome 503
+ *   whatever the message (vault effect missing, unreadable account data...).
  * - not-saved: submitted owner bytes refused before anything was saved or
  *   sent. The page may discard them; resubmitting the same bytes cannot help.
  */
 export class SolanaAppRuntimeError extends Error {
-  constructor(readonly code: "configuration" | "permission" | "invalid" | "pending" | "not-saved", message: string) {
+  constructor(readonly code: "configuration" | "permission" | "invalid" | "pending" | "outcome-unknown" | "not-saved", message: string) {
     super(message); this.name = "SolanaAppRuntimeError";
   }
 }
@@ -439,9 +441,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const live = rpc();
     // These bytes are saved and were broadcast: an answer about them that cannot
     // be used, or an outcome the book cannot record yet, leaves the outcome
-    // unknown. It is "pending" (retry), never "invalid": nothing was refused.
+    // unknown. It is "outcome-unknown" (retry), never "invalid": nothing was refused.
     const unknown: (error: unknown) => never = error => {
-      if ((error instanceof SolanaAppRuntimeError && error.code === "invalid") || error instanceof SolanaTradingStoreError) throw new SolanaAppRuntimeError("pending", error.message);
+      if ((error instanceof SolanaAppRuntimeError && error.code === "invalid") || error instanceof SolanaTradingStoreError) throw new SolanaAppRuntimeError("outcome-unknown", error.message);
       throw error;
     };
     const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature), ownerViewKey).catch(unknown);

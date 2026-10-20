@@ -136,6 +136,12 @@ const PAPER_REFUSALS: ReadonlyMap<string, readonly [number, string]> = new Map(O
  * so they keep the cautious 503 with a fixed text. "Invalid Solana confirmation
  * data." also covers a malformed RPC answer before anything is saved, where
  * unavailable is just as true. The test pins that the worker still raises each.
+ *
+ * ownerStatus marks every such failure with the code 'outcome-unknown', which
+ * is answered this way whatever its message: a receipt with no vault effect,
+ * or account data that cannot be read while checking it, is no refusal either.
+ * This list stays for the same messages raised without that code (finishSetup
+ * through the store, and the confirmation checks before anything is saved).
  */
 export const OWNER_OUTCOME_UNKNOWN: ReadonlySet<string> = new Set([
   "Invalid Solana confirmation data.",
@@ -176,6 +182,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
     // Before the unknown-outcome check: nothing was saved, whatever the message says.
     else if (error instanceof SolanaAppRuntimeError && error.code === "not-saved") { status = NOT_SAVED_MALFORMED.has(error.message) ? 400 : 409; message = error.message; notSaved = true; }
+    else if (error instanceof SolanaAppRuntimeError && error.code === "outcome-unknown") message = OUTCOME_UNKNOWN;
     else if ((error instanceof SolanaAppRuntimeError || error instanceof SolanaTradingStoreError) && OWNER_OUTCOME_UNKNOWN.has(error.message)) message = OUTCOME_UNKNOWN;
     else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaTradingStoreError) { status = 409; message = error.message; }

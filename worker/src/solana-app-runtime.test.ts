@@ -1180,7 +1180,7 @@ test("an activation reads the vault no earlier than the slot its permission fina
   } finally { f.raw.close(); }
 });
 
-test("owner bytes refused before anything is saved are 'not-saved'; trouble with saved bytes is 'pending', never 'invalid'", async () => {
+test("owner bytes refused before anything is saved are 'not-saved'; trouble with saved bytes is 'outcome-unknown', never 'invalid'", async () => {
   const f = await fixture();
   try {
     await f.live();
@@ -1204,16 +1204,16 @@ test("owner bytes refused before anything is saved are 'not-saved'; trouble with
     assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "pending"); assert.equal(f.controls.sends, 1);
     const altered = Buffer.from(signedTransactionBase64, "base64"); altered[1] = altered[1]! ^ 1;
     await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64: altered.toString("base64") }), "not-saved", /does not match/, "a forged signature");
-    // The saved bytes' confirmation is malformed: their outcome is unknown, so "pending".
+    // The saved bytes' confirmation is malformed: their outcome is unknown.
     f.controls.finalized = true; f.controls.malformed = true;
-    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "pending", /^Invalid owner transaction confirmation\.$|^Owner confirmation does not match the saved transaction\.$/, "malformed");
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "outcome-unknown", /^Invalid owner transaction confirmation\.$|^Owner confirmation does not match the saved transaction\.$/, "malformed");
     assert.equal((await store().setup())!.status, "pending");
-    // A receipt whose vault effect is missing is not believed: also unknown, also "pending".
+    // A receipt whose vault effect is missing is not believed: also an unknown outcome.
     f.controls.malformed = false;
-    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "pending", /^Owner confirmation does not match the vault state\.$/, "no vault effect");
+    await rejectsWith(f.app.submitSetup(f.scope, { signedTransactionBase64 }), "outcome-unknown", /^Owner confirmation does not match the vault state\.$/, "no vault effect");
     // And an activation of such a permission is a retry, not a refusal.
     await rejectsWith(f.app.activateLive(f.scope, { signature: getBase58Decoder().decode(Buffer.from(signedTransactionBase64, "base64").subarray(1, 65)), sessionSecretKey: f.sessionSeed.toString("base64") }),
-      "pending", /does not match the vault state/, "activation");
+      "outcome-unknown", /does not match the vault state/, "activation");
     assert.equal(f.controls.sends, 1, "nothing is sent again for a finalized-looking receipt");
   } finally { f.raw.close(); }
 });

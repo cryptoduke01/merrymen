@@ -188,6 +188,38 @@ test("a finalized withdrawal the book cannot record yet is an unknown outcome on
   } finally { f.raw.close(); }
 });
 
+test("a finalized receipt whose vault effect is missing or unreadable is an unknown outcome on retry, whatever the worker's message", async () => {
+  // The receipt is finalized, but the finalized vault still shows the prior sequence: the receipt is not believed.
+  const f = await fixture();
+  try {
+    const { signedTransactionBase64 } = await savedWithdrawal(f);
+    f.controls.sequence = 0n;
+    const retry = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64 }));
+    assert.equal(retry.status, 503); assert.match(retry.error!, UNKNOWN);
+    assert.doesNotMatch(retry.error!, /vault state/, "the worker's own text is not shown");
+    assert.equal(retry.refusal, false);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending");
+  } finally { f.raw.close(); }
+  // The finalized vault account cannot be decoded (larger than a vault account).
+  const g = await fixture();
+  try {
+    const { signedTransactionBase64 } = await savedWithdrawal(g);
+    const vault = (await new SolanaTradingStore(g.db, g.scope).setup())!.vault;
+    const garbled = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+      const answer = await read(method, params);
+      if (method !== "getAccountInfo" || params[0] !== vault || (params[1] as { commitment?: string }).commitment !== "finalized") return answer;
+      return { ...(answer as object), value: { owner: PROGRAM, executable: false, lamports: 1, data: [Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE + 1).toString("base64"), "base64"] } };
+    };
+    const rpc: SolanaLiveRpc = { ...g.rpc, read: fn => g.rpc.read(read => fn(garbled(read))), readEach: fn => g.rpc.readEach!(read => fn(garbled(read))) };
+    const app = createSolanaAppRuntime({ db: g.db, rpc, market: g.market, env: g.env, now: () => g.clock.now });
+    const retry = await asPage(() => app.submitOwnerAction(g.scope, { signedTransactionBase64 }));
+    assert.equal(retry.status, 503); assert.match(retry.error!, UNKNOWN);
+    assert.equal(retry.refusal, false);
+    assert.equal((await new SolanaTradingStore(g.db, g.scope).setup())!.status, "pending");
+    assert.equal(g.controls.sends, 1, "nothing is sent again");
+  } finally { g.raw.close(); }
+});
+
 test("a finalized withdrawal is booked on retry even when the book already moved past its slot, never wedged pending", async () => {
   const f = await fixture();
   try {

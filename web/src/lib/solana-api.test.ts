@@ -131,6 +131,16 @@ test("failures to use Solana's answer about a saved owner transaction are an unk
       ownerSafe(body.error);
     }
   }
+  // ownerStatus's own code is an unknown outcome whatever the message, listed or not, and the message is never reflected.
+  const runtime = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-app-runtime.ts", import.meta.url)), "utf8");
+  assert.ok(runtime.includes(`throw new SolanaAppRuntimeError("outcome-unknown", error.message)`), "ownerStatus still marks its failures");
+  for (const message of ["Owner confirmation does not match the vault state.", "Invalid Solana account data.", "Invalid encoded Solana transaction.", "an internal detail"]) {
+    const response = await solanaResponse(async () => { throw new SolanaAppRuntimeError("outcome-unknown", message); });
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 503, message);
+    assert.match(String(body.error), /could not be confirmed or recorded yet\. Nothing new was sent/, message);
+    assert.equal(Object.hasOwn(body, "notSaved"), false, message);
+  }
   // A refusal before anything is saved still says what it is.
   const expired = await solanaResponse(async () => { throw new SolanaTradingStoreError("The prepared owner transaction expired before submission."); });
   assert.equal(expired.status, 409); assert.equal((await expired.json()).error, "The prepared owner transaction expired before submission.");
