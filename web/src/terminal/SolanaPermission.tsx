@@ -9,7 +9,8 @@
  * the wallet opens, the prepared transaction is decoded here and must encode
  * exactly those limits, for this owner, vault, program and session key, with
  * nothing else in it beyond creating the vault and its token accounts and a
- * priority fee the owner pays, at most OWNER_MAX_PRIORITY_FEE_LAMPORTS.
+ * priority fee the owner pays, at most OWNER_MAX_PRIORITY_FEE_LAMPORTS, on a
+ * compute budget no smaller than the runtime's default for it.
  * checkPreparedPermission is that whole check; SolanaServerContract.test.ts
  * runs the server's real prepareLive bytes through it.
  */
@@ -35,6 +36,17 @@ const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
  * worker/src/solana-app-runtime.ts (a test keeps the two equal).
  */
 export const OWNER_MAX_PRIORITY_FEE_LAMPORTS = 1_000_000n;
+/**
+ * The least compute-unit limit an owner transaction may carry: what the
+ * runtime gives its instructions with no limit at all (200,000 each, other
+ * than ComputeBudget, at most 1,400,000). The server never signs less
+ * (solanaOwnerComputeUnitLimit in worker/src/solana-app-runtime.ts); a lower
+ * one, from an under-reported simulation, could make a permission, a
+ * revocation or a withdrawal run out of compute on chain, the owner paying
+ * the fee each time.
+ */
+export const OWNER_DEFAULT_UNITS_PER_INSTRUCTION = 200_000n;
+const MAX_COMPUTE_UNITS = 1_400_000n;
 
 export type SignedPermissionTerms = {
   perTradeUsdg: string; dailyUsdg: string; perTradeWsol: string; dailyWsol: string; maxOpsPerDay: number; expiresAtSeconds: string;
@@ -55,9 +67,11 @@ export type OwnerPaidInstruction = { program: string; data: Uint8Array; accounts
  * (SolanaOwnerActions.checkPreparedOwnerTransaction): a v0 message the owner
  * pays for and alone signs, loading nothing from lookup tables, with at most
  * one SetComputeUnitLimit and one SetComputeUnitPrice (both or neither,
- * touching no account) whose priority fee is at most
- * OWNER_MAX_PRIORITY_FEE_LAMPORTS. Returns the other instructions in order
- * and that fee, in lamports: what the runtime charges, ceil(price × limit / 1e6).
+ * touching no account) whose limit is no less than the runtime would give
+ * the other instructions without one (OWNER_DEFAULT_UNITS_PER_INSTRUCTION)
+ * and whose priority fee is at most OWNER_MAX_PRIORITY_FEE_LAMPORTS. Returns
+ * the other instructions in order and that fee, in lamports: what the runtime
+ * charges, ceil(price × limit / 1e6).
  */
 export function readOwnerPaidTransaction(transactionBase64: string, owner: string): { instructions: OwnerPaidInstruction[]; priorityFeeLamports: bigint } | null {
   let message: ReturnType<ReturnType<typeof getCompiledTransactionMessageDecoder>["decode"]>;
@@ -85,6 +99,9 @@ export function readOwnerPaidTransaction(transactionBase64: string, owner: strin
     instructions.push({ program, data, accounts: accounts as string[] });
   }
   if ((unitLimit === null) !== (unitPrice === null)) return null;
+  // Never a smaller compute budget than the transaction would have without a priority fee.
+  const work = BigInt(instructions.length) * OWNER_DEFAULT_UNITS_PER_INSTRUCTION;
+  if (unitLimit !== null && unitLimit < (work < MAX_COMPUTE_UNITS ? work : MAX_COMPUTE_UNITS)) return null;
   const priorityFeeLamports = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
   return priorityFeeLamports > OWNER_MAX_PRIORITY_FEE_LAMPORTS ? null : { instructions, priorityFeeLamports };
 }

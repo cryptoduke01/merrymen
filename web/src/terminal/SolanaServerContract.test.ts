@@ -32,7 +32,7 @@ import type { SolanaPaperMarket } from "../../../worker/src/solana-paper-service
 import { solanaResponse } from "../lib/solana-api";
 import { SqlSolanaBindingStore } from "../lib/solana-binding-store";
 import { checkPreparedOwnerTransaction, refusedByServer, type OwnerRequest } from "./SolanaOwnerActions";
-import { checkPreparedPermission, OWNER_MAX_PRIORITY_FEE_LAMPORTS, type PreparedPermission } from "./SolanaPermission";
+import { checkPreparedPermission, OWNER_DEFAULT_UNITS_PER_INSTRUCTION, OWNER_MAX_PRIORITY_FEE_LAMPORTS, type PreparedPermission } from "./SolanaPermission";
 import { RequestError } from "./request-json";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -123,6 +123,27 @@ async function asPage(run: () => Promise<unknown>) {
   return { status: response.status, error: body.error, refusal: !response.ok && refusedByServer(new RequestError(body.error ?? "", response.status)) };
 }
 
+/** Compute units a simulation reports in the fee cases: 1,000,000, so 1,240,000 are signed. */
+const FULL_SIMULATION = 1_000_000;
+/** The SetComputeUnitLimit the bytes carry, or null. */
+function unitLimitOf(instructions: Instruction[]): bigint | null {
+  const limit = instructions.find(ix => ix.programAddress === COMPUTE_BUDGET && ix.data?.[0] === 2);
+  return limit ? BigInt(new DataView(Uint8Array.from(limit.data!).buffer).getUint32(1, true)) : null;
+}
+/** The least limit the page accepts for these instructions: OWNER_DEFAULT_UNITS_PER_INSTRUCTION each, other than ComputeBudget, at most 1,400,000. */
+function floorOf(instructions: Instruction[]): bigint {
+  const work = BigInt(instructions.filter(ix => ix.programAddress !== COMPUTE_BUDGET).length) * OWNER_DEFAULT_UNITS_PER_INSTRUCTION;
+  return work < 1_400_000n ? work : 1_400_000n;
+}
+/** The same instructions with another compute-unit limit, at the same price. */
+function withUnitLimit(instructions: Instruction[], units: bigint): Instruction[] {
+  return instructions.map(ix => {
+    if (ix.programAddress !== COMPUTE_BUDGET || ix.data?.[0] !== 2) return ix;
+    const data = new Uint8Array(5); data[0] = 2; new DataView(data.buffer).setUint32(1, Number(units), true);
+    return { ...ix, data } as Instruction;
+  });
+}
+
 /** The prepared bytes' instructions, decompiled. */
 function instructionsOf(transactionBase64: string): Instruction[] {
   const compiled = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(transactionBase64, "base64")).messageBytes);
@@ -160,7 +181,9 @@ test("the server's real registration bytes pass the page's whole check, with and
     ];
     for (const item of cases) {
       f.controls.initialized = item.initialized;
-      f.controls.simulatedUnits = item.fee ? 150_000 : null; f.controls.priorityFees = item.fee ? [200_000] : null;
+      // A simulation near the runtime's default budget: the limit signed (×1.2 + headroom) clears the page's floor
+      // whether or not the server applies its own (the next tests run an under-reported one).
+      f.controls.simulatedUnits = item.fee ? FULL_SIMULATION : null; f.controls.priorityFees = item.fee ? [200_000] : null;
       const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
       assert.deepEqual(shape(instructionsOf(setup.transactionBase64), f.vault, f.owner), item.shape, item.name);
       // Exactly what the page receives from the route, through exactly its check.
@@ -226,7 +249,7 @@ test("the server's real owner transactions pass the page's check, with and witho
     const shapeOf = (transactionBase64: string) => instructionsOf(transactionBase64).filter(ix => ix.programAddress !== COMPUTE_BUDGET).map(ix =>
       ix.programAddress === PROGRAM ? "vault" : ix.programAddress === SOLANA_CLASSIC_TOKEN_PROGRAM ? "sync-native" : shape([ix], f.vault, f.owner)[0]!);
     for (const fee of [false, true]) {
-      f.controls.simulatedUnits = fee ? 150_000 : null; f.controls.priorityFees = fee ? [200_000] : null;
+      f.controls.simulatedUnits = fee ? FULL_SIMULATION : null; f.controls.priorityFees = fee ? [200_000] : null;
       for (const [request, unsynced, instructions] of requests) {
         const name = `${request.action}${"mint" in request ? ` ${request.mint === SOLANA_USDG_MINT ? "usdg" : "wsol"}` : ""}${unsynced ? " after SyncNative" : ""}${fee ? ", priority fee" : ""}`;
         f.controls.unsyncedWsol = unsynced;
@@ -244,6 +267,38 @@ test("the server's real owner transactions pass the page's check, with and witho
         await assert.rejects(checkPreparedOwnerTransaction(prepared, request, { ...expected, owner: key(77) }), /does not match what you asked for/, name);
         await assert.rejects(checkPreparedOwnerTransaction(prepared, request, { ...expected, programId: key(77) }), /does not match what you asked for/, name);
       }
+    }
+    assert.equal(f.controls.sends, 0, "preparing sends nothing");
+  } finally { f.raw.close(); }
+});
+
+test("the server's bytes from an under-reported simulation reach the wallet only with at least the runtime's default compute budget", async () => {
+  const f = await fixture();
+  try {
+    // A provider answering 1 unit: the simulation alone would sign 40,002 units (×1.2 + 40,000 headroom).
+    f.controls.simulatedUnits = 1; f.controls.priorityFees = [200_000];
+    const permission = { owner: f.owner, programId: PROGRAM, vault: f.vault, session: f.session }, owner = { owner: f.owner, programId: PROGRAM };
+    type Prepared = { transactionBase64: string; priorityFeeLamports?: string };
+    const checks: Array<[string, () => Promise<Prepared>, (prepared: Prepared) => Promise<unknown>]> = [
+      ["new vault permission", async () => { f.controls.initialized = false; return f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }); },
+        async (prepared) => checkPreparedPermission(prepared as PreparedPermission, permission, limits)],
+    ];
+    for (const request of [{ action: "revoke" }, { action: "withdraw-sol", amountRaw: "1000000" }, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }] as OwnerRequest[]) {
+      checks.push([request.action + ("mint" in request ? " usdg" : ""), async () => { f.controls.initialized = true; return f.app.prepareOwnerAction(f.scope, request); },
+        async (prepared) => checkPreparedOwnerTransaction(prepared, request, owner)]);
+    }
+    for (const [name, prepare, check] of checks) {
+      const prepared = JSON.parse(JSON.stringify(await prepare())) as Prepared;
+      const instructions = instructionsOf(prepared.transactionBase64), signed = unitLimitOf(instructions), floor = floorOf(instructions);
+      assert.ok(signed !== null, `${name}: the server added a priority fee`);
+      // The page accepts exactly what clears the floor: everything the server signs once it applies its own
+      // (solanaOwnerComputeUnitLimit), and never the bare simulation's limit from a server that does not.
+      const accepted = await check(prepared).then(() => true, (error: Error) => { assert.match(error.message, /does not match what (this page shows|you asked for)\. Nothing was signed/, name); return false; });
+      assert.equal(accepted, signed >= floor, `${name}: ${signed} units signed, ${floor} the floor`);
+      // The same bytes at the floor pass; one unit less is refused before the wallet opens. (No stated fee: the fee follows the limit.)
+      const at = (units: bigint): Prepared => ({ ...prepared, transactionBase64: rebuilt(f.owner, withUnitLimit(instructions, units)), priorityFeeLamports: undefined });
+      await check(at(floor));
+      await assert.rejects(Promise.resolve().then(() => check(at(floor - 1n))), /does not match what (this page shows|you asked for)\. Nothing was signed/, name);
     }
     assert.equal(f.controls.sends, 0, "preparing sends nothing");
   } finally { f.raw.close(); }

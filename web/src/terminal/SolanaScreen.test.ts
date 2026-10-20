@@ -1060,6 +1060,14 @@ test("owner transaction bytes that do anything but what the owner asked never re
       /The prepared revocation does not match what you asked for/],
     ["a priority fee limit without a price", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n).slice(0, 1)) }),
       /The prepared revocation does not match what you asked for/],
+    // Below what the runtime gives the instructions with no limit (200,000 each): from an under-reported
+    // simulation (1 unit × 1.2 + 40,000 headroom), it could run out of compute on chain, the owner paying each time.
+    ["a revocation's compute limit from an under-reported simulation", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(40_002, 1n)) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a revocation's compute limit one unit short of the default", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(199_999, 1n)) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a withdrawal's compute limit below its two instructions' default", "Withdraw to my wallet", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(399_999, 1n)) }),
+      /The prepared withdrawal does not match what you asked for/],
     ["a stated fee its bytes do not carry", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", priorityFeeLamports: "0" }),
       /The prepared revocation's priority fee does not match its bytes\. Nothing was signed/],
     ["bytes that are not a transaction", "Revoke all Solana sessions", async () => ({ transactionBase64: "AQID" }), /The prepared revocation does not match what you asked for/],
@@ -1107,8 +1115,9 @@ test("a permission's priority fee is shown from its bytes, with what the owner w
   let claimed = "10000";
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    // 200,000 units at 50,000 micro-lamports: a 0.00001 SOL priority fee.
-    if (path === "setup" && body?.stage === "prepare") return json({ setup: { ...await permissionTransaction(String(body.sessionPublicKey), saved, priorityFee(200_000, 50_000n)),
+    // Six instructions get 1,200,000 units with no limit, so no less is signed:
+    // 1,200,000 units at 8,333 micro-lamports, a 0.00001 SOL priority fee (ceil(9,999.6) lamports).
+    if (path === "setup" && body?.stage === "prepare") return json({ setup: { ...await permissionTransaction(String(body.sessionPublicKey), saved, priorityFee(1_200_000, 8_333n)),
       requiredLamports: "9915880", ownerLamports: "50000000", priorityFeeLamports: claimed } });
     if (path === "setup" && body?.stage === "submit") return json({ registration: { signature: "fixture-chain-signature", status: "pending" } });
     throw new Error("Unexpected fixture route");

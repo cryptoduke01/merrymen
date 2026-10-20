@@ -64,7 +64,8 @@ async function expectedOwnerInstructions(request: OwnerRequest, owner: string, p
  * The owner key signs, and pays for, every owner transaction, so the page
  * reads the server's bytes as it reads a permission's: a v0 message the
  * owner alone signs and pays for, a priority fee of at most
- * OWNER_MAX_PRIORITY_FEE_LAMPORTS (readOwnerPaidTransaction), and nothing but
+ * OWNER_MAX_PRIORITY_FEE_LAMPORTS on a compute budget no smaller than the
+ * runtime's default for it (readOwnerPaidTransaction), and nothing but
  * exactly what the owner asked for, for this owner's vault of this program:
  * the revocation; the resume request (breaker off); the native SOL
  * withdrawal of exactly the amount typed; or the token withdrawal of exactly
