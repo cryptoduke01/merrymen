@@ -3,13 +3,15 @@
  * SOLANA_VAULT_RELEASES lists a release, MERRYMEN_SOLANA_VAULT_PROGRAM and
  * MERRYMEN_SOLANA_VAULT_SHA256 must be one listed pair, the program the owner
  * recovery tool trusts. config() refuses anything else as configuration,
- * before any RPC read, for status and for every owner action.
+ * before any RPC read, for status and for every owner action. Status still
+ * names such a program and the owner's vault on it, so the recovery card can
+ * show the read-only plan for the vault the owner may have funded.
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { getBase58Decoder } from "@solana/kit";
-import { SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../packages/core/src/solana-live";
+import { deriveSolanaVaultAddress, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAppRuntime } from "./solana-app-runtime";
@@ -48,8 +50,14 @@ test("with a release pinned, a configured program or binary hash that is not a l
       const app = f.runtime(env, { vaultReleases: releases });
       const status = await app.status(f.scope);
       assert.equal(status.live.ready, false);
+      assert.equal(status.live.canExit, false, "the release refusal stops exits too");
       assert.match(status.live.blockers.join(" "), refusal);
-      assert.equal(status.live.programId, null, "no vault is derived from an unreleased program");
+      // Shown, never used: the program and the owner's vault on it, for the recovery card;
+      // nothing was read from it (no balances, no token account).
+      const programId = env.MERRYMEN_SOLANA_VAULT_PROGRAM;
+      assert.deepEqual([status.live.programId, status.live.vault], [programId, await deriveSolanaVaultAddress(programId, OWNER)]);
+      assert.deepEqual([status.live.balances, status.live.cashTokenAccount, status.live.feePayer, status.live.ownerWallet, status.live.recoverable],
+        [null, null, null, null, null]);
       await assert.rejects(app.prepareOwnerAction(f.scope, { action: "revoke" }), refusal);
       await assert.rejects(app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "1" }), refusal);
     }
@@ -86,5 +94,14 @@ test("only a local test harness skips the release check, and the local test id i
     const local = await f.runtime(configured(SOLANA_VAULT_LOCAL_TEST_PROGRAM, HASH), { vaultReleases: [{ programId: SOLANA_VAULT_LOCAL_TEST_PROGRAM, sha256: HASH }] })
       .status(f.scope);
     assert.match(local.live.blockers.join(" "), /local test id/);
+    // Only the release refusal shows the program: the local test id, an invalid id or a missing
+    // hash shows none, and derives no vault.
+    assert.deepEqual([local.live.programId, local.live.vault], [null, null]);
+    for (const env of [configured("not-a-key", HASH), { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM }, configured(PROGRAM, "A".repeat(64))]) {
+      const status = await f.runtime(env, { vaultReleases: releases }).status(f.scope);
+      assert.match(status.live.blockers.join(" "), /must be configured|invalid/);
+      assert.deepEqual([status.live.programId, status.live.vault], [null, null]);
+    }
+    assert.deepEqual(f.calls, []);
   } finally { f.raw.close(); }
 });
