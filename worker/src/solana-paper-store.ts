@@ -36,6 +36,7 @@ const ERRORS = {
   decimals_conflict: "The Solana position decimals changed",
   position_limit: "The Solana paper open-position limit would be exceeded",
   balance_overflow: "The Solana paper token balance would exceed u64",
+  loosen_required: "Raising a Solana paper limit (per-trade, daily, operations or drawdown) needs --loosen; lowering one never does",
 } as const;
 export class SolanaPaperStoreError extends Error {
   readonly code: keyof typeof ERRORS;
@@ -89,6 +90,8 @@ export interface SolanaPaperSnapshot {
   hwmRaw: string;
   realizedPnlRaw: string;
   limits: SolanaPaperLimits;
+  /** Every owner renewal of the limits, oldest first. Absent until the first renewal. */
+  limitsHistory?: SolanaPaperLimitsChange[];
   positions: SolanaPaperPosition[];
   /** Most recent 100, newest first. Durable replay records are never pruned. */
   trades: SolanaPaperReceipt[];
@@ -96,10 +99,35 @@ export interface SolanaPaperSnapshot {
   updatedAtMs: number;
 }
 export type SolanaPaperBook = Omit<SolanaPaperSnapshot, "trades">;
-/** A renewal names a new expiry; any limit it omits keeps its current value. */
-export type SolanaPaperLimitsRenewal = { expiresAtMs: number }
-  & Partial<Pick<SolanaPaperLimits, "perTradeUsdg" | "dailyUsdg" | "maxOpsPerDay" | "maxDrawdownBps">>;
-const RENEWAL_FIELDS = new Set(["expiresAtMs", "perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps"]);
+/** The limits a renewal can raise, and so loosen; a later expiry is what a renewal is for. */
+const LOOSENABLE = ["perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps"] as const;
+type RenewableLimit = (typeof LOOSENABLE)[number] | "expiresAtMs";
+/**
+ * A renewal names the limits to change; any limit it omits keeps its current
+ * value. Without `expiresAtMs` the expiry becomes SOLANA_PAPER_RENEW_DEFAULT_DAYS
+ * from now, or stays later if it already is: a default renewal never shortens
+ * it. Raising a limit needs `loosen`.
+ */
+export type SolanaPaperLimitsRenewal = { expiresAtMs?: number; loosen?: boolean }
+  & Partial<Pick<SolanaPaperLimits, (typeof LOOSENABLE)[number]>>;
+const RENEWAL_FIELDS = new Set(["expiresAtMs", "loosen", ...LOOSENABLE]);
+export const SOLANA_PAPER_RENEW_DEFAULT_DAYS = 7;
+/** One renewal, kept in the book forever: what the limits were, what they became, and when. */
+export interface SolanaPaperLimitsChange {
+  renewedAtMs: number;
+  /** The book version this renewal produced. */
+  version: number;
+  previous: SolanaPaperLimits;
+  limits: SolanaPaperLimits;
+  /** Limits this renewal raised, which it could only do with `loosen`. */
+  loosened: string[];
+}
+/** What a renewal changed, for the owner to read: each changed limit's old and new value. */
+export interface SolanaPaperRenewalReport {
+  changes: Partial<Record<RenewableLimit, { from: string | number; to: string | number }>>;
+  loosened: string[];
+  expiryShortened: boolean;
+}
 type Book = SolanaPaperBook;
 export interface SolanaPaperCommit {
   owner: string;
@@ -249,13 +277,20 @@ export class SolanaPaperStore {
    * book. The new limits pass the same validation as creation, and the rolling
    * 24-hour caps keep counting trades made before the renewal. The version
    * advances, so a trade quoted against the old limits must be quoted again.
+   *
+   * It never loosens silently: raising the per-trade, daily, operations or
+   * drawdown limit needs `loosen` (lowering one never does), a renewal without
+   * an explicit expiry never shortens the current one, and every renewal is
+   * appended to the book's `limitsHistory` with the previous and new limits.
    */
-  renew(owner: string, renewal: SolanaPaperLimitsRenewal, preparedAtMs = this.now()): SolanaPaperSnapshot {
+  renew(owner: string, renewal: SolanaPaperLimitsRenewal, preparedAtMs = this.now()): SolanaPaperSnapshot & { renewal: SolanaPaperRenewalReport } {
     ownerKey(owner);
     timestamp(preparedAtMs);
-    if (!renewal || typeof renewal !== "object" || Array.isArray(renewal)
-      || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key)) || typeof renewal.expiresAtMs !== "number") fail("invalid_input");
-    const changes = Object.fromEntries(Object.entries(renewal).filter(([, value]) => value !== undefined));
+    if (!renewal || typeof renewal !== "object" || Array.isArray(renewal) || Object.keys(renewal).some((key) => !RENEWAL_FIELDS.has(key))
+      || (renewal.expiresAtMs !== undefined && typeof renewal.expiresAtMs !== "number")
+      || (renewal.loosen !== undefined && typeof renewal.loosen !== "boolean")) fail("invalid_input");
+    const { loosen = false, ...named } = renewal;
+    const changes = Object.fromEntries(Object.entries(named).filter(([, value]) => value !== undefined)) as Partial<SolanaPaperLimits>;
     return this.transaction(() => {
       const book = this.readBook(owner);
       if (!book) fail("book_missing");
@@ -264,13 +299,25 @@ export class SolanaPaperStore {
       if (preparedAtMs > nowMs) fail("invalid_input");
       if (nowMs < book.updatedAtMs) fail("clock_rollback");
       if (book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
+      const previous = book.limits;
+      const defaultExpiry = nowMs + SOLANA_PAPER_RENEW_DEFAULT_DAYS * DAY_MS;
+      const expiresAtMs = changes.expiresAtMs ?? Math.max(previous.expiresAtMs, defaultExpiry);
       // Validation errors keep their own message: they say which limit is wrong.
-      const limits = validateSolanaPaperLimits({ ...book.limits, ...changes }, nowMs);
-      const renewed: Book = { ...book, limits, version: book.version + 1, updatedAtMs: nowMs };
+      const limits = validateSolanaPaperLimits({ ...previous, ...changes, expiresAtMs }, nowMs);
+      const loosened = LOOSENABLE.filter((key) => BigInt(limits[key]) > BigInt(previous[key]));
+      if (loosened.length && !loosen) fail("loosen_required");
+      const renewed: Book = {
+        ...book, limits, version: book.version + 1, updatedAtMs: nowMs,
+        limitsHistory: [...(book.limitsHistory ?? []), { renewedAtMs: nowMs, version: book.version + 1, previous, limits, loosened: [...loosened] }],
+      };
       const update = this.db.prepare("UPDATE solana_paper_books SET version = ?, book_json = ? WHERE owner = ? AND version = ?")
         .run(renewed.version, JSON.stringify(renewed), owner, book.version);
       if (update.changes !== 1) fail("version_conflict");
-      return this.get(owner)!;
+      const report: SolanaPaperRenewalReport = { changes: {}, loosened: [...loosened], expiryShortened: limits.expiresAtMs < previous.expiresAtMs };
+      for (const key of [...LOOSENABLE, "expiresAtMs"] as const) {
+        if (limits[key] !== previous[key]) report.changes[key] = { from: previous[key], to: limits[key] };
+      }
+      return { ...this.get(owner)!, renewal: report };
     });
   }
 

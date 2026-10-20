@@ -15,8 +15,8 @@ export const SOLANA_PAPER_HELP = `Solana paper trading — local simulation; no 
 
 init --owner PUBLIC_KEY [--cash 1000] [--per-trade 25] [--daily 100]
      [--max-ops 20] [--drawdown-bps 1000] [--expires-days 7]
-renew --owner PUBLIC_KEY [--expires-days 7] [--per-trade USDG] [--daily USDG]
-      [--max-ops N] [--drawdown-bps N]
+renew --owner PUBLIC_KEY [--expires-days N] [--per-trade USDG] [--daily USDG]
+      [--max-ops N] [--drawdown-bps N] [--loosen]
 status --owner PUBLIC_KEY
 inspect-mint --mint MINT
 quote --owner PUBLIC_KEY --input MINT --output MINT --amount-raw INTEGER
@@ -28,9 +28,14 @@ Each swap must have exactly one Solana USDG leg. Raw amounts use token base
 units (USDG has 6 decimals). Reuse a trade's request ID after interruption;
 it returns the saved receipt without applying another fill. Never reset a
 book by repeating init: an existing book is refused. Once limits expire, the
-owner can renew them: renew restarts the expiry from now and changes only the
-limits given (others are kept). It never changes cash, positions, P&L or
-receipts, and the rolling 24-hour limits still count earlier trades.
+owner can renew them. renew changes only the limits given (others are kept)
+and prints what changed. Without --expires-days the expiry becomes 7 days
+from now, or stays as it is if that is later: it is never shortened unless
+--expires-days says so. Lowering a limit needs nothing more; raising the
+per-trade, daily, max-ops or drawdown limit also needs --loosen. Every renewal
+is kept in the book's limitsHistory with the previous and new limits. renew
+never changes cash, positions, P&L or receipts, and the rolling 24-hour
+limits still count earlier trades.
 
 Quotes require MERRYMEN_SOLANA_RPC_MAINNET and MERRYMEN_JUPITER_API_KEY.
 An optional MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK provides independent RPC
@@ -42,12 +47,15 @@ minimum output; network fees and rent are excluded.`;
 const FLAGS: Record<string, readonly string[]> = {
   init: ["owner", "cash", "per-trade", "daily", "max-ops", "drawdown-bps", "expires-days"],
   // Deliberately no --cash: a renewal can never refill a book.
-  renew: ["owner", "per-trade", "daily", "max-ops", "drawdown-bps", "expires-days"],
+  renew: ["owner", "per-trade", "daily", "max-ops", "drawdown-bps", "expires-days", "loosen"],
   status: ["owner"],
   "inspect-mint": ["mint"],
   quote: ["owner", "input", "output", "amount-raw", "slippage-bps"],
   trade: ["owner", "input", "output", "amount-raw", "slippage-bps", "request-id"],
 };
+
+/** Options that take no value. */
+const SWITCHES = new Set(["loosen"]);
 
 function parseFlags(command: string, args: readonly string[]): Record<string, string> {
   const allowed = FLAGS[command];
@@ -55,11 +63,11 @@ function parseFlags(command: string, args: readonly string[]): Record<string, st
   const flags: Record<string, string> = Object.create(null);
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]?.slice(2);
+    const invalid = () => new SolanaPaperCommandError("Invalid, duplicate or unsupported Solana paper option. Run solana-paper --help.");
+    if (!args[i]?.startsWith("--") || !key || !allowed.includes(key) || Object.hasOwn(flags, key)) throw invalid();
+    if (SWITCHES.has(key)) { flags[key] = "yes"; i--; continue; }
     const value = args[i + 1];
-    if (!args[i]?.startsWith("--") || !key || !allowed.includes(key) || Object.hasOwn(flags, key)
-      || value === undefined || value.startsWith("--") || !value.length || value.length > 128) {
-      throw new SolanaPaperCommandError("Invalid, duplicate or unsupported Solana paper option. Run solana-paper --help.");
-    }
+    if (value === undefined || value.startsWith("--") || !value.length || value.length > 128) throw invalid();
     flags[key] = value;
   }
   return flags;
@@ -88,11 +96,19 @@ function numberOption(value: string, maximum: number): number {
   return Number(value);
 }
 
-/** Parse and bound every renewal option before a writable book is opened. */
+/**
+ * Parse and bound every renewal option before a writable book is opened.
+ * Without --expires-days the store keeps a later expiry; raising a limit
+ * needs --loosen, which the store enforces against the book's current limits.
+ */
 function renewalOf(flags: Record<string, string>, nowMs: number): SolanaPaperLimitsRenewal {
-  const days = numberOption(flags["expires-days"] ?? "7", 365);
-  if (days < 1) throw new SolanaPaperCommandError("Renewed limits must last at least one day (--expires-days 1 or more).");
-  const renewal: SolanaPaperLimitsRenewal = { expiresAtMs: nowMs + days * 86_400_000 };
+  const renewal: SolanaPaperLimitsRenewal = {};
+  if (flags["expires-days"] !== undefined) {
+    const days = numberOption(flags["expires-days"], 365);
+    if (days < 1) throw new SolanaPaperCommandError("Renewed limits must last at least one day (--expires-days 1 or more).");
+    renewal.expiresAtMs = nowMs + days * 86_400_000;
+  }
+  if (flags.loosen !== undefined) renewal.loosen = true;
   if (flags["per-trade"] !== undefined) renewal.perTradeUsdg = paperUsdgRaw(flags["per-trade"]);
   if (flags.daily !== undefined) renewal.dailyUsdg = paperUsdgRaw(flags.daily);
   if (renewal.perTradeUsdg !== undefined && renewal.dailyUsdg !== undefined && BigInt(renewal.perTradeUsdg) > BigInt(renewal.dailyUsdg)) {

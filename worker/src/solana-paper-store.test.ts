@@ -558,12 +558,15 @@ test("an owner renewal revives an expired book without refilling it, resetting i
 
   const renewed = store.renew(OWNER, { expiresAtMs: NOW + 8 * DAY });
   const { limits: _old, version: _v, updatedAtMs: _u, ...kept } = before;
-  const { limits: renewedLimits, version, updatedAtMs, ...after } = renewed;
+  const { limits: renewedLimits, version, updatedAtMs, limitsHistory, renewal, ...after } = renewed;
   assert.deepEqual(after, kept, "cash, initial cash, peak, P&L, positions and receipts are untouched");
   assert.deepEqual(renewedLimits, { ...before.limits, expiresAtMs: NOW + 8 * DAY }, "omitted limits keep their values");
   assert.equal(version, before.version + 1);
   assert.equal(updatedAtMs, NOW + DAY);
-  assert.deepEqual(open().get(OWNER), renewed, "the renewal is durable");
+  assert.deepEqual(limitsHistory, [{ renewedAtMs: NOW + DAY, version: 2, previous: before.limits, limits: renewedLimits, loosened: [] }]);
+  assert.deepEqual(renewal, { changes: { expiresAtMs: { from: NOW + DAY, to: NOW + 8 * DAY } }, loosened: [], expiryShortened: false });
+  const { renewal: _report, ...snapshot } = renewed;
+  assert.deepEqual(open().get(OWNER), snapshot, "the renewal and its history are durable");
 
   // The stranded position can be sold again, against the renewed version.
   assert.throws(() => store.commit(sellArgs(NOW + DAY, 1)), errorCode("version_conflict"));
@@ -587,9 +590,9 @@ test("a renewal changes only the limits it names, validates them, and never rese
     [{ expiresAtMs: NOW + 10_000, cashRaw: "999999" }, "invalid_input"],
     [{ expiresAtMs: NOW + 10_000, initialCashRaw: "999999" }, "invalid_input"],
     [{ expiresAtMs: NOW + 10_000, perTradeWsol: "1" }, "invalid_input"],
-    [{ perTradeUsdg: "1" }, "invalid_input"],
-    [{ expiresAtMs: undefined, perTradeUsdg: "1" }, "invalid_input"],
     [{ expiresAtMs: String(NOW + 10_000) }, "invalid_input"],
+    [{ loosen: "yes" }, "invalid_input"],
+    [{ expiresAtMs: NOW + 10_000, perTradeUsdg: "501" }, "loosen_required"],
   ] as const) {
     assert.throws(() => store.renew(OWNER, renewal as never), code ? errorCode(code) : /Solana/, JSON.stringify(renewal));
     assert.deepEqual(store.get(OWNER), before, `${JSON.stringify(renewal)} changed the book`);
@@ -606,9 +609,68 @@ test("a renewal changes only the limits it names, validates them, and never rese
   const next = intent("next", "10");
   const nextArgs = commitArgs({ intent: next, quote: quote(next, "20", NOW + 10), marks: [mark("200", "100", NOW + 10)], safetyObservedAtMs: NOW + 10, expectedVersion: 2, nowMs: NOW + 10 });
   assert.throws(() => store.commit(nextArgs), errorCode("operation_limit"));
-  assert.equal(store.renew(OWNER, { expiresAtMs: NOW + 10_000, maxOpsPerDay: 2 }).version, 3);
+  assert.throws(() => store.renew(OWNER, { expiresAtMs: NOW + 10_000, maxOpsPerDay: 2 }), errorCode("loosen_required"));
+  assert.equal(store.renew(OWNER, { expiresAtMs: NOW + 10_000, maxOpsPerDay: 2, loosen: true }).version, 3);
   assert.throws(() => store.commit({ ...nextArgs, intent: intent("big", "51"), quote: quote(intent("big", "51"), "20", NOW + 10), expectedVersion: 3 }), errorCode("per_trade_limit"));
   assert.equal(store.commit({ ...nextArgs, expectedVersion: 3 }).version, 4);
+});
+
+test("a renewal raises a limit only with loosen, and records every renewal in the book's history", (t) => {
+  const { store, setNow, open } = fixture(t);
+  const base = limits({ perTradeUsdg: "500", dailyUsdg: "1000", maxOpsPerDay: 5, maxDrawdownBps: 1000, expiresAtMs: NOW + 86_400_000 });
+  store.create(OWNER, "1000", base, NOW);
+  const before = store.get(OWNER)!;
+  setNow(NOW + 10);
+  for (const raise of [{ perTradeUsdg: "501" }, { dailyUsdg: "1001" }, { maxOpsPerDay: 6 }, { maxDrawdownBps: 1001 },
+    { perTradeUsdg: "1", maxDrawdownBps: 10_000 }] as const) {
+    assert.throws(() => store.renew(OWNER, { ...raise }), errorCode("loosen_required"), JSON.stringify(raise));
+    assert.throws(() => store.renew(OWNER, { ...raise, loosen: false }), errorCode("loosen_required"));
+    assert.deepEqual(store.get(OWNER), before, "a refused loosening changes nothing");
+  }
+  // Lowering needs nothing more.
+  const lowered = store.renew(OWNER, { perTradeUsdg: "100", maxOpsPerDay: 3 });
+  assert.deepEqual(lowered.renewal, { changes: { perTradeUsdg: { from: "500", to: "100" }, maxOpsPerDay: { from: 5, to: 3 },
+    expiresAtMs: { from: NOW + 86_400_000, to: NOW + 10 + 7 * 86_400_000 } }, loosened: [], expiryShortened: false });
+  setNow(NOW + 20);
+  const raised = store.renew(OWNER, { perTradeUsdg: "800", dailyUsdg: "900", maxDrawdownBps: 1500, loosen: true });
+  assert.deepEqual(raised.renewal.loosened, ["perTradeUsdg", "maxDrawdownBps"], "the daily limit went down, the others up");
+  // The default expiry is again at least seven days from now.
+  assert.deepEqual(raised.limits, { ...lowered.limits, perTradeUsdg: "800", dailyUsdg: "900", maxDrawdownBps: 1500, expiresAtMs: NOW + 20 + 7 * 86_400_000 });
+  // A loosen flag without a raise loosens nothing and is not recorded as one.
+  setNow(NOW + 30);
+  const unchanged = store.renew(OWNER, { loosen: true, expiresAtMs: raised.limits.expiresAtMs });
+  assert.deepEqual([unchanged.renewal.changes, unchanged.renewal.loosened], [{}, []]);
+  // The history is durable, oldest first, and keeps the limits each renewal replaced.
+  const history = open().get(OWNER)!.limitsHistory!;
+  assert.deepEqual(history.map((entry) => [entry.renewedAtMs, entry.version, entry.loosened]),
+    [[NOW + 10, 1, []], [NOW + 20, 2, ["perTradeUsdg", "maxDrawdownBps"]], [NOW + 30, 3, []]]);
+  assert.deepEqual(history[0]!.previous, before.limits);
+  assert.deepEqual(history.map((entry) => entry.limits), [lowered.limits, raised.limits, unchanged.limits]);
+  assert.deepEqual(history[1]!.previous, history[0]!.limits);
+  // Nothing else in the book moved.
+  const { limits: _l, limitsHistory: _h, version: _v, updatedAtMs: _u, ...rest } = open().get(OWNER)!;
+  const { limits: _bl, version: _bv, updatedAtMs: _bu, ...beforeRest } = before;
+  assert.deepEqual(rest, beforeRest);
+});
+
+test("a renewal without an explicit expiry never shortens it; an explicit one may, and says so", (t) => {
+  const { store, setNow } = fixture(t);
+  const DAY = 86_400_000;
+  store.create(OWNER, "1000", limits({ expiresAtMs: NOW + 30 * DAY }), NOW);
+  setNow(NOW + DAY);
+  // Thirty days left: the 7-day default would cut 22 of them; it keeps them instead.
+  const kept = store.renew(OWNER, { maxOpsPerDay: 50 });
+  assert.equal(kept.limits.expiresAtMs, NOW + 30 * DAY);
+  assert.equal(kept.renewal.changes.expiresAtMs, undefined);
+  // An expired book gets the default seven days from now.
+  setNow(NOW + 31 * DAY);
+  const revived = store.renew(OWNER, {});
+  assert.equal(revived.limits.expiresAtMs, NOW + 38 * DAY);
+  assert.equal(revived.renewal.expiryShortened, false);
+  // The owner may still choose a shorter expiry explicitly: a tighter limit.
+  const shortened = store.renew(OWNER, { expiresAtMs: NOW + 32 * DAY });
+  assert.equal(shortened.limits.expiresAtMs, NOW + 32 * DAY);
+  assert.deepEqual([shortened.renewal.changes.expiresAtMs, shortened.renewal.expiryShortened], [{ from: NOW + 38 * DAY, to: NOW + 32 * DAY }, true]);
 });
 
 test("a held mint valued at zero is checked against the book and can only tighten the drawdown limit", (t) => {

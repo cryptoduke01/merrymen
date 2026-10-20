@@ -141,13 +141,27 @@ test("Solana CLI renew restarts a book's limits without refilling or resetting i
   refusal(run(["renew", "--owner", OTHER_OWNER]), /book does not exist/);
   refusal(run(["renew", "--owner", OWNER, "--per-trade", "50"]), /per-trade limit must not exceed the daily limit/);
   assert.deepEqual(successJson(run(["status", "--owner", OWNER])), created, "refused renewals change nothing");
+  // Raising a limit needs --loosen; the refusal changes nothing.
+  refusal(run(["renew", "--owner", OWNER, "--expires-days", "30", "--daily", "20"]), /needs --loosen; lowering one never does/);
+  refusal(run(["renew", "--owner", OWNER, "--loosen", "yes"]), /Invalid, duplicate or unsupported Solana paper option/);
+  assert.deepEqual(successJson(run(["status", "--owner", OWNER])), created, "refused renewals change nothing");
   const startedAt = Date.now();
-  const renewed = successJson(run(["renew", "--owner", OWNER, "--expires-days", "30", "--daily", "20"]));
-  assert.deepEqual({ ...renewed, limits: null, version: null, updatedAtMs: null }, { ...created, limits: null, version: null, updatedAtMs: null });
+  const renewed = successJson(run(["renew", "--owner", OWNER, "--expires-days", "30", "--loosen", "--daily", "20"]));
+  const { renewal, limitsHistory, ...book } = renewed;
+  assert.deepEqual({ ...book, limits: null, version: null, updatedAtMs: null }, { ...created, limits: null, version: null, updatedAtMs: null });
   assert.equal(renewed.version, created.version + 1);
   assert.deepEqual({ ...renewed.limits, expiresAtMs: 0 }, { ...created.limits, dailyUsdg: "20000000", expiresAtMs: 0 });
   assert.ok(renewed.limits.expiresAtMs >= startedAt + 30 * 86_400_000 && renewed.limits.expiresAtMs <= Date.now() + 30 * 86_400_000);
-  assert.deepEqual(successJson(run(["status", "--owner", OWNER])), renewed);
+  // It prints what changed, and keeps the previous limits in the book.
+  assert.deepEqual(renewal.changes.dailyUsdg, { from: "10000000", to: "20000000" });
+  assert.deepEqual(renewal.changes.expiresAtMs, { from: created.limits.expiresAtMs, to: renewed.limits.expiresAtMs });
+  assert.deepEqual(renewal.loosened, ["dailyUsdg"]);
+  assert.deepEqual(limitsHistory.map((entry) => [entry.previous, entry.limits]), [[created.limits, renewed.limits]]);
+  assert.deepEqual(successJson(run(["status", "--owner", OWNER])), { ...book, limitsHistory });
+  // Without --expires-days a later expiry is kept.
+  const again = successJson(run(["renew", "--owner", OWNER, "--per-trade", "4"]));
+  assert.equal(again.limits.expiresAtMs, renewed.limits.expiresAtMs);
+  assert.deepEqual(again.renewal.changes, { perTradeUsdg: { from: "5000000", to: "4000000" } });
   noEvmFiles(home);
 });
 
