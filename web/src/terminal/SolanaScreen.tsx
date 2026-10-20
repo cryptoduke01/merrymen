@@ -27,9 +27,7 @@ type RuntimeStatus = {
     /** Not blockers: a low shared fee payer, an owner wallet short of SOL for revoke or withdraw. */
     warnings?: string[];
     feePayer?: { lamports: string; level: FeePayerLevel } | null;
-    ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null;
-    /** The released binary SHA-256 of programId, when the server reports one. */
-    programSha256?: string | null };
+    ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null };
   limits: SolanaPaperLimits | null;
   automation?: { workerOnline: boolean; lastSeenAtMs: number | null };
 };
@@ -437,7 +435,7 @@ function ConnectedSolana() {
         serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
       {/* Off by default; only the bound owner of a vault the server has read. */}
       {ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
-        programId={live.programId} vault={live.vault} programSha256={live.programSha256 ?? null} exportKey={signer.exportKey} />}
+        programId={live.programId} vault={live.vault} exportKey={signer.exportKey} />}
     </>}
   </>;
 }

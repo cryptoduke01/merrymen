@@ -11,6 +11,8 @@ import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../.
 import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { JSDOM } from "jsdom";
+import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
+import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -55,6 +57,7 @@ async function register() {
 }
 const field = (label: string) => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!.value;
 let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen;
+const recoveryPath = fileURLToPath(new URL("./SolanaRecovery.tsx", import.meta.url));
 let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-dom").json, deferred: typeof import("./test-dom").deferred;
 let ui: ReturnType<typeof testDom>;
 let state: ReturnType<typeof initial>;
@@ -63,6 +66,8 @@ let signCount: number, exportCount = 0;
 /** What the fixture wallet returns for a signature request. */
 let signedBytes: () => Uint8Array;
 let signerDid = "did:privy:alice";
+/** The release pin SolanaRecovery reads (SOLANA_VAULT_RELEASES); undefined reads the real one. */
+let releases: Array<{ programId: string; sha256: string }> | undefined;
 let respond: (path: string, body: Record<string, unknown> | undefined) => Promise<Response>;
 const originalFetch = globalThis.fetch;
 function initial(mode: "paper" | "live" = "paper") {
@@ -80,6 +85,13 @@ before(async () => {
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const original = loader._load;
   const intercept = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
+    // The recovery card's release pin, as a test sets it.
+    if (parent?.filename === recoveryPath && id === "../../../packages/core/src/solana-live") {
+      const real = original.call(this, id, parent, isMain) as Record<string, unknown>;
+      const pinned = { ...real };
+      Object.defineProperty(pinned, "SOLANA_VAULT_RELEASES", { enumerable: true, get: () => releases ?? Reflect.get(real, "SOLANA_VAULT_RELEASES") });
+      return pinned;
+    }
     if (parent?.filename === path) {
       if (id === "./SolanaScreen.css") return {};
       if (id === "@/lib/privy-client") return { privyEnabled: () => true };
@@ -97,7 +109,7 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
-  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; signedBytes = () => Uint8Array.from([1, 2, 3]);
+  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-token");
@@ -1013,9 +1025,33 @@ test("a reviewed permission not signed in time is discarded without opening the 
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
 
-test("recovery step 2 names the real command, the key on standard input, and the program's released hash when known", async () => {
+/** The `merrymen solana-recover` command the card shows, as the arguments a shell passes, with an RPC in place of <https-url>. */
+function cardCommand(text: string): string[] {
+  const shown = text.match(/merrymen solana-recover (--program \S+ --rpc <https-url> [^\n]*?)(?=The key goes|Nothing is signed|$)/)?.[1];
+  assert.ok(shown, text);
+  return shown.trim().split(/\s+/).map((arg) => arg === "<https-url>" ? "https://rpc.example.test" : arg);
+}
+/**
+ * Runs the real tool on `args` offline: no answer ever comes from the RPC,
+ * so it stops at its first chain read, or refuses before it. A generated
+ * test key stands in on standard input.
+ */
+async function runTool(args: string[], list: readonly { programId: string; sha256: string }[]) {
+  const reads: string[] = [];
+  const fetch = (async (url: unknown) => { reads.push(String(url)); throw new Error("offline"); }) as typeof globalThis.fetch;
+  const key = base58Encode(crypto.getRandomValues(new Uint8Array(32)));
+  const stdin = Object.assign((async function* () { yield key; })(), { isTTY: false });
+  const error = await runSolanaRecoverCommand(args, { releases: list, fetch, stdin, sleep: async () => {}, log: () => {}, warn: () => {} })
+    .then(() => null, (e: unknown) => e as Error);
+  return { reads: reads.length, error };
+}
+const NOT_RELEASED = /is not a released Merrymen vault program/;
+test("for a released program, step 2 names the signing command with the key on standard input and the pinned hash, and the tool accepts it", async () => {
   await withExportFlag("1", async () => {
-    liveVault(); Object.assign(state.runtime.live, { programSha256: "ab".repeat(32) });
+    const pin = [{ programId: PROGRAM, sha256: "ab".repeat(32) }];
+    releases = pin;
+    // A hash in the status answer is never shown: the tool checks its own pin, not the server.
+    liveVault(); Object.assign(state.runtime.live, { programSha256: "cd".repeat(32) });
     await render();
     const text = exportCard()!.textContent!;
     assert.ok(text.includes(`Step 2: recover without Merrymen`));
@@ -1025,15 +1061,54 @@ test("recovery step 2 names the real command, the key on standard input, and the
     assert.ok(text.includes(`--owner ${OWNER} in place of --key-file - --send: nothing is signed or sent`));
     assert.ok(text.includes(`Vault program: ${PROGRAM}`));
     assert.ok(text.includes(`Released program binary SHA-256: ${"ab".repeat(32)}`));
-    assert.match(text, /after checking that program's deployed binary against the SHA-256 above/);
+    assert.doesNotMatch(text, /cdcdcdcd/);
+    assert.match(text, /after checking that program's deployed binary against its released hash, built into the tool/);
     // Never the escape hatch the tool tells owners to refuse.
     assert.doesNotMatch(text, /unlisted-program|program-sha256/);
-    // No hash, or one that is not a SHA-256, shows none.
-    for (const programSha256 of [null, "AB".repeat(32), "ab".repeat(31)]) {
-      Object.assign(state.runtime.live, { programSha256 }); await ui.click("Refresh account");
-      assert.doesNotMatch(exportCard()!.textContent!, /SHA-256:|against the SHA-256 above/, String(programSha256));
+    // The tool's own program check passes on exactly these arguments, with the same pin: it goes on to read the chain.
+    const args = cardCommand(text);
+    assert.deepEqual(args, ["--program", PROGRAM, "--rpc", "https://rpc.example.test", "--key-file", "-", "--send"]);
+    assert.deepEqual(solanaRecoveryProgramTrust({ programId: PROGRAM, send: true, releases: pin }), { listed: true, sha256: "ab".repeat(32) });
+    const run = await runTool(args, pin);
+    assert.ok(run.reads > 0, "past the program check, at its first RPC read");
+    assert.doesNotMatch(run.error?.message ?? "", NOT_RELEASED);
+    // The same command against a tool with no release refuses before reading anything: why it is shown only for a listed program.
+    const unreleased = await runTool(args, []);
+    assert.equal(unreleased.reads, 0); assert.match(unreleased.error!.message, NOT_RELEASED);
+  });
+});
+test("for a program no release lists, step 2 offers only the read-only plan, which the tool accepts, and no hash", async () => {
+  await withExportFlag("1", async () => {
+    // Today's pin (none released), then a pin that lists another program.
+    for (const pin of [undefined, [{ programId: OWNER, sha256: "ab".repeat(32) }], [{ programId: PROGRAM, sha256: "AB".repeat(32) }]]) {
+      releases = pin;
+      liveVault(); Object.assign(state.runtime.live, { programSha256: "ab".repeat(32) });
+      await render();
+      const text = exportCard()!.textContent!;
+      assert.ok(text.includes("Step 2: check your vault without Merrymen"), JSON.stringify(pin));
+      assert.match(text, /This vault program is not a released Merrymen vault program yet, so the Merrymen command-line tool does not sign for it/);
+      assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --rpc <https-url> --owner ${OWNER}`), text);
+      assert.doesNotMatch(text, /--send|--key-file|SHA-256|released hash|unlisted-program|program-sha256/);
+      // Step 1 still keeps the owner's offline copy of the key.
+      assert.ok(button("Export owner key with Privy"));
+      const args = cardCommand(text);
+      assert.deepEqual(args, ["--program", PROGRAM, "--rpc", "https://rpc.example.test", "--owner", OWNER]);
+      const run = await runTool(args, TOOL_RELEASES);
+      assert.ok(run.reads > 0, "the plan is accepted and reads the chain");
+      assert.doesNotMatch(run.error?.message ?? "", NOT_RELEASED);
+      await ui.close(); ui = testDom();
     }
   });
+});
+test("the card's release pin is the one the recovery tool trusts by default", async () => {
+  const recovery = createRequire(import.meta.url)(recoveryPath) as typeof import("./SolanaRecovery");
+  // The real pin (no test override): what the page offers to sign for is exactly what the tool signs for.
+  assert.deepEqual(recovery.solanaVaultReleases(), TOOL_RELEASES);
+  for (const release of TOOL_RELEASES) assert.equal(recovery.releasedProgramSha256(release.programId), release.sha256);
+  // A malformed pin entry never counts as released.
+  releases = [{ programId: PROGRAM, sha256: "not-a-hash" }, { programId: 7, sha256: "ab".repeat(32) } as unknown as { programId: string; sha256: string }];
+  assert.deepEqual(recovery.solanaVaultReleases(), []);
+  assert.equal(recovery.releasedProgramSha256(PROGRAM), null);
 });
 
 test("the recovery card waits for the status, and shows only for a live vault: never paper-only, unbound or a vault not read", async () => {
