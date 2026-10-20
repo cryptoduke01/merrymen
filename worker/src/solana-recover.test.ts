@@ -373,9 +373,11 @@ async function chain(options: Parameters<FakeChain["setup"]>[0] = {}) {
 }
 async function run(fake: FakeChain, args: string[], extra: Partial<SolanaRecoverCommandDeps> = {}) {
   const out: string[] = [], warnings: string[] = [];
-  // Waits are fake time: they advance the chain instead of the clock.
+  // Waits are fake time: they advance the chain instead of the clock. An empty environment by default:
+  // these tests give the RPC by --rpc, and the developer's own MERRYMEN_SOLANA_RECOVER_RPC (the documented
+  // path) would otherwise make every one of them "give the RPC once" (review RHS, round 2).
   const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async (ms) => fake.tick(ms),
-    pollMs: 2_000, releases: RELEASED, ...extra };
+    pollMs: 2_000, releases: RELEASED, env: {}, ...extra };
   try {
     const result = await runSolanaRecoverCommand(args, deps);
     return { result: result as SolanaRecoveryResult, out: out.join("\n"), warnings: warnings.join("\n"), error: null as unknown };
@@ -431,6 +433,20 @@ describe("solana-recover", () => {
     assert.match(out, /1\. revoke_all/);
     assert.match(out, /2\. withdraw 12\.345678 USDG, 0\.6 WSOL, 0\.003 SOL to the owner/);
     noSecrets(out);
+  });
+
+  it("runs the same with the owner's MERRYMEN_SOLANA_RECOVER_RPC set: the helper never reads this process's environment", async () => {
+    // Review RHS, round 2: with the documented variable set, 26 of these 32 tests failed on "give the RPC once".
+    const saved = process.env.MERRYMEN_SOLANA_RECOVER_RPC;
+    process.env.MERRYMEN_SOLANA_RECOVER_RPC = "https://developer-rpc.example.invalid/";
+    try {
+      const fake = await chain();
+      const { result, error } = await run(fake, [...base, "--owner", OWNER]);
+      assert.equal(error, null, String(error));
+      assert.equal(result!.sent, false);
+    } finally {
+      if (saved === undefined) delete process.env.MERRYMEN_SOLANA_RECOVER_RPC; else process.env.MERRYMEN_SOLANA_RECOVER_RPC = saved;
+    }
   });
 
   it("revokes alone and finalized, then withdraws every unit to the owner from finalized balances", async () => {
