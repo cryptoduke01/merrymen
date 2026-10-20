@@ -507,8 +507,9 @@ describe("Solana secret detection", () => {
   });
 
   it("reads the windows inside runs best effort: the edges of every run first, then the rest in order, never refusing", () => {
-    // OWNER DECISION (review RHS, round 1): every window of every run is read while the window budget lasts,
-    // and past it a window goes unread instead of refusing the text. 200 signatures spend that budget (an
+    // A DECISION AWAITING MILLA'S SIGN-OFF (review RHS, rounds 1 and 2; ids.ts SECRET_WINDOW_CHECKS): every window
+    // of every run is read while the window budget lasts, and past it a window goes unread instead of refusing
+    // the text. 200 signatures spend that budget (an
     // 88-character signature holds two 87-character windows, a key behind or before one character), as a
     // notebook's base64 does, yet stay under the exact cap.
     const list = Array.from({ length: 200 }, (_, i) => keypair(i).sig).join("\n");

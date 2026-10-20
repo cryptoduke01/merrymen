@@ -501,8 +501,12 @@ const SECRET_CANDIDATES = 256;
  * answer is what the exact candidates say. BEST EFFORT, NEVER A FALSE ALARM:
  * long base58 stretches (base64 in a notebook or an SVG, a list of signatures)
  * are never refused for the windows inside them, and a key glued inside such
- * a text past the budget is missed. Owner decision, recorded in
- * docs/solana-integration.md with what each direction costs.
+ * a text past the budget is missed. The other direction, every window past
+ * the budget read as a secret, refused base64 notebooks and images in
+ * send_file from about 800 KB. A CHOICE OF AVAILABILITY OVER SECRECY that
+ * awaits Milla's sign-off: proposed with both directions and their measured
+ * costs in the RHS track's round-2 report (ownerDecisions), for the docs pass
+ * to record in docs/solana-integration.md, which does not have it yet.
  */
 const SECRET_WINDOW_CHECKS = 256;
 const SECRET_WINDOW_DECODES = 4_096;
