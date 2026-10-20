@@ -365,7 +365,9 @@ async function expiryAccount(t: { after: (fn: () => void) => void }, input: { ma
   const clock = { now: NOW }, lines: string[] = [];
   const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
   await bindings.bind(TENANT, "did:privy:expiry", OWNER);
-  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, maxOpsPerDay: input.maxOpsPerDay, perTradeWsol: "100000000", dailyWsol: "1000000000" });
+  // Long enough that every tick below stays inside the signed window, so a refusal reaches runtime.trade.
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, maxOpsPerDay: input.maxOpsPerDay, perTradeWsol: "100000000", dailyWsol: "1000000000",
+    expiresAtMs: NOW + 100 * 3_600_000 });
   await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 60 });
   await ensureSolanaTradingSchema(db);
   for (let i = 0; i < input.expired; i++) {
@@ -399,11 +401,15 @@ test("a strategy refused because expired attempts used up the day's operations s
   // Said once per repeat window while it persists, then again.
   f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1);
   f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(f.lines.length, 2);
-  // Any other refusal is not this alert, and stays an unavailable outcome.
+  assert.equal(f.control.trades, 3, "each refusal came from runtime.trade");
+  // Any other refusal is not this alert, and stays an unavailable outcome. Each one must
+  // reach runtime.trade, or the outcome would come from the expired limits instead.
   f.control.refuse = new SolanaTradingStoreError("The Solana rolling daily limit would be exceeded.");
   f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  assert.equal(f.control.trades, 4, "the rolling-limit refusal came from runtime.trade");
   f.control.refuse = new Error(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
   f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  assert.equal(f.control.trades, 5, "the untyped refusal came from runtime.trade");
   assert.equal(f.lines.length, 2);
 });
 
