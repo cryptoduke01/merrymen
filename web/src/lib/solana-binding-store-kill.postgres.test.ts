@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { privateKeyToAccount } from "viem/accounts";
 import { base58Encode } from "../../../packages/core/src/ids";
 import type { SolanaPaperLimits } from "../../../packages/core/src/solana";
 import { makePgDb } from "../../../worker/src/db";
@@ -75,11 +76,22 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
 
     await t.test("hosted 'kill all agents' answers ok, removes the RH grant, and creates no Solana table", async () => {
       const auth = await import("@/lib/auth");
-      // The route's own specifier, so the mock lands on the store instance it calls.
-      const grants = await import("@merrymen/grant-store");
-      grants.resetGrantStoreForTest();
-      const removed: string[] = [];
-      t.mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { removed.push(tenant); });
+      // A real grant in this test's schema, read back from the database after the kill. The
+      // route's own grant-store instance cannot be mocked from here on every Node: on Node 22
+      // tsx loads the route's copy of the module separately from this file's import.
+      const { PgGrantStore } = await import("../../../worker/src/grant-store");
+      const key = `0x${"19".repeat(32)}` as const;
+      const now = Math.floor(Date.now() / 1000);
+      await new PgGrantStore(scoped("seed")).put(TENANT, {
+        smartAccount: `0x${"22".repeat(20)}`, owner: TENANT, chainId: 4663,
+        sessionKeyAddress: privateKeyToAccount(key).address,
+        serialized: Buffer.from(JSON.stringify({ privateKey: key })).toString("base64"),
+        demoSessionPrivateKey: key, expiresAt: now + 86_400, grantedAt: now, grantFeatures: ["tradeable-v2"], grantTokens: [],
+        caps: { perTradeUsdg: 10, dailyUsdg: 50, maxDrawdownPct: 20, expiryDays: 1, maxOpsPerDay: 50 },
+      } as unknown as Parameters<InstanceType<typeof PgGrantStore>["put"]>[1]);
+      const grantRows = async () => Number((await admin.query(`SELECT count(*)::int AS n FROM ${schema}.grants WHERE tenant = $1`, [TENANT])).rows[0]!.n);
+      assert.equal(await grantRows(), 1, "the RH grant was stored");
+      (await import("@merrymen/grant-store")).resetGrantStoreForTest();
       const { DELETE } = await import("../app/api/grants/route");
       const response = await DELETE(new Request("https://app.merrymen.dev/api/grants", {
         method: "DELETE", headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(TENANT)}`, "content-type": "application/json" },
@@ -87,7 +99,7 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
       }));
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { ok: true });
-      assert.deepEqual(removed, [TENANT]);
+      assert.equal(await grantRows(), 0, "the RH grant was removed");
       assert.equal(await table(), false, "no Solana table was created");
     });
 
