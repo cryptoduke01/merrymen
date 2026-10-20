@@ -299,6 +299,9 @@ describe("the CI jobs", () => {
       ["solana · test skipped", { "solana-test": "skipped" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
       ["solana · rebuild cancelled", { "solana-rebuild": "cancelled" }, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
       ["an app part failed on a docs-only run", { "app-test": "failure" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      // A program change before its new Linux manifest is committed: the
+      // TypeScript manifest test and solana · test's comparison both fail.
+      ["a program change with its manifest not yet committed", { "app-test": "failure", "solana-test": "failure" }, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
     ];
     const dir = fresh("app");
     for (const [label, results, vars, status] of cases) {
@@ -307,6 +310,10 @@ describe("the CI jobs", () => {
       // The shell Actions uses for a `run:` with no `shell:` key.
       const r = run("bash", ["--noprofile", "--norc", "-e", file], vars);
       assert.equal(r.status, status, `${label}: ${r.stdout}${r.stderr}`);
+      // The hashes are in the log whatever failed: the owner checks a new
+      // Linux manifest against them on exactly the runs that fail.
+      const shown = `vault artifact: tested ${vars.VAULT_TESTED_SHA256 || "(none)"}, rebuilt ${vars.VAULT_REBUILT_SHA256 || "(none)"}`;
+      assert.ok(r.stdout.split("\n").includes(shown), `${label}: ${r.stdout}`);
     }
   });
 

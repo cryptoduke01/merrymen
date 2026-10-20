@@ -431,6 +431,10 @@ jobs:
           VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
         run: |
           echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana paths: ${{ needs.solana-paths.result }} (build: $SOLANA_BUILD), solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}"
+          # Before the checks below: a program change fails them until its new
+          # Linux manifest is committed, and the owner checks that manifest
+          # against these two hashes.
+          echo "vault artifact: tested ${VAULT_TESTED_SHA256:-(none)}, rebuilt ${VAULT_REBUILT_SHA256:-(none)}"
           test "${{ needs.app-typecheck.result }}" = success
           test "${{ needs.app-build.result }}" = success
           test "${{ needs.app-test.result }}" = success
@@ -438,7 +442,6 @@ jobs:
           test "${{ needs.solana-paths.result }}" = success
           test "${{ needs.solana-test.result }}" = success
           test "${{ needs.solana-rebuild.result }}" = success
-          echo "vault artifact: tested $VAULT_TESTED_SHA256, rebuilt $VAULT_REBUILT_SHA256"
           case "$SOLANA_BUILD" in
             true)
               # The vault binary that passed the custody tests is the one the

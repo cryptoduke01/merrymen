@@ -136,7 +136,9 @@ and differs from that pinned Linux build; while none is committed it only report
 recorded values. To commit the first one, take the artifact from a run whose `app` check
 passed, check that the manifest's `source.digest` equals `build.sh --source-digest` at that
 commit and its `artifact.sha256` equals the tested and rebuilt hashes in `app`'s log, and
-commit the file unchanged. From then on a program change needs a new Linux manifest as
+commit the file unchanged. `app` prints both hashes before it checks any result, so they
+are in its log on a failing run too; the `solana · test` and `solana · rebuild` step
+summaries carry them as well. From then on a program change needs a new Linux manifest as
 well: its pull request fails (this step, and the TypeScript manifest test) until the
 manifest that run uploaded is committed. Check it against `solana · rebuild`'s hash the
 same way; the next run must then pass, which shows CI reproduced it.
