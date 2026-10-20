@@ -30,9 +30,9 @@ test("the pinned account is the push oracle's sponsored shard-0 PDA for the SOL/
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID), PYTH_SOL_USD_ACCOUNT);
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD, PYTH_PUSH_ORACLE_PROGRAM), PYTH_SOL_USD_ACCOUNT);
   // Fixed outputs of the PDA rule for other shards and programs. Of these, only the upgraded shard-0 read was
-  // kept (PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT). The 2026-10-19 check reported both shard-1 accounts as
-  // existing, owned by their generation's receiver and stale (unusable), but kept no capture of them: here they
-  // are derivations only, not evidence that the accounts exist.
+  // kept (PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT). The 2026-10-19 check reported the current shard-1 account
+  // as owned by rec5EK…, and both shard-1 accounts as existing but stale (unusable); it kept no capture of
+  // them. Here they are derivations only, not evidence that the accounts exist or who owns them.
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1), "6bWEn5B8eJCRAek5acd3R7d4Sx3e7JWvt84srqqfYgt");
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 0, UPGRADED_PUSH_ORACLE), PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT.account);
   assert.equal(await derivePythPriceFeedAccount(PYTH_SOL_USD_FEED_ID, 1, UPGRADED_PUSH_ORACLE), "GGdMnioYUC8qFWrWXJP2n3YHAns49MJW87CeuT7sgvrf");
