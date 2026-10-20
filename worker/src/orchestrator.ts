@@ -6956,19 +6956,24 @@ export async function reconcile(): Promise<void> {
       // first (honourKillRequest), so the tenant is no longer wanted while its
       // Solana stop may still be failing; the pending request is what retries
       // that stop, and wiped with the home it would never run again. Carried out
-      // now, the home goes below as before; still failing, it is kept for the
+      // now, the home goes below as before; still failing (or its kill state
+      // unreadable, which never clears by itself), only the wipe waits: the
+      // revoked session key's cached copy, the bot token and memory go now, as
+      // for any removed agent, and the home with its request stays for the
       // order ferry and the next pass.
-      if (killRequested(home) && (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome === "failed") continue;
+      const killPending = killRequested(home) && (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome === "failed";
       scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true });
       forgetTgGroupsHome(home, log);
       forgetPersonalMemoryHome(home, log);
-      if (existsSync(path.join(home, "merrymen.db"))) {
-        // Erase obsolete bot/config copies while preserving the original book
-        // and all crash/consumption barriers. No raw ledger archive is made.
+      if (killPending || existsSync(path.join(home, "merrymen.db"))) {
+        // Erase obsolete bot/config copies while preserving the original book,
+        // all crash/consumption barriers and a pending kill request. No raw
+        // ledger archive is made.
         for (const file of ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"])
           rmSync(path.join(home, file), { force: true });
         fsyncDirSync(home);
-        log(`${tenant} grant removed — personal memory and cached access cleared; original accounting retained`);
+        log(killPending ? `${tenant} grant removed — personal memory and cached access cleared; the home is kept while its Telegram kill is pending`
+          : `${tenant} grant removed — personal memory and cached access cleared; original accounting retained`);
       } else {
         // A pending or consumed book must never be replaced by an empty home.
         if (ledgerSourceBlocked(home) || persistentFleetHome()) continue;

@@ -251,6 +251,34 @@ describe("a hosted Telegram kill, then a reconcile", () => {
     assert.deepEqual(confirmed, [TENANT]);
   });
 
+  it("A PENDING OR UNREADABLE KILL KEEPS ONLY THE HOME AND ITS REQUEST: the revoked key's cached copy and the bot token go on the next pass", async () => {
+    const secrets = ["grant.json", "settings.json", "telegram.json"];
+    const leftovers = () => secrets.filter((file) => existsSync(path.join(home(), file)));
+    // The Solana stop failing: the RH grant is removed, the kill stays pending.
+    await store.put(TENANT, grantAt(nowSec() - 3600));
+    mkdirSync(home(), { recursive: true });
+    const cached = JSON.stringify(await store.get(TENANT), null, 2);
+    writeFileSync(grantFile(), cached);
+    childKill();
+    // The child's settings and Telegram config with the bot token, and the revoked grant's copy raced back.
+    for (const file of secrets) writeFileSync(path.join(home(), file), file === "grant.json" ? cached : JSON.stringify({ botToken: "123:secret" }));
+    solanaDown = true;
+    await reconcile();
+    await reconcile();
+    assert.equal(killRequested(home()), true, "the request still retries the Solana stop");
+    assert.deepEqual(leftovers(), [], "no revoked session key or bot token is kept for it");
+    solanaDown = false;
+    await reconcile();
+    assert.equal(existsSync(home()), false, "carried out, the home goes as before");
+    // A kill state that cannot be read never clears by itself: the home is kept, its secrets are not.
+    mkdirSync(home(), { recursive: true });
+    mkdirSync(path.join(home(), `${KILL_REQUEST_PREFIX}abc.superseded.json`));
+    for (const file of secrets) writeFileSync(path.join(home(), file), file === "grant.json" ? cached : JSON.stringify({ botToken: "123:secret" }));
+    await reconcile();
+    assert.equal(killRequested(home()), true);
+    assert.deepEqual(leftovers(), []);
+  });
+
   it("A CRASHED CHILD IS NOT RESPAWNED with its key while a kill is pending", async () => {
     // No adopted child: the tenant is wanted but not running, which is
     // what a crash leaves. The spawn path writes grant.json.

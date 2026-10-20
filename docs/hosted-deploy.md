@@ -778,6 +778,13 @@ it off; the full plan, settings and runbooks are in
   Solana DDL and reports done exactly as before. Both kills remove the Robinhood
   grant first; only where the Solana table exists can a Solana fault make the
   web answer 503 "Kill incomplete" or keep a Telegram kill pending for a retry.
+  While a Telegram kill is pending (or its kill state cannot be read), the
+  orchestrator keeps the tenant's home and its request but still removes the
+  cached grant copy, `settings.json` (the bot token), `telegram.json` and the
+  memory, as for any removed agent; only the wipe of the home waits.
+- **`POST /api/grants` owner-key scan.** The Solana secret walk reads each
+  string once under a grant-sized budget (32 candidates, small window budget):
+  a 230 KB hostile body costs about 7 to 15 ms of CPU. The route is not paced.
 - **`/api/grants` request limits** (Robinhood code, changed with this work).
   `POST /api/grants` refuses a body over 256 KiB with 413 ("That request is too
   large. Nothing was saved."), the same bound as partner activation, and a body
