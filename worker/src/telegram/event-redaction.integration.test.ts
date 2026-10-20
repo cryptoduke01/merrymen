@@ -213,7 +213,9 @@ describe("redactAddresses", () => {
 
   it("is applied wherever event text is handed to a model — the why narration and the daily journal/digest", () => {
     const service = readFileSync(new URL("./service.ts", import.meta.url), "utf8");
-    const why = service.slice(service.indexOf("why: async () => {"), service.indexOf("narrateWhy(plain, llm)"));
+    assert.match(service, /why: \(\) => whyAnswer\(readWhyEvidence\(/, "/why answers through why-answer.ts");
+    const answer = readFileSync(new URL("./why-answer.ts", import.meta.url), "utf8");
+    const why = answer.slice(answer.indexOf("export async function whyAnswer("), answer.indexOf("await narrate(plain, llm)"));
     assert.match(why, /const plain = redactAddresses\(/);
     const notifier = readFileSync(new URL("./notifier.ts", import.meta.url), "utf8");
     assert.match(notifier, /redactAddresses\(report\.replace\(\/<\[\^>\]\+>\/g, ""\)\)/, "the digest's narration evidence");

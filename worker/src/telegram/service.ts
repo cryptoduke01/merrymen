@@ -80,7 +80,8 @@ import { canConsider, considerRefusedNote, parseTailCallback, tailAmbiguousText,
 import type { ExtendTailData, UntailData } from "../fomo/tools";
 import { TAIL_CAP_SPENT_LINE } from "../fomo/tail-notices";
 import { resolveLlm } from "../llm";
-import { CONTROL_KINDS, PC_KINDS, TAIL_USAGE, interpretWithLlm, narrateChat, narrateWhy, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
+import { CONTROL_KINDS, PC_KINDS, TAIL_USAGE, interpretWithLlm, narrateChat, parseSlash, stripThinkingBlock, type Command } from "./interpreter";
+import { whyAnswer } from "./why-answer";
 import { makePcActions, resolveInRoot } from "./pc";
 import { transcribeVoice } from "./voice";
 import { fmtReminders, fmtWatchers, parseWatchSpec, parseWhenSec } from "./watchers";
@@ -95,7 +96,6 @@ import {
   readTrades,
   readWallet,
   readWhyEvidence,
-  redactAddresses,
   dashboardBase,
   type StatusContext,
 } from "./reads";
@@ -1363,18 +1363,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // followed at all, and "fund your agent" is the commonest thing anyone
         // is ever told to do.
         wallet: () => readWallet(statusCtx().agentId),
-        why: async () => {
-          const ev = readWhyEvidence(statusCtx().agentId);
-          const llm = resolveLlm(cfg);
-          if (!ev.hasTrade || !llm) return ev.text;
-          // Model text, sent as HTML: escaped, or a "<" in it (or in a
-          // decision's reason it quotes) makes Telegram refuse the message.
-          // Addresses redacted: the evidence quotes event lines (reads.ts).
-          const plain = redactAddresses(
-            ev.text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"),
-          );
-          return escModel(await narrateWhy(plain, llm));
-        },
+        // The model reads redacted evidence; the owner keeps the tx hash (why-answer.ts).
+        why: () => whyAnswer(readWhyEvidence(statusCtx().agentId), resolveLlm(cfg)),
         settings: () => settingsListText(cfg as unknown as Record<string, unknown>),
       },
       // ── settings by text: ask first, change on confirm ────────────────────
