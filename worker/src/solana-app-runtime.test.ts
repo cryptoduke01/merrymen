@@ -582,6 +582,34 @@ test("the fee payer warning threshold is explicit configuration (audit G2-4)", a
   } finally { f.raw.close(); }
 });
 
+test("a misconfigured fee setting is a status blocker that still shows the vault, balances, fee payer and owner wallet; a bad fee cap refuses a live trade as configuration", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
+    const good = await f.app.status(f.scope);
+    assert.equal(good.live.ready, true, good.live.blockers.join(" | "));
+    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS", "lots", /fee payer warning threshold is misconfigured/],
+      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/], ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
+      const app = f.runtime({ env: { ...f.env, [setting]: value }, log: () => {} });
+      const status = await app.status(f.scope);
+      assert.deepEqual(status.live.blockers.length, 1, status.live.blockers.join(" | "));
+      assert.match(status.live.blockers[0]!, blocker, setting);
+      assert.equal(status.live.ready, false); assert.equal(status.live.canExit, false);
+      // Everything else is still read and shown.
+      assert.deepEqual(status.live.balances, good.live.balances, setting); assert.deepEqual(status.live.ownerWallet, good.live.ownerWallet, setting);
+      assert.deepEqual(status.live.recoverable, good.live.recoverable, setting); assert.equal(status.live.vault, good.live.vault, setting);
+      // Still called low below the default threshold, which stands in for the one that cannot be read.
+      assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, setting);
+      assert.equal(good.live.feePayer?.level, "low"); assert.equal(status.live.feePayer?.lowLamports, null, "no configured threshold to show");
+      assert.deepEqual(status.live.warnings, good.live.warnings, setting);
+      if (setting === "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS") {
+        await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
+      }
+    }
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 /** A provider that kept the owner's signed bytes and reports them finalized, with a vault forged to match. */
 const withholding = (f: Fixture): SolanaLiveRead => async (method, params = []) => {

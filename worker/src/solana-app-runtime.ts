@@ -344,8 +344,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * every tenant's exits stop. The executor itself refuses anything the payer
    * cannot fund, so these levels never block a trade it would sign.
    */
+  const DEFAULT_MAX_FEE_LAMPORTS = 5_000_000n;
+  /**
+   * The network fee and rent cap per live trade, in lamports
+   * (MERRYMEN_SOLANA_MAX_FEE_LAMPORTS, default 5,000,000). An unreadable value
+   * is configuration: a status blocker, and a refusal before anything is signed.
+   */
+  function maxFeeLamports(): bigint {
+    try { return parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? DEFAULT_MAX_FEE_LAMPORTS.toString()); }
+    catch { return fail("The Solana network fee limit setting is misconfigured: it must be a whole number of lamports above zero. Live trading and exits stay refused until an operator fixes it.", "configuration"); }
+  }
   function feePayerLow(): bigint {
-    const maxFee = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
+    const maxFee = maxFeeLamports();
     const raw = env.MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS;
     if (raw === undefined) return maxFee * 4n;
     try { return parseSolanaRawAmount(raw); } catch { return fail("The fee payer warning threshold is misconfigured.", "configuration"); }
@@ -353,7 +363,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
   let feePayerAlert: { level: FeePayerLevel; atMs: number } | undefined;
   /** One structured line per change of level, repeated every FEE_PAYER_ALERT_REPEAT_MS while it is not ok. */
-  function reportFeePayer(level: FeePayerLevel, details: Record<string, string>) {
+  function reportFeePayer(level: FeePayerLevel, details: Record<string, string | null>) {
     const at = now(), last = feePayerAlert;
     if (level === "ok") {
       if (last && last.level !== "ok") log(JSON.stringify({ solana: "fee-payer-ok", ...details }));
@@ -654,7 +664,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
-      let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string; level: FeePayerLevel } | null = null;
+      let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string | null; level: FeePayerLevel } | null = null;
       let ownerWallet: { lamports: string; revokeLamports: string; withdrawLamports: string } | null = null;
       let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
@@ -663,12 +673,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         // vault, fee payer, owner wallet and recoverable SOL are still read and shown.
         try { computeUnitPrices(); } catch (error) { blockers.push(statusBlocker(error)); }
         try { expiredAttemptAllowance(); } catch (error) { blockers.push(statusBlocker(error)); }
+        // So are the fee settings: an unreadable fee cap (which trade() refuses) or
+        // warning threshold. The fee payer is still read and shown, and is still
+        // called low (and alerted on) below the default threshold, four times the
+        // default fee cap, while the configured one cannot be read.
+        let low: bigint | null = null;
+        try { low = feePayerLow(); } catch (error) { blockers.push(statusBlocker(error)); }
+        const alertBelow = low ?? DEFAULT_MAX_FEE_LAMPORTS * 4n;
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
           if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
           await verifyDeployment(cfg);
-          const low = feePayerLow(), vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+          const vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
           const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const payerState = await rpc().read(async read => {
@@ -694,13 +711,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (payerState.owner.held < revokeNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL, too little to revoke or withdraw (at least ${sol(revokeNeeds)} SOL to revoke, up to ${sol(withdrawNeeds)} SOL to withdraw). Keep some SOL there so you can act in an emergency.`);
           else if (payerState.owner.held < withdrawNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL: enough to revoke, but a withdrawal may need up to ${sol(withdrawNeeds)} SOL to open your token account. Keep some SOL there so you can act in an emergency.`);
           const level: FeePayerLevel = payerState.lamports < payerState.exitMinimum ? "exits-blocked" : payerState.lamports < payerState.buyMinimum ? "buys-blocked"
-            : payerState.lamports < low ? "low" : "ok";
+            : payerState.lamports < alertBelow ? "low" : "ok";
           feePayerView = { lamports: payerState.lamports.toString(), exitMinimumLamports: payerState.exitMinimum.toString(),
-            buyMinimumLamports: payerState.buyMinimum.toString(), lowLamports: low.toString(), level };
+            buyMinimumLamports: payerState.buyMinimum.toString(), lowLamports: low === null ? null : low.toString(), level };
           reportFeePayer(level, { feePayer, ...feePayerView });
           if (level === "exits-blocked") blockers.push(`The shared network fee payer holds ${sol(payerState.lamports)} SOL, below the ${sol(payerState.exitMinimum)} SOL one exit needs. Trading and automated exits are paused until an operator funds it.`);
           else if (level === "buys-blocked") buysOnly(`The shared network fee payer holds ${sol(payerState.lamports)} SOL: enough for exits, not for buys (${sol(payerState.buyMinimum)} SOL). Buying is paused until an operator funds it; exits remain available.`);
-          else if (level === "low") warnings.push(`The shared network fee payer is low (${sol(payerState.lamports)} SOL; operators are alerted below ${sol(low)} SOL). Trading continues.`);
+          else if (level === "low") warnings.push(`The shared network fee payer is low (${sol(payerState.lamports)} SOL; operators are alerted below ${sol(alertBelow)} SOL). Trading continues.`);
           const live = await readSolanaVaultState(rpc(), programId, scope.owner);
           balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
           cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
@@ -792,7 +809,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (JSON.stringify(expected) !== JSON.stringify(prior.submission.intent)) fail("The request ID already belongs to a different live trade.");
         return publicTrade(await reconcileSolanaSubmission(rpc(), s, scope.owner, parsed.requestId, now) ?? prior);
       }
-      const cfg = config(), prices = computeUnitPrices(), secret = await s.sessionSeed(dek());
+      const cfg = config(), prices = computeUnitPrices(), maxFee = maxFeeLamports(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       // Refused as configuration before anything is signed; the store counts with it at admission.
       const expiredAllowance = expiredAttemptAllowance();
@@ -808,7 +825,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
-        journal, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
+        journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot }) => {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
