@@ -26,9 +26,12 @@
 // another branch is not a candidate. This script cannot know the manifest
 // outcome yet, so its record always says not-a-release; in solana · test,
 // solana-linux-manifest.mjs report compares the manifest, rewrites the
-// record's release with releaseStatus(run, outcome), and gives ci.yml the
-// artifact name's label. That label is at most candidate-unconfirmed: the
-// upload happens before app has compared the rebuild's hash, so only
+// record's release with releaseStatus(run, outcome, record), and gives ci.yml
+// the artifact name's label. The third argument is the build record itself
+// (its programId and localTestId): a build that declares the local test
+// program id is never a candidate, and a record that does not name both ids
+// fails closed as not compared. That label is at most candidate-unconfirmed:
+// the upload happens before app has compared the rebuild's hash, so only
 // solana-release.mjs, in the job that runs after app passed, says release.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
