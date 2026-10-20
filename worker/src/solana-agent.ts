@@ -158,16 +158,18 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
   };
   /**
    * A live account whose vault holds less than its book (SOLANA_STATUS_BELOW_BOOK): tokens left it outside
-   * Merrymen, and its automated trades and exits stay held until the book is reconciled with the vault, which
-   * nothing does by itself. Said as an [alert] at most once per SOLANA_AGENT_ALERT_REPEAT_MS per account
-   * while it persists, and at once again after it clears.
+   * Merrymen, and its automated trades and exits stay held until the book matches the vault again. Nothing in
+   * the worker books a decrease: an operator finds what moved the tokens and reconciles the book, as the
+   * plan of record says (docs/solana-integration.md, "A vault below its book"). Said as an [alert] at most
+   * once per SOLANA_AGENT_ALERT_REPEAT_MS per account while it persists, and at once again after it clears.
    */
   const belowBook = (scope: SolanaAccountScope, blockers: readonly string[] | undefined) => {
     const account = solanaAccountRef(scope);
     if (!blockers?.includes(SOLANA_STATUS_BELOW_BOOK)) { said.delete(`below-book:${account}`); return; }
     say(`below-book:${account}`, `[alert] Solana vault below its book: an account's vault holds less USDG or SOL than its recorded trades, so its automated trades `
       + `and exits are held: ${JSON.stringify({ solana: "alert", kind: "vault-below-book", account })} — tokens left the vault outside Merrymen (a recovery-tool or wallet `
-      + "withdrawal, say); nothing trades on that account until its book is reconciled with the vault");
+      + "withdrawal, say). Nothing reconciles the book by itself: an operator must find what moved the tokens and reconcile the book with the vault "
+      + "(docs/solana-integration.md, \"A vault below its book\"). Until then the owner can revoke, and withdraw what the vault holds up to its book");
   };
   /**
    * STUCK, SAID TO THE OPERATOR. After receipt recovery, any live trade admitted, or signed owner transaction

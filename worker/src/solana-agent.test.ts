@@ -519,6 +519,8 @@ test("a live account whose vault holds less than its book is held, and says an [
   assert.equal(f.control.trades, 0);
   assert.equal(f.lines.length, 1);
   assert.match(f.lines[0]!, /^\[alert\] Solana vault below its book: /);
+  // It names the remedy: nothing books a decrease, so an operator reconciles the book, as the plan of record says.
+  assert.match(f.lines[0]!, /Nothing reconciles the book by itself: an operator must find what moved the tokens and reconcile the book with the vault \(docs\/solana-integration\.md, "A vault below its book"\)/);
   assert.deepEqual(fieldsOf(f.lines[0]!), { solana: "alert", kind: "vault-below-book", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }) });
   assert.ok(!f.lines[0]!.includes(TENANT) && !f.lines[0]!.includes(OWNER));
   f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1, "said once per repeat window");
