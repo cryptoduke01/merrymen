@@ -30,9 +30,11 @@ units (USDG has 6 decimals). Reuse a trade's request ID after interruption;
 it returns the saved receipt without applying another fill. Never reset a
 book by repeating init: an existing book is refused. Once limits expire, the
 owner can renew them. renew changes only the limits given (others are kept)
-and prints what changed. Without --expires-days the expiry becomes 7 days
-from now, or stays as it is if that is later: it is never shortened unless
---expires-days says so. Lowering a limit needs nothing more; raising the
+and prints what changed. Without --expires-days: an expired book gets 7 days
+from now; a running book keeps its expiry when renew changes a limit, so
+tightening never lengthens it; a bare renew extends it to 7 days from now,
+or keeps it if later. Only --expires-days can shorten the expiry, or lengthen
+it alongside a limit change. Lowering a limit needs nothing more; raising the
 per-trade, daily, max-ops or drawdown limit also needs --loosen. Every renewal
 is kept in the book's limitsHistory with the previous and new limits. renew
 never changes cash, positions, P&L or receipts, and the rolling 24-hour
@@ -108,8 +110,9 @@ function numberOption(value: string, maximum: number): number {
 
 /**
  * Parse and bound every renewal option before a writable book is opened.
- * Without --expires-days the store keeps a later expiry; raising a limit
- * needs --loosen, which the store enforces against the book's current limits.
+ * Without --expires-days the store decides the expiry (SolanaPaperLimitsRenewal);
+ * raising a limit needs --loosen, which the store enforces against the book's
+ * current limits.
  */
 function renewalOf(flags: Record<string, string>, nowMs: number): SolanaPaperLimitsRenewal {
   const renewal: SolanaPaperLimitsRenewal = {};

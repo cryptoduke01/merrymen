@@ -632,15 +632,15 @@ test("a renewal raises a limit only with loosen, and records every renewal in th
     assert.throws(() => store.renew(OWNER, { ...raise, loosen: false }), errorCode("loosen_required"));
     assert.deepEqual(store.get(OWNER), before, "a refused loosening changes nothing");
   }
-  // Lowering needs nothing more.
+  // Lowering needs nothing more, and a running book keeps its expiry.
   const lowered = store.renew(OWNER, { perTradeUsdg: "100", maxOpsPerDay: 3 });
-  assert.deepEqual(lowered.renewal, { changes: { perTradeUsdg: { from: "500", to: "100" }, maxOpsPerDay: { from: 5, to: 3 },
-    expiresAtMs: { from: NOW + 86_400_000, to: NOW + 10 + 7 * 86_400_000 } }, loosened: [], expiryShortened: false });
+  assert.deepEqual(lowered.renewal, { changes: { perTradeUsdg: { from: "500", to: "100" }, maxOpsPerDay: { from: 5, to: 3 } },
+    loosened: [], expiryShortened: false });
   setNow(NOW + 20);
   const raised = store.renew(OWNER, { perTradeUsdg: "800", dailyUsdg: "900", maxDrawdownBps: 1500, loosen: true });
   assert.deepEqual(raised.renewal.loosened, ["perTradeUsdg", "maxDrawdownBps"], "the daily limit went down, the others up");
-  // The default expiry is again at least seven days from now.
-  assert.deepEqual(raised.limits, { ...lowered.limits, perTradeUsdg: "800", dailyUsdg: "900", maxDrawdownBps: 1500, expiresAtMs: NOW + 20 + 7 * 86_400_000 });
+  // Changing limits never moves a running book's expiry either.
+  assert.deepEqual(raised.limits, { ...lowered.limits, perTradeUsdg: "800", dailyUsdg: "900", maxDrawdownBps: 1500, expiresAtMs: NOW + 86_400_000 });
   // A loosen flag without a raise loosens nothing and is not recorded as one.
   setNow(NOW + 30);
   const unchanged = store.renew(OWNER, { loosen: true, expiresAtMs: raised.limits.expiresAtMs });
@@ -676,6 +676,35 @@ test("a renewal without an explicit expiry never shortens it; an explicit one ma
   const shortened = store.renew(OWNER, { expiresAtMs: NOW + 32 * DAY });
   assert.equal(shortened.limits.expiresAtMs, NOW + 32 * DAY);
   assert.deepEqual([shortened.renewal.changes.expiresAtMs, shortened.renewal.expiryShortened], [{ from: NOW + 38 * DAY, to: NOW + 32 * DAY }, true]);
+});
+
+test("a renewal that only tightens a limit never lengthens a running book's expiry; a bare one extends it", (t) => {
+  const { store, setNow } = fixture(t);
+  const DAY = 86_400_000;
+  store.create(OWNER, "1000", limits({ perTradeUsdg: "500", expiresAtMs: NOW + 2 * DAY }), NOW);
+  // One day left. Lowering the per-trade limit keeps that day; it does not also give the book seven.
+  setNow(NOW + DAY);
+  const tightened = store.renew(OWNER, { perTradeUsdg: "5" });
+  assert.equal(tightened.limits.expiresAtMs, NOW + 2 * DAY);
+  assert.deepEqual(tightened.renewal.changes, { perTradeUsdg: { from: "500", to: "5" } });
+  assert.deepEqual(tightened.limitsHistory!.at(-1)!.limits.expiresAtMs, NOW + 2 * DAY);
+  // The same holds with an empty loosen flag beside it, and for every other limit.
+  for (const change of [{ maxOpsPerDay: 50, loosen: true }, { dailyUsdg: "9000" }, { maxDrawdownBps: 1000 }] as const) {
+    assert.equal(store.renew(OWNER, { ...change }).limits.expiresAtMs, NOW + 2 * DAY, JSON.stringify(change));
+  }
+  // An explicit expiry alongside a change is the owner's choice.
+  assert.equal(store.renew(OWNER, { perTradeUsdg: "4", expiresAtMs: NOW + 10 * DAY }).limits.expiresAtMs, NOW + 10 * DAY);
+  // A bare renewal asks for more time: seven days from now, or a later expiry kept.
+  assert.equal(store.renew(OWNER, {}).limits.expiresAtMs, NOW + 10 * DAY);
+  setNow(NOW + 9 * DAY);
+  const extended = store.renew(OWNER, {});
+  assert.equal(extended.limits.expiresAtMs, NOW + 16 * DAY);
+  assert.deepEqual(extended.renewal.changes, { expiresAtMs: { from: NOW + 10 * DAY, to: NOW + 16 * DAY } });
+  // An expired book can only continue with a new expiry: a renewal that names a change revives it for the default seven days.
+  setNow(NOW + 16 * DAY);
+  const revived = store.renew(OWNER, { perTradeUsdg: "3" });
+  assert.equal(revived.limits.expiresAtMs, NOW + 23 * DAY);
+  assert.deepEqual(revived.renewal.changes.expiresAtMs, { from: NOW + 16 * DAY, to: NOW + 23 * DAY });
 });
 
 test("a held mint valued at zero is checked against the book and can only tighten the drawdown limit", (t) => {

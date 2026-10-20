@@ -111,9 +111,12 @@ const LOOSENABLE = ["perTradeUsdg", "dailyUsdg", "maxOpsPerDay", "maxDrawdownBps
 type RenewableLimit = (typeof LOOSENABLE)[number] | "expiresAtMs";
 /**
  * A renewal names the limits to change; any limit it omits keeps its current
- * value. Without `expiresAtMs` the expiry becomes SOLANA_PAPER_RENEW_DEFAULT_DAYS
- * from now, or stays later if it already is: a default renewal never shortens
- * it. Raising a limit needs `loosen`.
+ * value. Without `expiresAtMs` the expiry moves only when that is what the
+ * renewal is for: an expired book gets SOLANA_PAPER_RENEW_DEFAULT_DAYS from
+ * now, and a renewal that names no other change extends a running book to
+ * that, or keeps its expiry if later. A renewal that names another change
+ * keeps a running book's expiry as it is, so tightening a limit never also
+ * lengthens how long the book may trade. Raising a limit needs `loosen`.
  */
 export type SolanaPaperLimitsRenewal = { expiresAtMs?: number; loosen?: boolean }
   & Partial<Pick<SolanaPaperLimits, (typeof LOOSENABLE)[number]>>;
@@ -320,8 +323,10 @@ export class SolanaPaperStore {
    *
    * It never loosens silently: raising the per-trade, daily, operations or
    * drawdown limit needs `loosen` (lowering one never does), a renewal without
-   * an explicit expiry never shortens the current one, and every renewal is
-   * appended to the book's `limitsHistory` with the previous and new limits.
+   * an explicit expiry never shortens the current one and lengthens a running
+   * book's only when it names no other change (SolanaPaperLimitsRenewal), and
+   * every renewal is appended to the book's `limitsHistory` with the previous
+   * and new limits.
    */
   renew(owner: string, renewal: SolanaPaperLimitsRenewal, preparedAtMs = this.now()): SolanaPaperSnapshot & { renewal: SolanaPaperRenewalReport } {
     ownerKey(owner);
@@ -341,7 +346,11 @@ export class SolanaPaperStore {
       if (book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
       const previous = book.limits;
       const defaultExpiry = nowMs + SOLANA_PAPER_RENEW_DEFAULT_DAYS * DAY_MS;
-      const expiresAtMs = changes.expiresAtMs ?? Math.max(previous.expiresAtMs, defaultExpiry);
+      // Without an explicit expiry: revive an expired book; extend a running
+      // one only for a renewal that asks for nothing else; otherwise keep it.
+      const namesOtherChange = Object.keys(changes).some((key) => key !== "expiresAtMs");
+      const expiresAtMs = changes.expiresAtMs ?? (nowMs >= previous.expiresAtMs ? defaultExpiry
+        : namesOtherChange ? previous.expiresAtMs : Math.max(previous.expiresAtMs, defaultExpiry));
       // Validation errors keep their own message: they say which limit is wrong.
       const limits = validateSolanaPaperLimits({ ...previous, ...changes, expiresAtMs }, nowMs);
       const loosened = LOOSENABLE.filter((key) => BigInt(limits[key]) > BigInt(previous[key]));
