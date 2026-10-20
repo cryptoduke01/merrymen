@@ -122,6 +122,19 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
       assert.equal((await owner.get(TENANT))!.strategy!.enabled, false);
     });
 
+    await t.test("with the column present, a fresh store's first use waits on no open reader of the table", async () => {
+      // Review RHS, round 2: the schema step ran ADD COLUMN IF NOT EXISTS, whose ACCESS EXCLUSIVE lock waits
+      // behind this read transaction even when the column exists: the statement timeout (3 s) here.
+      await holder.query("BEGIN");
+      await holder.query("SELECT * FROM solana_wallet_bindings");
+      try {
+        const fresh = new SqlSolanaBindingStore(() => makePgDb(scoped("fresh")), "postgres", () => NOW + 6);
+        const started = Date.now();
+        assert.equal((await fresh.get(TENANT))!.owner, OWNER);
+        assert.ok(Date.now() - started < 2_500, `the first use took ${Date.now() - started} ms, as if it waited on the reader`);
+      } finally { await holder.query("ROLLBACK"); }
+    });
+
     await t.test("a kill in a process whose own schema step waits on another's schema lock neither waits nor fails with it", async () => {
       // Review RHS, round 2: killDb returned this store's schema-step promise once a Solana route had started it,
       // so this kill waited on the advisory lock held below and failed with that step's statement timeout (3 s).

@@ -144,8 +144,13 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
       if (this.dialect === "postgres") await db.tx(async (tx) => {
         await tx.prepare("SELECT pg_advisory_xact_lock(?)").get(1_297_691_983);
         await tx.exec(SCHEMA);
-        // Db translates ADD COLUMN to Postgres's idempotent IF NOT EXISTS form.
-        await tx.exec("ALTER TABLE solana_wallet_bindings ADD COLUMN strategy_json TEXT");
+        // Only when the catalog shows the column missing (as applyLedgerMigrations does): ADD COLUMN IF NOT
+        // EXISTS takes an ACCESS EXCLUSIVE lock even when the column exists, so each process's first use queued
+        // behind every open reader of the table, and every later reader and kill behind it. The advisory lock
+        // serializes the check and the ALTER; Db still sends the ALTER as IF NOT EXISTS.
+        const column = await tx.prepare(`SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('solana_wallet_bindings')
+          AND attname = 'strategy_json' AND NOT attisdropped) AS present`).get() as { present?: unknown } | undefined;
+        if (column?.present !== true) await tx.exec("ALTER TABLE solana_wallet_bindings ADD COLUMN strategy_json TEXT");
       });
       else await db.tx(async (tx) => {
         await tx.exec(SCHEMA);

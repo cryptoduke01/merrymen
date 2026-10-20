@@ -105,6 +105,25 @@ test("a PostgreSQL kill looks the table and its column up in the catalog, and ne
   assert.ok(sql.slice(before).every((s) => !/pg_advisory|CREATE|ALTER/.test(s)), sql.slice(before).join("\n"));
 });
 
+test("the PostgreSQL schema step adds strategy_json only when the catalog shows it missing", async () => {
+  // ADD COLUMN IF NOT EXISTS takes an ACCESS EXCLUSIVE lock even for a column that exists (review RHS, round 2).
+  for (const present of [true, false]) {
+    const sql: string[] = [];
+    const db: Db = {
+      prepare: (text) => {
+        sql.push(text);
+        return { run: async () => ({ changes: 0, lastInsertRowid: 0 }), get: async () => (/AS present/.test(text) ? { present } : undefined), all: async () => [] };
+      },
+      exec: async (text) => { sql.push(text); }, tx: async (fn) => fn(db),
+    };
+    await new SqlSolanaBindingStore(async () => db, "postgres", () => NOW).get(TENANT);
+    const check = sql.findIndex((s) => /AS present/.test(s));
+    assert.ok(check > sql.findIndex((s) => /pg_advisory_xact_lock/.test(s)), "under the schema lock");
+    assert.match(sql[check]!, /to_regclass\('solana_wallet_bindings'\)/); assert.match(sql[check]!, /attname = 'strategy_json' AND NOT attisdropped/);
+    assert.equal(sql.some((s) => /^ALTER TABLE solana_wallet_bindings ADD COLUMN strategy_json/.test(s)), !present, `present: ${present}`);
+  }
+});
+
 test("a kill never waits on, or fails with, this process's own schema step still in flight", async () => {
   // Review RHS, round 2: killDb returned database()'s promise whenever it was set, so a kill that landed while a
   // Solana route in this process was still setting up waited for that step (its advisory lock, then an ALTER
