@@ -189,12 +189,18 @@ const PAPER_SETUP = new Set([
 /**
  * PAPER BOOK RULES THE OWNER CAN ACT ON, BY CODE: 409 WITH FIXED TEXT.
  *
- * The write-off route (POST /api/solana/paper/write-off) answers its refusals
- * this way: not_dust (a route still buys the lot), no_position, invalid_quote
- * and stale_safety (the zero-output answer is unusable or too old). The same
- * codes from a paper trade's commit (a quote or safety read that went stale
- * under the lock) read the same. Every other book code keeps 400 with the
- * store's own fixed message.
+ * All seven codes below are answered 409 with the text beside them, from any
+ * paper route, whichever the request:
+ * - not_dust (a route still buys the lot), no_position, invalid_quote and
+ *   stale_safety (the zero-output answer is unusable or too old): the write-off
+ *   route's (POST /api/solana/paper/write-off) refusals, also raised by a paper
+ *   trade's commit when a quote or safety read went stale under the lock;
+ * - remainder_unquoted (a paper sale would leave a remainder no route buys
+ *   back), book_missing (no paper book yet) and version_conflict (the book
+ *   changed while the request was prepared): raised by paper trade commits,
+ *   the write-off and the book's other updates. These used to answer 400 with
+ *   the store's message; they are the book's state, not a malformed request.
+ * Every other book code keeps 400 with the store's own fixed message.
  */
 const PAPER_BOOK_REFUSALS: Partial<Record<SolanaPaperStoreError["code"], string>> = {
   not_dust: "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.",
