@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { ageDays, journalTail, notes, ownerFacts, relationship, sanitizeMemory, sanitizeNote } from "./soul";
-import { base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
+import { base58Decode, base58Encode, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 
 /** A real-shaped 32-byte Solana key under 40 characters: twenty leading zero bytes, each one a "1". */
 const SHORT_KEY = base58Encode(Uint8Array.from({ length: 32 }, (_, i) => (i < 20 ? 0 : i * 7)));
@@ -229,6 +229,24 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
       assert.ok(tail.includes("A fine day."), "the prose survives");
       assert.ok(!tail.includes(SHORT_KEY) && !tail.includes(SOLANA_USDG_MINT), tail);
       assert.match(tail, /Send to \[redacted\] or \[redacted\] tomorrow\. \[redacted\] then \[redacted\]\./);
+    });
+  });
+
+  it("a key written as 0x<key> in JOURNAL.md is redacted whole, one that begins with hex included (review GE, round 2)", () => {
+    // The 0x rule ran first and took "0x373Fb1"; the 38-character tail was under the blob floor and no longer decoded.
+    const key = "373Fb1kTbyVQaYJBCTcojzXWx5hm4jWKbLkcUFenass8";
+    assert.equal(base58Decode(key)?.length, 32, "the fixture is a key");
+    assert.match(key, /^[0-9a-fA-F]{6}[^0-9a-fA-F]/, "the fixture begins with six hex digits");
+    withHome((home) => {
+      writeFileSync(
+        path.join(home, "soul", "JOURNAL.md"),
+        `# Journal\n\n## 2026-07-02\n\nA fine day. Aped 0x${key} and sent to 0xd76257aee404f1243831A9235dEcB5bb339A45cb tomorrow.\n`,
+        "utf8",
+      );
+      const tail = journalTail();
+      assert.ok(tail.includes("A fine day."), "the prose survives");
+      assert.ok(!tail.includes("kTbyVQaYJBCTcojzXWx5") && !tail.includes("0xd76257"), tail);
+      assert.match(tail, /Aped 0\[redacted\] and sent to \[redacted\] tomorrow\./);
     });
   });
 });

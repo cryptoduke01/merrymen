@@ -169,6 +169,19 @@ describe("redactAddresses", () => {
     assert.equal(redactAddresses(`X${MINT}${key}Y and ${key}`), "[address] and [address]");
   });
 
+  it("strips a key glued behind an 0x run, whose leading hex ADDRESS_RUN would take alone (review GE, round 2)", () => {
+    // ADDRESS_RUN ran first, took "0x" and 20 hex, and left the key's tail, too short to decode, for the model.
+    const key = "A5D1HPCPPVQVXSSQFNHQgUAjPuK9uRJvfvp3S4pX86kN";
+    assert.equal(ids.base58Decode(key)?.length, 32, "the fixture is a key");
+    const out = redactAddresses(`landed 0x${"ab".repeat(10)}${key} ok`);
+    assert.ok(!out.includes("HPCPPVQVXSSQFNHQgUAj"), out);
+    assert.equal(out, "landed 0[address] ok");
+    assert.equal(redactAddresses(`aped 0x${key} now`), "aped 0[address] now");
+    // An address, a cut one and a tx hash come out as before.
+    assert.equal(redactAddresses(`to ${ACCOUNT}. tx ${TX}`), `to [address]. tx ${TX}`);
+    assert.equal(redactAddresses(`cut ${HOLDER.slice(0, 30)}`), "cut [address]");
+  });
+
   it("replaces a signature-length run standing alone, which can be two keys or a key with a word glued on (review GE)", () => {
     const { SOLANA_USDG_MINT: MINT, base58Decode } = ids;
     // Each decodes to 64 bytes, as a signature does, with nothing alphanumeric either side.

@@ -965,8 +965,11 @@ const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
   // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
   // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
-  return redactSolanaIds(text.replace(ADDRESS_RUN, "[address]"), (hit) =>
-    hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]");
+  // Solana first, on the text as written: ADDRESS_RUN takes "0x" and 20-40 hex, so run first on
+  // "0x<hex><key>" it ate the key's leading hex and left a tail too short to decode (review GE,
+  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still ADDRESS_RUN's.
+  const solana = redactSolanaIds(text, (hit) => (hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]"));
+  return solana.replace(ADDRESS_RUN, "[address]");
 }
 
 /** Recent event-feed lines (for the LLM's context) — addresses redacted. */

@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
+import { base58Decode, base58Encode, SOLANA_USDG_MINT } from "../../../packages/core/src/ids";
 import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
 import { traitsOf, type Disposition } from "../social-post";
@@ -2582,6 +2582,24 @@ describe("buildPrompt", () => {
     }
     const { prompt } = buildPrompt({ kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent, { ...ctx, tail: solTail });
     assert.match(prompt, /\[address\] then \[address\]/);
+  });
+
+  it("strips a key written as 0x<key>, whose leading hex the 0x rule would take alone (review GE, round 2)", () => {
+    // The 0x rule ran first, took "0xA5D1", and left a tail too short to decode, which reached the model.
+    const key = "A5D1HPCPPVQVXSSQFNHQgUAjPuK9uRJvfvp3S4pX86kN";
+    assert.equal(base58Decode(key)?.length, 32, "the fixture is a key");
+    const evm = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+    const said = `aped 0x${key} now, not ${evm}`;
+    const solTail: SpeakCtx["tail"] = [...tail, { name: "Pine Stoat's owner", author: "owner", body: said }];
+    for (const intent of [...intents, { kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent]) {
+      const { system, prompt } = buildPrompt(intent, { ...ctx, tail: solTail });
+      for (const text of [system, prompt]) {
+        assert.ok(!text.includes("HPCPPVQVXSSQFNHQgUAj") && !text.includes("5fc5360d"), `an id in the prompt for ${intent.kind}`);
+      }
+    }
+    const { prompt } = buildPrompt({ kind: "reply", to: "Pine Stoat's owner", toAuthor: "owner", toOwnAgent: false, text: said } as Intent, { ...ctx, tail: solTail });
+    // The key's run begins at its x (a 0 is no base58), so the 0 stays: no id is in it.
+    assert.match(prompt, /aped 0\[address\] now, not \[address\]/);
   });
 
   it("shows no figure outside the fence, and states the rules", () => {

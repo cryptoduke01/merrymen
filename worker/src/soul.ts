@@ -441,15 +441,16 @@ export function appendJournal(entry: string, nowSec?: number): void {
  * write-side strip doesn't cover anything typed in afterwards.
  */
 function scrubProse(text: string): string {
-  const out = text
-    .replace(/<[^>]*>/g, "") // no markup into prompts
+  const unmarked = text.replace(/<[^>]*>/g, ""); // no markup into prompts
+  // A Solana key can be 32-39 characters, under the blob floor, alone or glued to a word ("CA<key>").
+  // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
+  // Solana before the 0x rule, on the text as written: that rule takes "0x" and every hex digit after
+  // it, so run first on "0x<key>" it ate a key's leading hex and, for a key that begins with 5 or more
+  // hex digits, left a tail under the blob floor that no longer decodes (review GE, round 2). The
+  // glued scan skips a run that is "0x" then hex alone, so an address is still the 0x rule's.
+  return redactSolanaIds(unmarked, () => "[redacted]")
     .replace(/0x[0-9a-fA-F]{6,}/g, "[redacted]") // addresses / keys / calldata
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]"); // token/secret-shaped blobs
-  // A Solana key can be 32-39 characters, under the blob floor, alone or glued to a word ("CA<key>").
-  // Longest value first (core's redactSolanaIds). With the blob rule above taking every run of 40 or
-  // more, no run left here holds a second id beside a shorter hit, so the order is not what keeps
-  // this safe today; it keeps it safe if that floor ever moves.
-  return redactSolanaIds(out, () => "[redacted]");
 }
 
 /** The last few journal entries (for prompt context). */
