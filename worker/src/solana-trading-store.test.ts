@@ -11,6 +11,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -675,8 +676,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         await f.store.finishSetup(registration, "finalized", 1003);
         await assert.rejects(f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1")), /expiry evidence/);
         await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "2"));
-        // The revocation never ran, so the registration may be activated.
-        await f.store.registerSession({ ...f.registered, registrationSignature: registration }, sessionSeed, dek);
+        // The revocation never ran, so the registration may be activated (its landing moved the epoch 1 -> 2).
+        await f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek);
         assert.equal(await f.store.revokeSetup(), null, "activation clears the resolved revocation with the registration");
       } else {
         await f.store.finishSetup(registration, "failed", 1002, expiry("1", "1"));
@@ -688,9 +689,54 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await saveSignedSetup(f.store, { ...setup("session"), ...prior }, "registration-landed");
     await f.store.saveSetup(revokeBeside("registration-landed")); await f.store.saveSetup(signedRevoke("registration-landed"));
     await f.store.finishSetup("registration-landed", "finalized", 1003);
-    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed" }, sessionSeed, dek), /revocation was signed after this permission/);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed", sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
     await f.store.finishSetup("revoke-beside", "finalized", 1004);
-    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed" }, sessionSeed, dek), /revocation was signed after this permission/);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed", sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+  });
+  test(`${dialect}: a revocation that landed beside a pending owner transaction is kept: another beside it is refused, a registration landing after it is never activated, and a dropped one is still proven never run`, options, async t => {
+    const landedRefusal = (error: unknown) => error instanceof Error && error.message === SOLANA_REVOKE_ALREADY_LANDED;
+    for (const after of ["lands", "dropped"] as const) {
+      const f = await fixture(t, dialect), registration = `registration-${after}`;
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration)); await f.store.saveSetup(signedRevoke(registration));
+      await f.store.finishSetup("revoke-beside", "finalized", 1003);
+      const landed = await f.store.revokeSetup();
+      // The owner presses Revoke again (read after the first landed, so at epoch 2): refused, and the landed record is kept as it was.
+      await assert.rejects(f.store.saveSetup({ ...revokeBeside(registration), priorSessionEpoch: "2", messageBase64: "c2Vjb25k", transactionBase64: "c2Vjb25k", preparedAtMs: NOW + 5 }), landedRefusal);
+      assert.deepEqual(await f.store.revokeSetup(), landed);
+      if (after === "lands") {
+        // The registration lands after the revocation (epoch 1 -> 2 -> 3): never activated, by the epoch and by the record.
+        await f.store.finishSetup(registration, "finalized", 1004);
+        await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "3" }, sessionSeed, dek), (error: unknown) => error instanceof Error && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+        await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: registration, sessionEpoch: "2" }, sessionSeed, dek), /revocation was signed after this permission/);
+        assert.equal(await f.store.session().then(item => item?.registrationSignature), "owner-registration", "the earlier session record is untouched");
+      } else {
+        // The registration never ran: the epoch moved once, by the kept revocation, which is the proof.
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "2"));
+        assert.equal((await f.store.setup())!.status, "failed");
+      }
+    }
+    // Beside a pending withdrawal too: the landed revocation is kept until the withdrawal resolves, then a revocation is prepared as usual.
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-pending");
+    await f.store.saveSetup(revokeBeside("withdraw-pending")); await f.store.saveSetup(signedRevoke("withdraw-pending"));
+    await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    await assert.rejects(f.store.saveSetup({ ...revokeBeside("withdraw-pending"), priorSessionEpoch: "2", preparedAtMs: NOW + 5 }), landedRefusal);
+    await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "2"));
+    assert.equal(await f.store.saveSetup({ ...setup("revoke"), ...prior, priorSessionEpoch: "2" }), true);
+    assert.equal(await f.store.revokeSetup(), null, "the main-slot revocation clears the resolved one beside the old record");
+  });
+  test(`${dialect}: a registration whose landing did not move the session epoch exactly once is never activated, whatever the records say`, options, async t => {
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("session"), ...prior }, "registration-moved");
+    await f.store.finishSetup("registration-moved", "finalized", 1003);
+    // A revocation outside Merrymen landed first (epoch 1 -> 2), then the registration (-> 3).
+    for (const sessionEpoch of ["3", "1", "0"]) {
+      await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-moved", sessionEpoch }, sessionSeed, dek),
+        (error: unknown) => error instanceof Error && error.message === SOLANA_REGISTERED_AFTER_REVOKE, sessionEpoch);
+    }
+    await f.store.registerSession({ ...f.registered, registrationSignature: "registration-moved", sessionEpoch: "2" }, sessionSeed, dek);
+    assert.equal((await f.store.session())!.registrationSignature, "registration-moved");
   });
   // OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-trading-store.ts).
   const outsideSignature = (n: number) => base58Encode(new Uint8Array(64).fill(n));

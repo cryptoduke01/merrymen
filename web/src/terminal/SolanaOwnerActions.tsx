@@ -258,8 +258,12 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
  * the server prepares it beside the pending record (owner decision option A,
  * ownerTransaction.revoke), and each is settled and booked by its own
  * signature. Only a pending revocation, in either place, holds back every
- * owner action, another revocation included. So the page holds back what the
- * server would refuse, says why, and offers a check instead.
+ * owner action, another revocation included. A revocation that already landed
+ * beside a still-pending record holds back another beside it (the server keeps
+ * that record: the pending one's expiry proof counts it): every session it
+ * covered is revoked, and Revoke returns once the pending record resolves. So
+ * the page holds back what the server would refuse, says why, and offers a
+ * check instead.
  *
  * It does not always resolve within minutes. The server settles a record
  * only on two providers' agreeing outcome, and leaves it pending when they
@@ -325,7 +329,10 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   const serverRevoke = serverTransaction?.revoke?.status === "pending" ? serverTransaction.revoke : null;
   // What the server refuses to prepare now: a revocation only while one is pending (in either place),
   // anything else while any owner transaction is pending.
-  const revokeHeld = serverPending?.kind === "revoke" || !!serverRevoke, anyServerPending = !!serverPending || !!serverRevoke;
+  // A revocation beside the server's pending record that already landed: the server keeps its record and
+  // prepares no other beside it (SOLANA_REVOKE_ALREADY_LANDED) until the pending record resolves.
+  const revokeLanded = !!serverPending && serverPending.kind !== "revoke" && serverTransaction?.revoke?.status === "finalized";
+  const revokeHeld = serverPending?.kind === "revoke" || !!serverRevoke || revokeLanded, anyServerPending = !!serverPending || !!serverRevoke;
   // When this page's status reads first and last reported the same pending record (each read is a new record object).
   const [seen, setSeen] = useState<{ signature: string; first: number; last: number } | null>(null);
   useEffect(() => {
@@ -480,6 +487,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   const pendingIsServers = !!pending && ((!!serverPending && pending.signature === serverPending.signature) || (!!serverRevoke && pending.signature === serverRevoke.signature));
   /** What the server holds back while `kind` is pending, in the owner's words. */
   const holds = (kind: string | undefined) => kind === "revoke" ? "the server prepares no other owner transaction, a revocation included"
+    : revokeLanded ? "the server prepares no other owner transaction: your revocation beside it already landed, so every session it covered is revoked"
     : revokeHeld ? "the server prepares no other owner transaction, and the revocation beside it is pending too"
     : "the server prepares no other withdrawal, resume request or permission; revoking stays available and is prepared beside it";
   return <div className="solana-card" aria-busy={busy}><h2>Owner controls</h2>
@@ -527,9 +535,12 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     </div>}
     {!review && lapsed && <p role="status">The prepared {ACTION_NAMES[lapsed]} was not signed in time, so it was discarded. Nothing was signed. Start it again to prepare a new one.</p>}
     {pending && <p role="status">{pendingIsServers
-      ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, ${pending.action === "revoke" || revokeHeld
+      ? `A signed ${ACTION_NAMES[pending.action]} is awaiting final confirmation on Solana. Until it is final or expired, ${pending.action !== "revoke" && revokeLanded
+        ? "no other owner transaction can be prepared: your revocation beside it already landed, so every session it covered is revoked"
+        : pending.action === "revoke" || revokeHeld
         ? "no other owner transaction can be prepared, a revocation included" : "no other withdrawal or resume request can be prepared; revoking stays available and is prepared beside it"}.${stuck ? "" : " Check it shortly."}`
       // A pending revocation on the server (another device or tab) holds Revoke back: never promise it here.
+      : revokeLanded ? `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Your revocation beside the server's pending ${kindName(serverPending!.kind)} above already landed; you can revoke again once that resolves.`
       : revokeHeld ? `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking waits for the server's pending revocation above: it can be prepared once that is final or expired.`
       : serverPending ? `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking stays available: it is prepared beside the server's pending ${kindName(serverPending.kind)} above.`
       : `A signed ${ACTION_NAMES[pending.action]} has no confirmed outcome yet. Check it before signing another withdrawal or resume request. Revoking stays available: if the server never saved this ${ACTION_NAMES[pending.action]}, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation is prepared beside it.`}</p>}

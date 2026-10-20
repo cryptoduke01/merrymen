@@ -513,11 +513,14 @@ type ServerOwnerRecord = { signature: string; status: string; kind?: string; rev
 const serverOwnerRecord = () => (state.runtime.live as { ownerTransaction?: ServerOwnerRecord }).ownerTransaction ?? null;
 /**
  * The owner route's prepare, as prepareOwner answers it (pinned in SolanaServerContract.test.ts): while a saved
- * owner transaction is pending, only a revocation beside a pending non-revoke one; nothing while a revocation is.
+ * owner transaction is pending, only a revocation beside a pending non-revoke one; nothing while a revocation is;
+ * and no second revocation beside it once one beside it landed (pinned in solana-app-runtime.test.ts).
  */
+const REVOKE_ALREADY_LANDED = "Your revocation already landed, so every session it covered is revoked. Once the pending owner transaction resolves you can revoke again; that is needed only if it was a trading permission that registered after your revocation.";
 const ownerPrepare = (body: Record<string, unknown> | undefined) => {
   const record = serverOwnerRecord(), main = record?.status === "pending", revoking = record?.revoke?.status === "pending";
   const beside = body?.action === "revoke" && main && record!.kind !== "revoke" && !revoking;
+  if (beside && record?.revoke?.status === "finalized") return refusal(REVOKE_ALREADY_LANDED);
   return (main || revoking) && !beside ? refusal("Refresh the pending owner transaction before preparing another.") : prepareAnswer(body);
 };
 /** A revocation the server saved beside its pending main record (its revoke slot). */
@@ -551,7 +554,7 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
   assert.equal(button("Revoke all Solana sessions").disabled, true);
 });
 
-test("signed bytes the server never saved, next to a different pending server record: Revoke is prepared beside it, and only a pending revocation holds Revoke back", async () => {
+test("signed bytes the server never saved, next to a different pending server record: Revoke is prepared beside it, and only a revocation beside it, pending or landed, holds Revoke back", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -578,8 +581,16 @@ test("signed bytes the server never saved, next to a different pending server re
   assert.doesNotMatch(text, /Revoking stays available/);
   assert.match(text, /Your revocation is awaiting final confirmation on Solana\. Until it is final, or its blockhash expires \(usually within a few minutes\), the server prepares no other owner transaction, a revocation included\./);
   assert.match(text, /A signed withdrawal has no confirmed outcome yet\. Check it before signing another withdrawal or resume request\. Revoking waits for the server's pending revocation above: it can be prepared once that is final or expired\./);
-  // Once the revocation resolves, Revoke is available again beside the resume request, and the page says so.
+  // Once the revocation landed, its record is kept beside the resume request: Revoke waits for that to resolve, and the page says why.
   revokeBeside("other-device-revoke", "finalized");
+  await ui.click("Refresh account");
+  text = ui.container.textContent!;
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  assert.doesNotMatch(text, /Revoking stays available/);
+  assert.match(text, /Your request to resume buys is awaiting final confirmation on Solana\. Until it is final, or its blockhash expires \(usually within a few minutes\), the server prepares no other owner transaction: your revocation beside it already landed, so every session it covered is revoked\./);
+  assert.match(text, /Your revocation beside the server's pending request to resume buys above already landed; you can revoke again once that resolves\./);
+  // A revocation that provably never ran leaves nothing to keep: Revoke is available again beside the resume request.
+  revokeBeside("other-device-revoke", "failed");
   await ui.click("Refresh account");
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.match(ui.container.textContent!, /Revoking stays available/);
@@ -650,6 +661,15 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
   ownerTransaction("permission-sig", "pending", "session");
   await ui.click("Refresh account");
   assert.match(text(), /Your trading permission is awaiting final confirmation on Solana\. Until it is final, or its blockhash expires \(usually within a few minutes\), the server prepares no other withdrawal, resume request or permission; revoking stays available and is prepared beside it\./);
+  assert.equal(button("Revoke all Solana sessions").disabled, false);
+  // A revocation beside it landed: the server keeps that record (no second press overwrites it), so Revoke waits for the permission to resolve.
+  revokeBeside("revoke-beside-sig", "finalized");
+  await ui.click("Refresh account");
+  assert.match(text(), /Your trading permission is awaiting final confirmation on Solana\. Until it is final, or its blockhash expires \(usually within a few minutes\), the server prepares no other owner transaction: your revocation beside it already landed, so every session it covered is revoked\./);
+  assert.equal(button("Revoke all Solana sessions").disabled, true);
+  // The permission resolved (it registered after the revocation): Revoke is available again, in the main slot.
+  ownerTransaction("permission-sig", "finalized", "session"); revokeBeside("revoke-beside-sig", "finalized");
+  await ui.click("Refresh account");
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   // An unknown kind from the server is named plainly, never looked up on the prototype.
   ownerTransaction("odd-sig", "pending", "constructor");

@@ -24,6 +24,7 @@ import { address as kitAddress, appendTransactionMessageInstructions, compileTra
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
 import { SOLANA_STATUS_BELOW_BOOK, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -639,6 +640,60 @@ test("a revocation beside a pending permission registration: whichever lands, bo
       else assert.equal((await activation).registered, true);
     } finally { f.raw.close(); }
   }
+});
+
+test("Revoke pressed again after the revocation beside a pending registration landed is refused and the landed record kept: the registration landing later is never activated, and a dropped one still resolves", async () => {
+  for (const then of ["registration-lands", "registration-dropped"] as const) {
+    const f = await fixture();
+    try {
+      await f.live(); f.controls.initialized = true;
+      const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+      const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+      const setupSigned = await f.sign(setup.transactionBase64);
+      const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+      const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+      const revokeSigned = await f.sign(revoke.transactionBase64);
+      const pendingRevoke = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+      chain.land(pendingRevoke.signature, revokeSigned); f.controls.epoch = 2n;
+      const landed = (await f.app.status(f.scope)).live.ownerTransaction;
+      assert.deepEqual([landed?.status, landed?.revoke?.status], ["pending", "finalized"]);
+      const kept = await store.revokeSetup();
+      // The second press is refused before anything is read or saved; the landed revocation's record stays.
+      await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+        (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === SOLANA_REVOKE_ALREADY_LANDED);
+      assert.deepEqual(await store.revokeSetup(), kept);
+      if (then === "registration-lands") {
+        chain.land(registration.signature, setupSigned); f.controls.epoch = 3n;
+        assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+        await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+          (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+        assert.equal(await store.session(), null, "no session key is stored after the owner's landed revocation");
+      } else {
+        // Dropped: its blockhash expired with the epoch moved once, by the kept revocation.
+        f.controls.height = 5001;
+        assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "failed");
+      }
+    } finally { f.raw.close(); }
+  }
+});
+
+test("a registration that landed after a revocation made outside Merrymen is never activated: the epoch moved twice since it was prepared", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    // revoke_all from another wallet (epoch 1 -> 2), then the registration lands (-> 3), its session buy-paused.
+    f.controls.finalized = true; f.controls.epoch = 3n;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+    await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "permission" && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).session(), null);
+    // Only its own landing moved the epoch: activated.
+    f.controls.epoch = 2n;
+    assert.equal((await f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") })).registered, true);
+  } finally { f.raw.close(); }
 });
 
 test("a session registration dropped while a trade advanced the vault resolves on the epoch alone", async () => {

@@ -118,6 +118,14 @@ export interface SolanaPreparedSetup {
  * that is not pending (it belonged beside the record being replaced); a
  * pending one blocks that prepare.
  *
+ * Also refused: another revocation beside the same pending record once one
+ * beside it landed (SOLANA_REVOKE_ALREADY_LANDED). That landed record is the
+ * partner the pending record's "never ran" proof counts and what keeps a
+ * registration from being activated, so it is kept, never overwritten, until
+ * the pending record resolves. Every session it covered is revoked; once the
+ * pending record resolves, a revocation goes in the main slot as usual (needed
+ * only when it was a registration that landed after the revocation).
+ *
  * Proofs stay independent: a revocation moves only the session epoch, and a
  * withdrawal or resume-buys never does, so neither can wedge the other's
  * expiry proof. A permission registration moves the epoch too: while a
@@ -125,8 +133,18 @@ export interface SolanaPreparedSetup {
  * ran" for either one means the epoch moved exactly once
  * (solanaOwnerEpochOffset); while the other is unresolved, its move is not
  * counted and the proof waits. A registration with a signed revocation beside
- * it is never activated: the owner's later word was to revoke.
+ * it is never activated: the owner's later word was to revoke. Nor is one
+ * whose landing did not move the epoch exactly once from what it was prepared
+ * at (registerSession): something else moved it, a revocation among them.
  */
+/** Refused: a revocation beside a pending owner transaction once one beside it landed (REVOKE BESIDE...). */
+export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, so every session it covered is revoked. Once the pending owner transaction resolves you can revoke again; that is needed only if it was a trading permission that registered after your revocation.";
+/** Refused activation: the vault's session epoch moved more than this registration's own landing since it was prepared. */
+export const SOLANA_REGISTERED_AFTER_REVOKE = "A revocation or another permission landed on Solana after this permission was prepared, so it is not activated. If it is still active on Solana, revoke again, then prepare a new permission.";
+/** The session epoch a registration prepared at `priorSessionEpoch` leaves when it lands with nothing else moving it; null when unreadable. */
+export function solanaRegisteredEpoch(priorSessionEpoch: string | undefined): bigint | null {
+  return priorSessionEpoch !== undefined && /^(0|[1-9][0-9]{0,19})$/.test(priorSessionEpoch) ? BigInt(priorSessionEpoch) + 1n : null;
+}
 /**
  * How many times `partner`, the record in the other slot, moved the session
  * epoch that `setup`'s "never ran" proof starts from: 1 when the two are linked
@@ -665,6 +683,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           setup.signature !== session.registrationSignature || setup.programId !== session.programId ||
           setup.vault !== session.vault || setup.session !== session.session) refuse("Register only the exact finalized owner-approved session.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before replacing its session.");
+      // A registration moves the epoch once: any other move since it was prepared (a revocation, say) was not the owner's word for this session.
+      if (setup.priorSessionEpoch !== undefined && session.sessionEpoch !== solanaRegisteredEpoch(setup.priorSessionEpoch)?.toString()) refuse(SOLANA_REGISTERED_AFTER_REVOKE);
       // A revocation the owner signed beside this registration, landed or not yet resolved, was the later word.
       const revoke = await this.revokeIn(tx);
       if (revoke?.signature && revoke.beside === setup.signature && revoke.status !== "failed") refuse("A revocation was signed after this permission. Prepare a new permission.");
@@ -892,6 +912,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           // Only beside the main record it names, while that is a pending non-revoke, and never beside another pending revocation.
           if (!ownerPending(main) || main!.signature !== setup.beside || main!.kind === "revoke") refuse("Prepare the revocation again: the pending owner transaction it was prepared beside changed.");
           if (ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
+          // A landed revocation beside this same record is kept: its proof partner and the registration's fence.
+          if (revoke?.signature && revoke.status === "finalized" && revoke.beside === setup.beside) refuse(SOLANA_REVOKE_ALREADY_LANDED);
         }
         await tx.prepare(`INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)
           ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));

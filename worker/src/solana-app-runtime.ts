@@ -30,7 +30,7 @@ import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
-import { solanaOwnerEpochOffset } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaOwnerEpochOffset, solanaRegisteredEpoch } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 
 /**
@@ -683,6 +683,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "failed" && item.status !== "finalized";
     const beside = details.kind === "revoke" && unresolved(previous) && (previous!.kind ?? "session") !== "revoke" && !unresolved(revoking) ? previous!.signature : undefined;
     if ((unresolved(previous) || unresolved(revoking)) && beside === undefined) fail("Refresh the pending owner transaction before preparing another.", "pending");
+    // A revocation beside this same pending record already landed: its record is kept (the store refuses too).
+    if (beside !== undefined && revoking?.status === "finalized" && revoking.beside === beside) fail(SOLANA_REVOKE_ALREADY_LANDED, "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
@@ -1055,6 +1057,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // read as before.
       const registeredAt = (await s.setup())?.finalizedSlot;
       const live = await readSolanaVaultState(rpc(), cfg.programId, scope.owner, registeredAt);
+      // Its landing moved the epoch once from what it was prepared at. Any other move since (a revocation
+      // that landed before it, beside it or outside Merrymen) means the owner's later word was to revoke.
+      const expectedEpoch = solanaRegisteredEpoch(setup.priorSessionEpoch);
+      if (expectedEpoch === null || live.state.sessionEpoch !== expectedEpoch) fail(SOLANA_REGISTERED_AFTER_REVOKE, "permission");
       if (live.vault !== setup.vault || live.state.session !== session || live.state.perTrade !== BigInt(setup.limits.perTradeUsdg)
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
         || live.state.perTradeWsol !== BigInt(setup.limits.perTradeWsol ?? "0") || live.state.dailyWsol !== BigInt(setup.limits.dailyWsol ?? "0")
