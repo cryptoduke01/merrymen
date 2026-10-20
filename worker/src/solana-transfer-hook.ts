@@ -39,10 +39,11 @@ function accountOf(value: unknown): { owner: string; data: Uint8Array } | null {
  * token account to the owner's, read at `commitment` no earlier than
  * `minContextSlot`: none for a classic-token mint or a Token-2022 mint that
  * names no hook program, otherwise the resolved hook accounts. Throws when the
- * mint or the hook's list cannot be read or resolved.
+ * mint or the hook's list cannot be read or resolved, and when the hook needs
+ * the owner's wallet (SOLANA_TRANSFER_HOOK_NAMES_OWNER).
  */
 export async function readSolanaWithdrawHookAccounts(read: SolanaLiveRead, p: {
-  mint: string; tokenProgram: string; vault: string; vaultToken: string; ownerToken: string; amount: bigint;
+  mint: string; tokenProgram: string; vault: string; owner: string; vaultToken: string; ownerToken: string; amount: bigint;
   commitment: "confirmed" | "finalized"; minContextSlot?: number;
 }): Promise<SolanaTransferHookAccount[]> {
   if (p.tokenProgram !== TOKEN_2022_PROGRAM) return [];
@@ -58,7 +59,7 @@ export async function readSolanaWithdrawHookAccounts(read: SolanaLiveRead, p: {
   const validationAddress = await deriveSolanaTransferHookValidation(hookProgram, p.mint);
   const [validation] = await accounts([validationAddress]);
   return resolveSolanaTransferHookAccounts({
-    hookProgram, mint: p.mint, source: p.vaultToken, destination: p.ownerToken, authority: p.vault, amount: p.amount,
+    hookProgram, mint: p.mint, source: p.vaultToken, destination: p.ownerToken, authority: p.vault, owner: p.owner, amount: p.amount,
     validationData: validation?.data ?? null,
     accountData: async (key) => (await accounts([key]))[0]?.data ?? null,
   });

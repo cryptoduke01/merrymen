@@ -247,7 +247,7 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     let hookAccounts: SolanaTransferHookAccount[] = [], hookRefusal: string | null = null;
     if (usdg && usdg.amount > 0n && !usdg.frozen) {
       try {
-        hookAccounts = await readSolanaWithdrawHookAccounts(read, { mint: SOLANA_USDG_MINT, tokenProgram: TOKEN_2022_PROGRAM, vault, vaultToken: vaultUsdg,
+        hookAccounts = await readSolanaWithdrawHookAccounts(read, { mint: SOLANA_USDG_MINT, tokenProgram: TOKEN_2022_PROGRAM, vault, owner, vaultToken: vaultUsdg,
           ownerToken: ownerUsdg, amount: usdg.amount, commitment, minContextSlot: slot });
       } catch (error) {
         if (error instanceof SolanaVaultValidationError) hookRefusal = error.message;

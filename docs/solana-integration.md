@@ -305,10 +305,26 @@ signs, so the owner's signature never reaches a hook and Token-2022 hands the
 vault to the hook as a non-signer. The app's withdrawal, `solana-recover` and
 the page's check all carry those accounts (`resolveSolanaTransferHookAccounts`
 in `packages/core/src/solana-live.ts`, read by
-`worker/src/solana-transfer-hook.ts`); a hook whose list asks for a signer, or
-cannot be resolved, refuses the USDG withdrawal before signing, and
+`worker/src/solana-transfer-hook.ts`). A hook whose list asks for a signer,
+names the owner's wallet or cannot be resolved refuses the USDG withdrawal
+before signing, with its reason ("USDG cannot be withdrawn here: …"), and
 `solana-recover` skips only its USDG leg (`custody.rs`
-`a_usdg_transfer_hook_never_locks_owner_withdrawals_and_never_gets_a_signer`). The worker reads
+`a_usdg_transfer_hook_never_locks_owner_withdrawals_and_never_gets_a_signer`).
+
+**Owner decision, before the program is frozen: a hook that needs the owner's
+wallet holds USDG.** The owner signs every withdrawal, and a transaction's
+signer is a signer in every instruction that names it. So the program refuses
+the owner's wallet anywhere among the remaining accounts (`Authority`), even
+where the hook's list asks for it read-only and not as a signer, for example as
+a fixed key or as the owner field of the destination token account. Token-2022's
+helper finds each extra account only among those remaining accounts, so leaving
+the wallet out fails too (`IncorrectAccount`). Any hook whose extra accounts
+include the owner's wallet, signer or not, therefore holds the vault's USDG
+until the issuer changes the hook. WSOL and SOL withdrawals carry no hook
+accounts and are unaffected. Accepting the wallet read-only would need the
+program to read the hook's ExtraAccountMetaList itself; that is not built. The
+custody case above asserts the `Authority` refusal for a read-only owner. The
+worker reads
 the mint in RPC `jsonParsed` form; its test runs on Agave 2.3.13's own decoder
 output for the committed bytes and six variants
 (`usdg-mainnet-mint.jsonparsed.json`, written offline by

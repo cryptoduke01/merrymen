@@ -108,7 +108,12 @@ check the mint. Withdraw forwards its remaining accounts to Token-2022's transfe
 program, a withdrawal that carries the hook program, its `extra-account-metas`
 validation account and the extra accounts it lists still releases custody. A remaining
 account that signs is refused (`Authority`), so the owner's signature never reaches a
-hook. This assumption does not extend to other token issuers.
+hook. The owner signs every withdrawal, so this also refuses the owner's wallet where a
+hook's list names it read-only and not as a signer, and leaving it out fails in
+Token-2022 (`IncorrectAccount`). Any hook whose extra accounts include the owner's wallet
+therefore holds USDG in the vault until the issuer changes the hook (owner decision;
+WSOL and SOL withdrawals are unaffected). This assumption does not extend to other
+token issuers.
 Custody/source/output accounts must be unfrozen and have no delegate or close
 authority. The mainnet mint's bytes, read on 2026-10-20 at slot 459,259,885, are
 `runtime-tests/fixtures/usdg-mainnet-mint.json`; `custody.rs` runs `check_mint` on

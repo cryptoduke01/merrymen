@@ -538,17 +538,33 @@ export async function deriveSolanaTransferHookValidation(hookProgram: string, mi
  * `accountData` reads an account's data for a seed taken from it. A list this
  * cannot resolve, or one that asks for a signer, throws: the vault's withdraw
  * refuses a signing extra account, so the owner's signature never reaches a hook.
+ *
+ * Any account it names that is `owner`'s wallet throws too, signer or not
+ * (SOLANA_TRANSFER_HOOK_NAMES_OWNER): the owner signs every withdrawal, so the
+ * runtime marks the wallet a signer in each instruction that carries it, and
+ * the program refuses any signing remaining account (owner decision, before
+ * the program is frozen: such a hook holds USDG in the vault until the issuer
+ * changes it; WSOL and SOL withdrawals never carry a hook's accounts).
  */
+export const SOLANA_TRANSFER_HOOK_NAMES_OWNER =
+  "The token's transfer hook needs your wallet's account, which the vault never passes to a hook, so USDG stays in the vault until the issuer changes the hook";
 export async function resolveSolanaTransferHookAccounts(p: {
   hookProgram: string;
   mint: string;
   source: string;
   destination: string;
   authority: string;
+  /** The vault's owner, who signs the withdrawal: never one of the accounts returned. */
+  owner: string;
   amount: bigint;
   validationData: Uint8Array | null;
   accountData: (address: string) => Promise<Uint8Array | null>;
 }): Promise<SolanaTransferHookAccount[]> {
+  const accounts = await resolveTransferHookAccounts(p);
+  if (accounts.some((account) => account.address === p.owner)) throw new SolanaVaultValidationError(SOLANA_TRANSFER_HOOK_NAMES_OWNER);
+  return accounts;
+}
+async function resolveTransferHookAccounts(p: Parameters<typeof resolveSolanaTransferHookAccounts>[0]): Promise<SolanaTransferHookAccount[]> {
   const bad = (why: string) => new SolanaVaultValidationError(`The token's transfer hook cannot be resolved: ${why}`);
   const validation = await deriveSolanaTransferHookValidation(p.hookProgram, p.mint);
   const tail: SolanaTransferHookAccount[] = [{ address: validation, role: 0 }, { address: p.hookProgram, role: 0 }];

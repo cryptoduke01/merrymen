@@ -19,7 +19,7 @@ import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
   deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM,
-  SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
+  SOLANA_SYSTEM_PROGRAM, SOLANA_TRANSFER_HOOK_NAMES_OWNER, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
@@ -843,6 +843,16 @@ describe("solana-recover with a USDG transfer hook", () => {
     const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
     assert.equal(error, null, String(error));
     assert.match(out, /Note: USDG: The token's transfer hook cannot be resolved: it asks for a signer/);
+    assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
+    assert.equal(fake.sent.length, 2, "SOL and WSOL only");
+  });
+  it("skips only USDG when the hook's list names the owner's wallet, even read-only, and still recovers WSOL and SOL", async () => {
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, usdgHook: HOOK });
+    fake.accounts.set(await validation(), { owner: HOOK, lamports: rent(51), data: hookMetaList(OWNER) });
+    const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.ok(out.includes(`Note: USDG: ${SOLANA_TRANSFER_HOOK_NAMES_OWNER}`), out);
     assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
     assert.equal(fake.sent.length, 2, "SOL and WSOL only");
   });

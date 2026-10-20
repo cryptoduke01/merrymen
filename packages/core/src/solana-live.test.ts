@@ -1068,7 +1068,7 @@ describe("Solana vault withdrawal through a USDG transfer hook", () => {
   };
   const resolve = (validationData: Uint8Array | null, amount = 7n, data: Record<string, Uint8Array> = {}) =>
     live.resolveSolanaTransferHookAccounts({
-      hookProgram: hook, mint: SOLANA_USDG_MINT, source, destination, authority, amount, validationData,
+      hookProgram: hook, mint: SOLANA_USDG_MINT, source, destination, authority, owner, amount, validationData,
       accountData: async (a) => data[a] ?? null,
     });
   const pda = async (program: string, ...seeds: Uint8Array[]) =>
@@ -1111,6 +1111,19 @@ describe("Solana vault withdrawal through a USDG transfer hook", () => {
     await assert.rejects(resolve(list(entry(1, [9]))), /unknown seed/);
     await assert.rejects(resolve(list(entry(7, []))), /unknown account kind/);
     await assert.rejects(resolve(list(entry(0, key(fixed))).slice(0, 40)), /malformed list/);
+  });
+
+  it("refuses a list that names the owner's wallet, read-only and non-signer included: the owner signs the withdrawal, and the program refuses any signing remaining account", async () => {
+    const names = (error: unknown) => error instanceof live.SolanaVaultValidationError && error.message === live.SOLANA_TRANSFER_HOOK_NAMES_OWNER;
+    // A fixed key, read-only and not a signer.
+    await assert.rejects(resolve(list(entry(0, key(owner)))), names);
+    // A key read from the destination token account's owner field (account index 2, bytes 32..64).
+    const destinationData = new Uint8Array(165);
+    destinationData.set(key(owner), 32);
+    await assert.rejects(resolve(list(entry(0, key(fixed)), entry(2, [2, 2, 32])), 7n, { [destination]: destinationData }), names);
+    // The same list naming any other account resolves.
+    destinationData.set(key(fixed), 32);
+    assert.equal((await resolve(list(entry(0, key(fixed)), entry(2, [2, 2, 32])), 7n, { [destination]: destinationData })).length, 4);
   });
 
   it("appends the hook accounts to the withdrawal and refuses the owner or a signer among them", () => {

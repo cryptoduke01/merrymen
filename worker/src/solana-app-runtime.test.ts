@@ -26,7 +26,7 @@ import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
 import { address as kitAddress, getProgramDerivedAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
-import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
+import { buildWithdrawSolanaVaultInstruction, SOLANA_TRANSFER_HOOK_NAMES_OWNER } from "../../packages/core/src/solana-live";
 import { SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, SOLANA_LIVE_SELL_CAP_UNCHECKED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_ABOVE_BOOK,
   SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
@@ -1677,6 +1677,25 @@ test("once the USDG issuer sets a transfer hook, an owner withdrawal carries the
     const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(Buffer.from(prepared.transactionBase64, "base64")).messageBytes);
     assert.equal(message.header.numSignerAccounts, 1);
   } finally { g.raw.close(); }
+});
+
+test("a USDG transfer hook whose list names the owner's wallet, even read-only, refuses the USDG withdrawal with the reason before anything is signed; WSOL still withdraws", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n; f.controls.cash = 90_000_000n; f.controls.wsol = 100_000_000n;
+    const book = { hwmRaw: "102000000", cashRaw: "90000000", wsolRaw: "100000000", costBasisUsdgRaw: "12000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 };
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
+    const hook = key(88);
+    const [validation] = await getProgramDerivedAddress({ programAddress: kitAddress(hook), seeds: [new TextEncoder().encode("extra-account-metas"), keyBytes(SOLANA_USDG_MINT)] });
+    f.controls.hookProgram = hook;
+    // The owner's wallet as a fixed, read-only, non-signer extra account.
+    f.extra.set(validation, account(hookMetaList(f.owner), hook));
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid" && error.message === `USDG cannot be withdrawn here: ${SOLANA_TRANSFER_HOOK_NAMES_OWNER}`);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
+    const wsol = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000" });
+    assert.equal(instructionsOf(wsol.transactionBase64).find(ix => ix.program === PROGRAM)!.accounts.length, 6, "a WSOL withdrawal carries no hook accounts");
+  } finally { f.raw.close(); }
 });
 
 test("the owner can withdraw native SOL held by the vault account itself (audit G1-4)", async () => {

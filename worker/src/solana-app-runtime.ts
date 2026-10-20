@@ -1341,7 +1341,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         // the program forwards them, so a hook never locks the owner's USDG.
         let hookAccounts: SolanaTransferHookAccount[];
         try {
-          hookAccounts = await rpc().read(read => readSolanaWithdrawHookAccounts(read, { mint: input.mint!, tokenProgram: program, vault, vaultToken, ownerToken, amount,
+          hookAccounts = await rpc().read(read => readSolanaWithdrawHookAccounts(read, { mint: input.mint!, tokenProgram: program, vault, owner: scope.owner, vaultToken, ownerToken, amount,
             commitment: "finalized", minContextSlot: floor }));
         } catch (error) {
           if (error instanceof SolanaVaultValidationError) fail(`USDG cannot be withdrawn here: ${error.message}`);
