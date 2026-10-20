@@ -53,7 +53,7 @@ after(() => { if (flag === undefined) delete process.env.MERRYMEN_SOLANA; else p
 beforeEach(() => { ran.length = 0; });
 const post = (action: string, mode = "paper") => POST(new Request("https://app.example.test/api/solana/intent", { method: "POST", body: JSON.stringify({ mode, action, intent: { requestId: "x" } }) }));
 
-test("POST /api/solana/intent in a tight loop reaches the runtime only for each action's burst, and a paced trade sent nothing", async () => {
+test("POST /api/solana/intent in a tight loop reaches the runtime only for each action's burst, and a paced trade speaks only for its own request", async () => {
   const { preview, trade } = SOLANA_INTENT_PACE;
   const codes: number[] = [];
   for (let i = 0; i < preview.burst + 5; i++) codes.push((await post("preview")).status);
@@ -64,7 +64,10 @@ test("POST /api/solana/intent in a tight loop reaches the runtime only for each 
   const trades: number[] = [];
   for (let i = 0; i < trade.burst + 3; i++) trades.push((await post("trade")).status);
   assert.deepEqual(trades, [...Array(trade.burst).fill(200), ...Array(3).fill(429)]);
-  assert.match((await (await post("trade")).json() as { error: string }).error, /^Too many Solana trade requests\. Nothing was sent\. Try again in \d+ seconds?\.$/);
+  // A retry of an earlier trade keeps its request id, and that attempt may have been sent: the answer speaks only for this request.
+  const pacedTrade = (await (await post("trade")).json() as { error: string }).error;
+  assert.match(pacedTrade, /^Too many Solana trade requests\. This request was not processed; a trade you already placed is unaffected\. Refresh to check it, then try again in \d+ seconds?\.$/);
+  assert.doesNotMatch(pacedTrade, /nothing was sent/i);
   assert.deepEqual(ran, [...Array(preview.burst).fill("preview"), ...Array(trade.burst).fill("trade")]);
   // A request refused for its mode is answered for its mode before pacing, and never reaches the runtime.
   assert.equal((await post("trade", "live")).status, 409);

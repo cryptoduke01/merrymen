@@ -15,8 +15,12 @@ export async function POST(req: Request) {
     const wait = takeSolanaIntentToken(principal.tenant, action);
     if (wait !== null) {
       const seconds = `${wait} second${wait === 1 ? "" : "s"}`;
+      // Pacing comes before the runtime's recorded-request check, and the page
+      // retries a trade with the same request id to learn its outcome. So a
+      // paced trade speaks only for this request: an earlier attempt with that
+      // id may already have been signed and sent.
       throw new SolanaWebError(429, action === "preview" ? `Too many Solana previews. Try again in ${seconds}.`
-        : `Too many Solana trade requests. Nothing was sent. Try again in ${seconds}.`);
+        : `Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in ${seconds}.`);
     }
     const app = getSolanaAppRuntime();
     const input: { mode: "paper" | "live"; intent: unknown } = { mode: body.mode, intent: body.intent };

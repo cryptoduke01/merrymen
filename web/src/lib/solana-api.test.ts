@@ -222,7 +222,7 @@ test("a price-moved refusal carries the fresh guaranteed minimum for the owner t
 });
 
 test("a paced intent answers 429 in its own words, never as an outage", async () => {
-  const response = await solanaResponse(async () => { throw new SolanaWebError(429, "Too many Solana trade requests. Nothing was sent. Try again in 6 seconds."); });
+  const response = await solanaResponse(async () => { throw new SolanaWebError(429, "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds."); });
   assert.equal(response.status, 429);
-  assert.deepEqual(await response.json(), { error: "Too many Solana trade requests. Nothing was sent. Try again in 6 seconds.", ownerFacing: true });
+  assert.deepEqual(await response.json(), { error: "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds.", ownerFacing: true });
 });
