@@ -1133,7 +1133,9 @@ async function kill() {
   const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {
-    stopLocalSolana();
+    // Kept to the end: a Solana stop that failed makes the whole kill incomplete,
+    // even once the Robinhood grant is gone, so the owner knows to rerun it.
+    const solanaStopped = stopLocalSolana();
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
     const archive = archiveCurrentGrant();
@@ -1171,7 +1173,8 @@ async function kill() {
       /* no marker */
     }
     const archived = archive.kind === "archived" ? archive.account : null;
-    ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
+    if (solanaStopped) ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
+    else bad("grant destroyed and the Robinhood band stands down, but the kill is incomplete: the Solana strategy was not stopped. Rerun: merrymen kill");
     if (archived) {
       console.log(
         `  ${dim("wallet archived — funds stay reachable:")} ${bold("merrymen wallets")} ${dim("·")} ${bold("merrymen recover")}`,

@@ -92,3 +92,19 @@ test("`merrymen kill` stops the local Solana strategy before the grant, and with
   assert.match(second.stdout, /no grant to call in[\s\S]*Solana strategy stopped/);
   assert.equal((await store.get(T))!.strategy?.enabled, false);
 });
+
+test("`merrymen kill` with a Solana stop that fails removes the grant but never reports a stand-down", { timeout: 120_000 }, async (t) => {
+  const { dir } = await home(t);
+  const bin = fileURLToPath(new URL("../../cli/bin.mjs", import.meta.url));
+  writeFileSync(path.join(dir, "grant.json"), JSON.stringify({ smartAccount: "0x1111111111111111111111111111111111111111", serialized: "0xserialized", chainId: 4663 }));
+  // A Solana store the kill cannot open: its stop fails.
+  writeFileSync(path.join(dir, "solana-accounts.sqlite"), "not a database");
+  const run = spawnSync(process.execPath, [bin, "kill"], { input: "y\n", encoding: "utf8", timeout: 100_000,
+    env: { ...process.env, MERRYMEN_HOME: dir, MERRYMEN_HOSTED: "", DATABASE_URL: "" } });
+  const said = run.stdout + run.stderr;
+  assert.equal(run.status, 1, said);
+  assert.match(said, /Kill incomplete: your Solana strategy could not be stopped/);
+  assert.match(said, /grant destroyed and the Robinhood band stands down, but the kill is incomplete/);
+  assert.doesNotMatch(said, /the band stands down on the next tick/);
+  assert.equal(existsSync(path.join(dir, "grant.json")), false, "the Robinhood grant is still torn down");
+});
