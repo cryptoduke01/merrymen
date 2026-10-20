@@ -26,7 +26,9 @@ one that is not itself a key or signature, is a hit when the whole run or any
 the hit's value is the whole run, so a redactor strips all of it. Windows of
 hex digits alone (digests, long numbers, an 0x string split by its zeros) are
 never ids, nor is filler (one to four characters repeated: "xxxx...",
-"hahaha..."), nor the "x" of an 0x prefix. A window shorter than 43 (or 87)
+"hahaha..."), nor an 0x prefix with hex alone behind it; after a "0", an "x"
+with anything else behind it is part of the run, since a key can begin with
+one. A window shorter than 43 (or 87)
 characters can reach 32 (or 64) bytes only through leading "1"s, so no other
 short window is decoded. And one scan decodes at most 4,096 windows: past that
 every further candidate run is a hit unread, a false alarm on a text no one
@@ -157,10 +159,10 @@ def _glued_hits(text: str) -> list[OnchainIdHit]:
     budget = [GLUED_DECODES]
     for m in _BASE58_RUN.finditer(text):
         start, s = m.start(), m[0]
-        # "0x" opens hex: its x is the prefix's, never part of a base58 id.
-        if s[0] == "x" and start > 0 and text[start - 1] == "0":
-            s, start = s[1:], start + 1
-        if len(s) < 32:
+        # "0x" then hex alone is that hex (an EVM id, or one split at its zeros), never a base58 id
+        # glued to anything. With anything else after it the x is the run's own: a key can begin
+        # with one ("10x<key>", "CA0x<key>"), and dropping it hid such a key from every window.
+        if s[0] == "x" and start > 0 and text[start - 1] == "0" and all(ch in _HEX for ch in s[1:]):
             continue
         end = start + len(s)
         standalone = (start == 0 or text[start - 1] not in _ALNUM) and (end == len(text) or text[end] not in _ALNUM)

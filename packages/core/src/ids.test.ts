@@ -165,7 +165,8 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
       // 89 characters: long enough to hide a signature, so that is the shape reported.
       [`${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, "hash"],
       [`tx${SIG}done`, `tx${SIG}done`, "hash"],
-      [`0x${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "address"],
+      // After a 0, an x with more than hex behind it is the run's own, so the whole run is the hit.
+      [`0x${SOLANA_USDG_MINT}`, `x${SOLANA_USDG_MINT}`, "address"],
     ] as const) {
       // The default scan, pinned to Brain's mirror, misses each of these.
       assert.deepEqual(onchainIdsIn(text).filter((h) => h.family === "solana"), [], text);
@@ -198,6 +199,22 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     }
     // The glued cases the default misses, among them the three it pinned as no id before.
     for (const t of [`0${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}l`, `${SOLANA_USDG_MINT}${SOLANA_USDG_MINT}a`, `grab it CA${SOLANA_USDG_MINT} now`]) assert.ok(changed.includes(t), t);
+  });
+
+  it("reads a key that begins with an x written after a 0 (\"10x<key>\", \"CA0x<key>\")", () => {
+    // A real 32-byte key whose first character is x: dropped as the x of an "0x", the 42 left decoded to nothing.
+    const xKey = "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj";
+    assert.equal(base58Decode(xKey)?.length, 32);
+    for (const text of [`0${xKey}`, `price 10${xKey} today`, `grab it CA0${xKey} now`, `0${xKey}is the one`]) {
+      const hits = onchainIdsIn(text, glued);
+      assert.equal(hits.length, 1, text);
+      assert.ok(hits[0]!.value.includes(xKey), text);
+      assert.ok(!redactSolanaIds(text, () => "[id]").includes(xKey.slice(1, 21)), text);
+    }
+    // "0x" then hex alone is still that hex, whichever letters it holds.
+    for (const text of [`0x${"ab".repeat(20)}`, `0x${"cafe".repeat(20)}`, `0x${"1".repeat(41)}`, "0x177286bb17374e1f47a767a43d99c674b38c4f54c8e"]) {
+      assert.deepEqual(onchainIdsIn(text, glued).filter((h) => h.family === "solana"), [], text);
+    }
   });
 
   it("never reads hex split at its zeros, a long number or filler as an id glued to anything", () => {

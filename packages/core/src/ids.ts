@@ -258,6 +258,11 @@ const BASE58_RUN = /[1-9A-HJ-NP-Za-km-z]{32,}/g;
 function hexDigit(code: number): boolean {
   return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
 }
+/** `s` from `from` on is hex digits alone. */
+function hexFrom(s: string, from: number): boolean {
+  for (let i = from; i < s.length; i++) if (!hexDigit(s.charCodeAt(i))) return false;
+  return true;
+}
 /** An ASCII letter or digit: what the default scan will not read an id against. */
 function alnumAt(text: string, i: number): boolean {
   const code = i >= 0 && i < text.length ? text.charCodeAt(i) : 0;
@@ -289,9 +294,10 @@ export interface OnchainIdScan {
    * other run, or a standalone one that is not itself a key or signature, is a
    * hit when the whole run or any window of it decodes to exactly 32 or 64
    * bytes. The hit's value is the whole run, so a redactor strips all of it.
-   * Hex digits alone (digests, long numbers, an 0x string split at its zeros)
-   * and filler (one to four characters repeated: "xxxx…", "hahaha…") are never
-   * read as an id glued to anything.
+   * Hex digits alone (digests, long numbers, an 0x string split at its zeros,
+   * with the x of its "0x") and filler (one to four characters repeated:
+   * "xxxx…", "hahaha…") are never read as an id glued to anything; an x after
+   * a 0 with anything but hex behind it is read as part of the run.
    *
    * For the public and model-facing backstops. The callers, which this list
    * must name exactly: X posts (worker/src/xpost/public-wallet.ts), social
@@ -363,20 +369,19 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
   if (scan.glued) {
     const budget = { left: GLUED_DECODES };
     for (const m of text.matchAll(BASE58_RUN)) {
-      // "0x" opens hex: its x is the prefix's, never part of a base58 id.
-      const prefixed = m[0][0] === "x" && m.index! > 0 && text[m.index! - 1] === "0";
-      const s = prefixed ? m[0].slice(1) : m[0];
-      if (s.length < 32) continue;
-      const start = m.index! + (prefixed ? 1 : 0);
+      const s = m[0];
+      const start = m.index!;
+      // "0x" then hex alone is that hex (an EVM id, or one split at its zeros), never a base58 id
+      // glued to anything. With anything else after it the x is the run's own: a key can begin
+      // with one ("10x<key>", "CA0x<key>"), and dropping it hid such a key from every window.
+      if (s[0] === "x" && start > 0 && text[start - 1] === "0" && hexFrom(s, 1)) continue;
       let whole: "address" | "hash" | null = null;
       if (!alnumAt(text, start - 1) && !alnumAt(text, start + s.length)) {
         // Nothing alphanumeric either side: the run the default scan reads, read the same way.
         whole = s.length <= 88 ? base58Shape(s) : null;
       } else if (s.length <= 88) {
         // Glued: the whole run counts only when it is neither hex alone nor filler.
-        let hex = true;
-        for (let i = 0; i < s.length && hex; i++) hex = hexDigit(s.charCodeAt(i));
-        whole = hex || filler(s) ? null : base58Shape(s);
+        whole = hexFrom(s, 0) || filler(s) ? null : base58Shape(s);
       }
       const inside = whole ?? (s.length > 32 ? gluedShape(s, budget) : null);
       if (inside) hits.push({ family: "solana", shape: inside === "hash" ? "hash" : "address", value: s });

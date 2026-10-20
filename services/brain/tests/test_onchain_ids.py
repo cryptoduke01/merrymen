@@ -36,6 +36,8 @@ KEYPAIR = "6pc4LiB8KHAPvbUbkozrTcPL5zXspYBdATv5raNDyVbpoz75fGXT3N41QtwPtrdu4wMT1
 #: A real ed25519 public key with no digits (ids.test.ts pins its test seed).
 LETTERS_32 = "EEuxbXvdXfvgGiFWKYyEksxzabPKjwhYTNvGXFitaqqT"
 LETTERS_64 = "A" * 87
+#: A 32-byte key whose first character is x.
+X_KEY = "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj"
 
 
 # ── the detector ───────────────────────────────────────────────────────────
@@ -134,6 +136,7 @@ def test_base58_decodes_lengths_and_leading_zeros():
     assert len(base58_decode(SIG)) == 64 and len(base58_decode(KEYPAIR)) == 64
     assert base58_decode("1") == b"\x00" and base58_decode("2") == b"\x01" and base58_decode("21") == b"\x3a"
     assert len(base58_decode(LETTERS_32)) == 32 and len(base58_decode(LETTERS_64)) == 64
+    assert len(base58_decode(X_KEY)) == 32
 
 
 @pytest.mark.parametrize("s", ["0abc", "Oabc", "Iabc", "labc", "", "a b", "z" * 129])
@@ -171,6 +174,8 @@ SOLANA_POISON = [
     (f"0{MINT} and {MINT}l", "Solana address-shaped"),
     (f"tx{SIG}done", "Solana signature- or key-shaped"),
     (f"key:0x{KEYPAIR}", "Solana signature- or key-shaped"),
+    # A key that begins with an x, written after a 0 (review GE): its x is no 0x prefix.
+    (f"price 10{X_KEY} today", "Solana address-shaped"),
 ]
 
 

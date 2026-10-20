@@ -1,5 +1,5 @@
 {
- "about": "Shared answers for brain/onchain_ids.py and packages/core/src/ids.ts onchainIdsIn, in both scans: \"hits\" is the default scan, and \"glued\" the glued scan (onchainIdsIn(text, { glued: true }), onchain_ids_in(text, glued=True)) where it answers differently; with no \"glued\", both scans give \"hits\". tests/test_onchain_ids.py (CI's brain job) and worker/src/brain-client-onchain-ids.test.ts (CI's app tests) both read this file, so neither detector can change alone without a failing check. The Solana values are the USDG mint, the system program, and a public key, a signature and a 64-byte keypair from the all-0x05 test seed that packages/core/src/ids.test.ts also uses.",
+ "about": "Shared answers for brain/onchain_ids.py and packages/core/src/ids.ts onchainIdsIn, in both scans: \"hits\" is the default scan, and \"glued\" the glued scan (onchainIdsIn(text, { glued: true }), onchain_ids_in(text, glued=True)) where it answers differently; with no \"glued\", both scans give \"hits\". tests/test_onchain_ids.py (CI's brain job) and worker/src/brain-client-onchain-ids.test.ts (CI's app tests) both read this file, so neither detector can change alone without a failing check. The Solana values are the USDG mint, the system program, a 32-byte key that begins with an x (xD8nd...), and a public key, a signature and a 64-byte keypair from the all-0x05 test seed that packages/core/src/ids.test.ts also uses.",
  "cases": [
   {"text": "bought 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH at the open",
    "hits": [{"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},
@@ -69,7 +69,13 @@
   {"text": "tx3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigddone", "hits": [],
    "glued": [{"family": "solana", "shape": "hash", "value": "tx3NGW7mkqWR84fuKhxiUmVTJg8AehpcEQHKZcivruB5449akQiFvm2Ej6AvJGLnfwW15Cb2wn1D6UAFMJtXh6tigddone"}]},
   {"text": "0x2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH", "hits": [],
-   "glued": [{"family": "solana", "shape": "address", "value": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},
+   "glued": [{"family": "solana", "shape": "address", "value": "x2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"}]},
+  {"text": "0xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj", "hits": [],
+   "glued": [{"family": "solana", "shape": "address", "value": "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj"}]},
+  {"text": "price 10xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj today", "hits": [],
+   "glued": [{"family": "solana", "shape": "address", "value": "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj"}]},
+  {"text": "grab it CA0xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj now", "hits": [],
+   "glued": [{"family": "solana", "shape": "address", "value": "xD8ndgHckqX4TKpPgeRJ8o8Mmp8qE4bZ9USpRzQN4Uj"}]},
   {"text": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG", "hits": [],
    "glued": [{"family": "solana", "shape": "address", "value": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"}]},
   {"text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx hahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahaha abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc", "hits": []},
