@@ -444,8 +444,8 @@ const CASHTAG_ANY = /\$\s*[\p{L}_]/u;
 export function coinNamedIn(question: unknown, names: readonly unknown[] = []): boolean {
   if (typeof question !== "string") return false;
   const t = question.normalize("NFKC").replace(/\p{Cf}/gu, "");
-  // A contract: 0x hex, or a Solana key or signature (core's onchainIdIn).
-  if (CASHTAG_ANY.test(t) || /0x[0-9a-f]{6,}/i.test(t) || onchainIdIn(t)) return true;
+  // A contract: 0x hex, or a Solana key or signature (core's onchainIdIn), glued to a word ("CA<mint>", "<key>is") or not.
+  if (CASHTAG_ANY.test(t) || /0x[0-9a-f]{6,}/i.test(t) || onchainIdIn(t, { glued: true })) return true;
   // A letter code cannot read may spell any name ("ꓑꓰꓑꓰ" is PEPE in Lisu): a yes (red-team 2026-10-12).
   if (unreadableLetter(t)) return true;
   return namedIn(t, names);
