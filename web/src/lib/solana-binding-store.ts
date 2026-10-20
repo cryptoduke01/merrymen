@@ -93,7 +93,27 @@ CREATE TABLE IF NOT EXISTS solana_wallet_binding_rebinds (
  *
  * Simply signing in again with the original identity also works: it re-points
  * the tenant back at the binding's DID, and nothing here is needed.
+ *
+ * WHO CAN USE WHICH (said plainly, since the page can only do one of them):
+ * - Owners the app created (a Privy embedded wallet, the only owner the page
+ *   offers): sign in again with the original login. That is the recovery.
+ *   An embedded key belongs to the Privy user that created it, and the page
+ *   signs only with an embedded wallet linked to the signed-in Privy user
+ *   (useSolanaOwner), so a second Privy user's page can never produce the
+ *   bound key's signature. It offers that user's own wallet, which the bind
+ *   route refuses with SOLANA_OTHER_SIGN_IN, as every other route does.
+ * - A re-bind needs a signature from the bound owner key itself: an exported
+ *   key imported into the new identity's embedded wallet, or an external
+ *   signer outside the page. solana-rebind.test.ts proves the server side by
+ *   signing outside the page's wallet selection.
  */
+/**
+ * The answer while the tenant's Solana wallet was verified by another sign-in
+ * (its binding's DID is not the signed-in one): the bind route's 409 and, as a
+ * cross-track change, the 403 of solanaContext and the status route. The
+ * remedy for an app-created owner is the original login (SOLANA OWNER KEY RECOVERY).
+ */
+export const SOLANA_OTHER_SIGN_IN = "This account's Solana wallet was verified with a different sign-in. Sign in with the login you used when you verified it.";
 type Row = { tenant: string; did: string; chain: string; owner: string; requested_mode: SolanaRequestedMode;
   limits_json: string | null; strategy_json: string | null; revision: number | string; created_at_ms: number | string; updated_at_ms: number | string };
 export function validateSolanaStrategy(value: unknown): SolanaStrategy {

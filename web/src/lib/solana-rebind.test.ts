@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
 import { base58Encode } from "../../../packages/core/src/ids";
 import { makePgDb, wrapSqlite, type Db } from "../../../worker/src/db";
-import { SqlSolanaBindingStore, SolanaBindingError } from "./solana-binding-store";
+import { SqlSolanaBindingStore, SolanaBindingError, SOLANA_OTHER_SIGN_IN } from "./solana-binding-store";
 
 /**
  * SOLANA OWNER KEY RECOVERY (solana-binding-store.ts): a tenant whose verified
@@ -19,10 +19,19 @@ import { SqlSolanaBindingStore, SolanaBindingError } from "./solana-binding-stor
  * MERRYMEN_TEST_PG_URL is set) PostgreSQL; then the remap end to end, through
  * the real Robinhood identity store (file backend), sign-in check, session
  * cookie, bind, status, owner and setup routes and binding store.
+ *
+ * The end-to-end proofs are signed with raw ed25519 keys, OUTSIDE the page's
+ * wallet selection: the page signs only with the signed-in Privy user's own
+ * embedded wallet (useSolanaOwner), so a second Privy user's page can never
+ * sign with the bound key. For an owner the app created, the recovery a user
+ * can take from the page is signing in again with the original login (the
+ * last test); a re-bind needs the bound key itself (an exported key imported
+ * into the new identity, or an external signer).
  */
 const W = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
 const OWNER_SEED = new Uint8Array(32).fill(7), OWNER = base58Encode(ed25519.getPublicKey(OWNER_SEED));
 const SECOND_SEED = new Uint8Array(32).fill(8), SECOND = base58Encode(ed25519.getPublicKey(SECOND_SEED));
+const THIRD_SEED = new Uint8Array(32).fill(9), THIRD = base58Encode(ed25519.getPublicKey(THIRD_SEED));
 const NOW = 1_000_000;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
 const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
@@ -171,8 +180,12 @@ test("a Privy DID remap on the tenant: the new identity re-binds by proving the 
     assert.equal((await request(route, method, { token: "token-alice", tenant: W, body })).status, 403, `alice ${route}`);
   }
   assert.equal(runtimeCalls.length, 0, "nothing reached the runtime");
-  // Another wallet's proof is still a conflict, and a proof naming another tenant's owner key cannot reach it.
-  assert.equal((await bind("token-bob", W, SECOND, SECOND_SEED)).response.status, 409);
+  // Another wallet's proof (what the page offers Bob: his own embedded key) is still a conflict, and the answer points to
+  // the original login; a proof naming another tenant's owner key cannot reach it either.
+  for (const [owner, seed] of [[THIRD, THIRD_SEED], [SECOND, SECOND_SEED]] as const) {
+    const refused = (await bind("token-bob", W, owner, seed)).response;
+    assert.equal(refused.status, 409); assert.equal((await refused.json() as { error: string }).error, SOLANA_OTHER_SIGN_IN);
+  }
   // A challenge for the bound owner signed by another key, or a replay of a used one, re-binds nothing.
   const forged = await request("bind", "GET", { token: "token-bob", tenant: W, query: `?owner=${OWNER}` });
   const { nonce } = await forged.json() as { nonce: string; message: string };
@@ -200,6 +213,18 @@ test("a Privy DID remap on the tenant: the new identity re-binds by proving the 
   assert.equal((await request("status", "GET", { token: "token-bob", tenant: OTHER })).status, 403);
   assert.deepEqual(await store.rebinds(OTHER), []);
   assert.deepEqual((await store.rebinds(W)).map(row => [row.previousDid, row.did]), [["did:privy:alice", "did:privy:bob"]]);
+});
+
+test("a proof for another wallet, challenged before another sign-in verified the tenant's wallet, is refused with the way back, and moves nothing", async () => {
+  assert.equal((await identities.resolveOrClaimDid(W, { did: "did:privy:bob", provider: "twitter", subject: "bob" })).tenant, W);
+  const challenge = await request("bind", "GET", { token: "token-bob", tenant: W, query: `?owner=${THIRD}` });
+  assert.equal(challenge.status, 200);
+  const { nonce, message } = await challenge.json() as { nonce: string; message: string };
+  // Meanwhile the tenant's wallet was verified by another sign-in.
+  const bound = await store.bind(W, "did:privy:alice", OWNER);
+  const answer = await request("bind", "POST", { token: "token-bob", tenant: W, body: { owner: THIRD, nonce, signature: base58Encode(ed25519.sign(new TextEncoder().encode(message), THIRD_SEED)) } });
+  assert.equal(answer.status, 409); assert.equal((await answer.json() as { error: string }).error, SOLANA_OTHER_SIGN_IN);
+  assert.deepEqual(await store.get(W), bound); assert.deepEqual(await store.rebinds(W), []);
 });
 
 test("signing in again with the original identity needs no re-bind, and Robinhood sign-in is unchanged by it", async () => {

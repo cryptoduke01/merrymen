@@ -1,6 +1,6 @@
 import { solanaPaperAgentId } from "../../../../../../packages/core/src/solana";
 import { authenticateSolana, consumeSolanaBindingProof, issueSolanaBindingChallenge, SolanaWebError } from "@/lib/solana-auth";
-import { getSolanaBindingStore } from "@/lib/solana-binding-store";
+import { getSolanaBindingStore, SOLANA_OTHER_SIGN_IN } from "@/lib/solana-binding-store";
 import { solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 
 export const runtime = "nodejs";
@@ -28,6 +28,8 @@ export async function POST(req: Request) {
     if (existing && existing.owner === body.owner && existing.did !== principal.did) {
       return { binding: await store.rebind(principal.tenant, principal.did, body.owner, existing.did) };
     }
+    // Another wallet, verified by another sign-in: only the original login (or the bound key) recovers it.
+    if (existing && existing.did !== principal.did) throw new SolanaWebError(409, SOLANA_OTHER_SIGN_IN);
     return { binding: await store.bind(principal.tenant, principal.did, body.owner) };
   });
 }
