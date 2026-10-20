@@ -936,3 +936,59 @@ test("a reviewed permission not signed in time is discarded without opening the 
   assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
   assert.equal(button("Register bounded trading permission").disabled, false);
 });
+
+test("recovery step 2 names the real command, the key on standard input, and the program's released hash when known", async () => {
+  await withExportFlag("1", async () => {
+    liveVault(); Object.assign(state.runtime.live, { programSha256: "ab".repeat(32) });
+    await render();
+    const text = exportCard()!.textContent!;
+    assert.ok(text.includes(`Step 2: recover without Merrymen`));
+    assert.ok(text.includes(`merrymen solana-recover --program ${PROGRAM} --rpc <https-url> --key-file - --send`), text);
+    assert.match(text, /The key goes in on standard input \(--key-file -\), for example pbpaste \| merrymen solana-recover … on a Mac/);
+    assert.match(text, /Never type the key into the command itself/);
+    assert.ok(text.includes(`--owner ${OWNER} in place of --key-file - --send: nothing is signed or sent`));
+    assert.ok(text.includes(`Vault program: ${PROGRAM}`));
+    assert.ok(text.includes(`Released program binary SHA-256: ${"ab".repeat(32)}`));
+    assert.match(text, /after checking that program's deployed binary against the SHA-256 above/);
+    // Never the escape hatch the tool tells owners to refuse.
+    assert.doesNotMatch(text, /unlisted-program|program-sha256/);
+    // No hash, or one that is not a SHA-256, shows none.
+    for (const programSha256 of [null, "AB".repeat(32), "ab".repeat(31)]) {
+      Object.assign(state.runtime.live, { programSha256 }); await ui.click("Refresh account");
+      assert.doesNotMatch(exportCard()!.textContent!, /SHA-256:|against the SHA-256 above/, String(programSha256));
+    }
+  });
+});
+
+test("the recovery card waits for the status, and shows only for a live vault: never paper-only, unbound or a vault not read", async () => {
+  await withExportFlag("1", async () => {
+    // Loading: nothing is known about a vault yet.
+    liveVault();
+    const first = deferred<Response>();
+    respond = async (path) => { if (path === "status") return first.promise; throw new Error("Unexpected fixture route"); };
+    await render();
+    assert.equal(!!exportCard(), false);
+    await act(async () => { first.resolve(json(state)); });
+    assert.ok(exportCard(), "shown once the status names a read vault");
+    respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+    // A live binding whose vault the server has not read (no balances, book or session).
+    Object.assign(state.runtime.live, { balances: null }); await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    // Paper only: the vault address is known but holds nothing of this account's.
+    state = initial("paper"); Object.assign(state.runtime.live, { programId: PROGRAM, vault: "Vau1tAddress1111111111111111111111111111111" });
+    await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    // Back to paper after trading live: the funded vault still needs a recovery path.
+    Object.assign(state.runtime.live, { book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } });
+    await ui.click("Refresh account");
+    assert.ok(exportCard());
+    // The server cannot name the program (its configuration failed): no command to give, so no card.
+    Object.assign(state.runtime.live, { programId: null, vault: null }); await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    // Unbound: no card, whatever the wallet.
+    respond = async (path) => { if (path === "status") return json({ binding: null, runtime: null }); throw new Error("Unexpected fixture route"); };
+    await ui.click("Refresh account");
+    assert.equal(!!exportCard(), false);
+    assert.equal(exportCount, 0);
+  });
+});

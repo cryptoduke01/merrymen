@@ -27,7 +27,9 @@ type RuntimeStatus = {
     /** Not blockers: a low shared fee payer, an owner wallet short of SOL for revoke or withdraw. */
     warnings?: string[];
     feePayer?: { lamports: string; level: FeePayerLevel } | null;
-    ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null };
+    ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null;
+    /** The released binary SHA-256 of programId, when the server reports one. */
+    programSha256?: string | null };
   limits: SolanaPaperLimits | null;
   automation?: { workerOnline: boolean; lastSeenAtMs: number | null };
 };
@@ -351,6 +353,11 @@ function ConnectedSolana() {
   const liveBook = status?.runtime?.live.book;
   // A vault the server has read, funded or registered: what an owner key backup protects.
   const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
+  // The recovery card: a live binding whose vault the server has read, or any
+  // binding whose account still has a live book or session (switching back to
+  // paper leaves the vault and its funds). Never paper-only, never before the
+  // status has loaded.
+  const recoveryVault = !!binding && !!live?.vault && !!live.programId && (binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session);
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
@@ -436,8 +443,8 @@ function ConnectedSolana() {
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
         ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
       {/* Off by default; only the bound owner of a vault the server has read. */}
-      {ownerKeyExportEnabled() && sameWallet && vaultSeen && signer.address && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
-        programId={live?.programId ?? null} vault={live?.vault ?? null} exportKey={signer.exportKey} />}
+      {ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
+        programId={live.programId} vault={live.vault} programSha256={live.programSha256 ?? null} exportKey={signer.exportKey} />}
     </>}
   </>;
 }
