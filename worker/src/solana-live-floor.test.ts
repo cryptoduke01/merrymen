@@ -232,6 +232,24 @@ test("C2: a manual sell built 1% below its preview, inside the independent price
   assert.equal((await f.submissions()).length, 1); assert.equal(f.sends.length, 1);
 });
 
+test("C3: the expired-attempt allowance setting reaches live admission, 0 by default; a malformed one refuses before anything is signed", async t => {
+  const { SolanaTradingStore: Store } = await import("./solana-trading-store");
+  const admissions: unknown[] = [], recordSigned = Store.prototype.recordSigned;
+  t.mock.method(Store.prototype, "recordSigned", function (this: InstanceType<typeof Store>, ...args: Parameters<typeof recordSigned>) {
+    admissions.push(args[1]); return recordSigned.apply(this, args);
+  });
+  for (const [env, expected] of [[{}, 0], [{ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "7" }, 7]] as const) {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env });
+    const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", `allowance-${expected}`) });
+    assert.ok("status" in placed && placed.status === "pending");
+    assert.deepEqual(admissions.splice(0), [{ expiredAttemptAllowance: expected }]);
+  }
+  const bad = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "97" } });
+  await assert.rejects(bad.app.trade(bad.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "allowance-bad") }), /expired-attempt allowance setting is misconfigured/);
+  assert.deepEqual(await bad.submissions(), []); assert.equal(bad.sends.length, 0); assert.deepEqual(admissions, []);
+  assert.equal(bad.net.lastBuild, null, "refused before any route was built");
+});
+
 test("D: a manual buy built at 1% of fair is refused", async t => {
   const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "factor", num: 1n, den: 100n } });
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "manual-buy-1") }), /refused: risk/);

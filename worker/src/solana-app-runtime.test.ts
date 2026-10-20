@@ -1249,3 +1249,20 @@ test("a retry of a recorded live trade is returned whatever previewed minimum it
     assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });
+
+test("a malformed expired-attempt allowance is a status blocker and refuses a live trade as configuration, before anything is signed", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    assert.equal((await f.app.status(f.scope)).live.ready, true, "unset: the default applies");
+    for (const value of ["97", "-1", "many"]) {
+      const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: value } });
+      const status = await app.status(f.scope);
+      assert.equal(status.live.ready, false); assert.equal(status.live.canExit, false);
+      assert.ok(status.live.blockers.some(item => /expired-attempt allowance setting is misconfigured/.test(item)), status.live.blockers.join(" | "));
+      await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `allowance-${value}` } }), "configuration", /expired-attempt allowance setting is misconfigured/, value);
+    }
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
+    assert.equal((await f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" } }).status(f.scope)).live.ready, true);
+  } finally { f.raw.close(); }
+});

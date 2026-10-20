@@ -1,6 +1,6 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
+import { SOLANA_MAX_OPS_PER_DAY, parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
@@ -200,6 +200,38 @@ export async function solanaAutonomousSchedule(db: Db, scope: SolanaAccountScope
   return { attempt, dueAtMs: last === null ? 0 : last + intervalSeconds * 1000 };
 }
 export const OPERATOR_HOLD = "An operator hold stops Solana trading for this account. Owner withdrawals and revocation still work.";
+/**
+ * EXPIRED-ATTEMPT ALLOWANCE (owner decision, audit G2-3).
+ *
+ * A live trade whose blockhash expired before it landed is proven never to have
+ * run (both providers agree, see reconcileSolanaSubmission): it moved no tokens,
+ * paid no fee, and the vault program never counted it. Off-chain it still was a
+ * transaction the session key signed. This setting says how many such proven-
+ * expired attempts per rolling 24 hours do NOT count toward the owner's
+ * maxOpsPerDay; every one beyond it counts like any signed transaction.
+ *
+ * - 0 (the default): every signed transaction counts, so the session key signs
+ *   at most maxOpsPerDay a day, exactly the number the owner set. A burst of
+ *   dropped packets can use up the day's operations and pause trading and
+ *   automated exits until they leave the window; the owner's own withdrawals
+ *   and revoke never count and stay available.
+ * - N > 0: up to N dropped attempts a day are retried without using up the
+ *   owner's operations, so at most maxOpsPerDay + N signed a day, and at most
+ *   maxOpsPerDay of them can land. N = 96 (the program's daily maximum) covers
+ *   the old behaviour of a separate budget the size of maxOpsPerDay.
+ *
+ * Set with MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: a whole number from 0 to 96.
+ */
+export const SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE = 0;
+/** Names no setting, like the other configuration refusals an owner may see. */
+export const SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED = "The Solana expired-attempt allowance setting is misconfigured: it must be a whole number from 0 to 96. Live trading and exits stay refused until an operator fixes it.";
+/** The configured allowance, or the default when it is unset. Anything else is refused (fail closed). */
+export function solanaExpiredAttemptAllowance(env: Readonly<Record<string, string | undefined>>): number {
+  const value = env.MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE;
+  if (value === undefined) return SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
+  if (!/^(0|[1-9][0-9]?)$/.test(value) || Number(value) > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
+  return Number(value);
+}
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
 function raw(value: string, zero = true): bigint { return parseSolanaRawAmount(value, zero); }
@@ -429,8 +461,11 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     this.owner(owner); await this.binding();
     return record(await this.db.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(this.scope.tenant, owner, requestId));
   }
-  async recordSigned(s: SolanaSignedSubmission): Promise<boolean> {
+  /** `admission.expiredAttemptAllowance`: see SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE (the default when omitted). */
+  async recordSigned(s: SolanaSignedSubmission, admission: { expiredAttemptAllowance?: number } = {}): Promise<boolean> {
     this.owner(s.intent.owner);
+    const allowance = admission.expiredAttemptAllowance ?? SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
+    if (!Number.isSafeInteger(allowance) || allowance < 0 || allowance > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
     let drawdownRefused = false;
     const accepted = await this.db.tx(async tx => {
       const binding = await this.bindingIn(tx, true);
@@ -473,16 +508,18 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (raw(s.feeLamports) + raw(s.rentLamports) > raw(s.maxFeeLamports, false)) refuse("The Solana fee and rent budget would be exceeded.");
       const recent = await tx.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(tenant, owner, now - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
       // Failed transactions landed, spent network fees and consume an operation;
-      // a pending one counts until finalized evidence proves what it did. A proven
-      // expiry never landed, and the program never counted it: it leaves the
-      // operation budget, so dropped packets cannot lock exits for a day. Token
+      // a pending one counts until finalized evidence proves what it did. Token
       // notional is released only after canonical failure or expiry evidence.
       const operations = recent.filter(r => r.status !== "expired"), dropped = recent.length - operations.length;
       const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
       if (operations.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
-      // Dropped attempts get a budget of their own, the same size, so a provider
-      // that drops every packet cannot keep the worker re-signing without end.
-      if (dropped >= limits.maxOpsPerDay) refuse("Too many Solana transactions expired without landing in the last 24 hours. Trading resumes as they leave the window.");
+      // A proven expiry never landed and the program never counted it, but the
+      // session key signed it: only the configured allowance of them leaves the
+      // owner's operation count (by default none), so at most maxOpsPerDay plus
+      // the allowance are ever signed in 24 hours.
+      if (operations.length + Math.max(0, dropped - allowance) >= limits.maxOpsPerDay) {
+        refuse("Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.");
+      }
       const soldToday = counted.reduce((n, r) => {
         const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
         return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;

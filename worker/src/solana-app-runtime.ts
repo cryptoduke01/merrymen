@@ -17,7 +17,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
-  SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
+  SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket } from "./solana-market";
@@ -27,7 +27,7 @@ import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaExpiredAttemptAllowance, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 
 /**
@@ -226,6 +226,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       minimum > SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE ? minimum : SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE);
     if (maximum < minimum) fail("The Solana compute-unit price settings are misconfigured: the maximum is below the minimum. Live trading and exits stay refused until an operator fixes them.", "configuration");
     return { minimum: minimum.toString(), maximum: maximum.toString() };
+  }
+  /**
+   * Proven-expired attempts a day that do not count toward the owner's
+   * maxOpsPerDay (MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE, default 0: every
+   * signed transaction counts). See SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE.
+   * A value that is not a whole number from 0 to 96 is configuration.
+   */
+  function expiredAttemptAllowance(): number {
+    try { return solanaExpiredAttemptAllowance(env); } catch (error) {
+      if (error instanceof SolanaTradingStoreError) return fail(error.message, "configuration");
+      throw error;
+    }
   }
   // The last successful deployment check, and one in flight so concurrent callers share it.
   let verified: { key: string; atMs: number } | undefined;
@@ -585,6 +597,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         // Misconfigured swap prices refuse trading and exits (a full blocker), but the
         // vault, fee payer, owner wallet and recoverable SOL are still read and shown.
         try { computeUnitPrices(); } catch (error) { blockers.push(statusBlocker(error)); }
+        try { expiredAttemptAllowance(); } catch (error) { blockers.push(statusBlocker(error)); }
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
@@ -699,13 +712,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const cfg = config(), prices = computeUnitPrices(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
+      // Refused as configuration before anything is signed; the store counts with it at admission.
+      const expiredAllowance = expiredAttemptAllowance();
+      const journal: SolanaLiveJournal = { get: (owner, requestId) => s.get(owner, requestId), settle: (...args) => s.settle(...args),
+        recordSigned: submission => s.recordSigned(submission, { expiredAttemptAllowance: expiredAllowance }) };
       let toleranceBps: number;
       try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
       const sessionKeyPair = await createKeyPairFromPrivateKeyBytes(seed(secret, "The stored trading permission cannot be opened."));
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
-        journal: s, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
+        journal, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot }) => {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);

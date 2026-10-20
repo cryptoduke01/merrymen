@@ -9,7 +9,8 @@ import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../.
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT, SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
-import { ensureSolanaTradingSchema, solanaAutonomousSchedule, SolanaTradingStore, type SolanaPreparedSetup } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
+  type SolanaPreparedSetup } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { pythBound } from "./solana-reference-price-fixture";
@@ -416,32 +417,59 @@ test("finalized and failed attempts consume the daily operation cap and successf
   }
 });
 
-test("a proven-expired attempt releases its operation, so dropped packets cannot lock exits for a day (audit G2-3)", async t => {
+test("by default a proven-expired attempt counts toward maxOpsPerDay like any signed transaction (owner decision, audit G2-3)", async t => {
   const f = await fixture(t), first = submission(); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
   await f.store.recordSigned(first); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
   const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
-  // One executed operation of two: the first exit is dropped and proven expired.
-  const dropped = sale("exit-1", "1", "1000000", book); await f.store.recordSigned(dropped);
+  // One executed operation of two; the first exit is dropped and proven expired: the session key signed two.
+  const dropped = sale("exit-1", "1", "1000000", book); assert.equal(await f.store.recordSigned(dropped), true);
   await f.store.settle(OWNER, dropped.intent.requestId, dropped.signature, expired(dropped));
-  // The retry is admitted: the program never counted the dropped one.
-  const retry = sale("exit-2", "1", "1000000", book); assert.equal(await f.store.recordSigned(retry), true);
-  await f.store.settle(OWNER, retry.intent.requestId, retry.signature, { ...settlement(retry), slot: 1002, amountIn: "1000000", amountOut: "500000" });
-  // Two executed operations now: the budget is spent.
-  await assert.rejects(f.store.recordSigned(sale("exit-3", "2", "500000", { slot: 1002, cash: "99900000", wsol: "980000" })), /daily limit/);
-  // Dropped attempts have a budget of their own, the same size.
-  const g = await fixture(t); await g.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
-  for (const id of ["drop-1", "drop-2"]) {
-    const s = submission(id); s.risk.slot = 1001; assert.equal(await g.store.recordSigned(s), true); await g.store.settle(OWNER, id, s.signature, expired(s));
+  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book)), /expired without landing in the last 24 hours: they count toward the daily operation limit/);
+  assert.equal((await f.store.pending()).length, 0);
+  // An explicit allowance of 0 is the same; a malformed one admits nothing.
+  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book), { expiredAttemptAllowance: 0 }), /expired without landing/);
+  for (const bad of [-1, 97, 1.5, Number.NaN]) {
+    await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book), { expiredAttemptAllowance: bad }), /allowance setting is misconfigured/, String(bad));
   }
-  const third = submission("drop-3"); third.risk.slot = 1001;
-  await assert.rejects(g.store.recordSigned(third), /expired without landing/);
+  // Later, the dropped attempt leaves the window and trading resumes.
+  f.clock.value = NOW + 86_400_001;
+  const later = sale("later", "1", "1000000", book); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+  later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
+  await f.binding.settings(TENANT, OWNER, 2, "live", { ...limits, maxOpsPerDay: 2, expiresAtMs: f.clock.value + 3_600_000 });
+  assert.equal(await f.store.recordSigned(later), true);
+});
+
+test("an expired-attempt allowance lets that many dropped attempts a day leave the operation count, never more (owner decision, audit G2-3)", async t => {
+  const f = await fixture(t), first = submission(), allow = (n: number) => ({ expiredAttemptAllowance: n });
+  await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
+  await f.store.recordSigned(first, allow(1)); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  const dropped = sale("exit-1", "1", "1000000", book); await f.store.recordSigned(dropped, allow(1));
+  await f.store.settle(OWNER, dropped.intent.requestId, dropped.signature, expired(dropped));
+  // With an allowance of one the retry is admitted: the program never counted the dropped one.
+  const retry = sale("exit-2", "1", "1000000", book); assert.equal(await f.store.recordSigned(retry, allow(1)), true);
+  await f.store.settle(OWNER, retry.intent.requestId, retry.signature, { ...settlement(retry), slot: 1002, amountIn: "1000000", amountOut: "500000" });
+  // Two executed operations now: the owner's limit is spent, whatever the allowance.
+  await assert.rejects(f.store.recordSigned(sale("exit-3", "2", "500000", { slot: 1002, cash: "99900000", wsol: "980000" }), allow(96)), /daily limit/);
+  // At most maxOpsPerDay + allowance are signed: two operations and an allowance of two admit four dropped attempts, not five.
+  const g = await fixture(t); await g.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
+  for (const id of ["drop-1", "drop-2", "drop-3", "drop-4"]) {
+    const s = submission(id); s.risk.slot = 1001; assert.equal(await g.store.recordSigned(s, allow(2)), true, id); await g.store.settle(OWNER, id, s.signature, expired(s));
+  }
+  const fifth = submission("drop-5"); fifth.risk.slot = 1001;
+  await assert.rejects(g.store.recordSigned(fifth, allow(2)), /expired without landing/);
   assert.equal((await g.store.pending()).length, 0);
-  // Later, the dropped attempts leave the window and trading resumes.
-  g.clock.value = NOW + 86_400_001;
-  const later = submission("later"); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = g.clock.value;
-  later.quote.expiresAtMs = g.clock.value + 30_000; later.risk.reference = pythBound(later.intent, g.clock.value); later.risk.slot = 1001;
-  await g.binding.settings(TENANT, OWNER, 2, "live", { ...limits, maxOpsPerDay: 2, expiresAtMs: g.clock.value + 3_600_000 });
-  assert.equal(await g.store.recordSigned(later), true);
+});
+
+test("the expired-attempt allowance setting defaults to 0 and accepts only a whole number from 0 to 96", () => {
+  assert.equal(solanaExpiredAttemptAllowance({}), SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE);
+  assert.equal(SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, 0);
+  for (const [value, expected] of [["0", 0], ["1", 1], ["20", 20], ["96", 96]] as const) {
+    assert.equal(solanaExpiredAttemptAllowance({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: value }), expected);
+  }
+  for (const value of ["", " 1", "01", "-1", "1.5", "97", "100", "1e1", "many"]) {
+    assert.throws(() => solanaExpiredAttemptAllowance({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: value }), /allowance setting is misconfigured/, JSON.stringify(value));
+  }
 });
 
 /** A WSOL→USDG sell at $500/SOL against the current book, bounded by a fresh reference. */
@@ -643,7 +671,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 1, dueAtMs: 0 });
     const retry = submission("rebalance-2-1"); retry.risk.slot = 1001; assert.equal(await automatic.recordSigned(retry), true);
     assert.deepEqual(await solanaAutonomousSchedule(f.db, f.store.scope, 3_600), { attempt: 2, dueAtMs: NOW + 3_600_000 });
-    // Expired attempts leave the operation budget (G2-3) and their own budget is counted on this dialect too.
+    // Expired attempts are counted on this dialect too: with the default allowance they use the operation budget (G2-3).
     await f.store.settle(OWNER, retry.intent.requestId, retry.signature, expired(retry));
     const third = submission("rebalance-2-2"); third.risk.slot = 1001; assert.equal(await automatic.recordSigned(third), true);
   });
