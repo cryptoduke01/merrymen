@@ -20,6 +20,8 @@ import { sealSecret } from "../../../worker/src/store-crypto";
 import { SqlSolanaBindingStore } from "./solana-binding-store";
 import { wrapSqlite } from "../../../worker/src/db";
 import { createSolanaAppRuntime } from "../../../worker/src/solana-app-runtime";
+import { PYTH_SOL_USD_ACCOUNT } from "../../../worker/src/solana-reference-price";
+import { pythAccount } from "../../../worker/src/solana-reference-price-fixture";
 import type { SolanaLiveRead, SolanaLiveRpc } from "../../../worker/src/solana-live-rpc";
 import type { SolanaPaperMarket } from "../../../worker/src/solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "../../../worker/src/solana-trading-store";
@@ -81,6 +83,8 @@ async function fixture() {
         const slice = (params[1] as { dataSlice: { offset: number; length: number } }).dataSlice;
         return response({ ...account(programData.subarray(slice.offset, slice.offset + slice.length), LOADER), space: programData.length });
       }
+      // Pyth SOL/USD at $120, which a registration checks the SOL sold per trade against.
+      if (params[0] === PYTH_SOL_USD_ACCOUNT) return response(pythAccount({ price: 12_000_000_000n, publishTimeMs: clock.now, postedSlot: 999n }));
       return response(accountFor(params[0]) ?? (params[0] === vault ? null : account(Buffer.alloc(0), SYSTEM)));
     }
     if (method === "getMultipleAccounts") return response((params[0] as string[]).map(accountFor));

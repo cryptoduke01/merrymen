@@ -7,7 +7,8 @@ import {
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode, canonicalId } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, requireSolanaLiveTradeMinimum, SOLANA_LIVE_MIN_TRADE_USDG_RAW,
+  SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
@@ -25,6 +26,7 @@ import { createSolanaLiveRpc, readSolanaEachProvider, readSolanaPriorityFee, rea
 import { createSolanaMarket, SolanaMarketError, solanaJupiterApiKey } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestReferenceBound, solanaMarkDust, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
+  solanaReferenceWsolValue,
   solanaStrictestReferenceBound, type SolanaPythGeneration, type SolanaReferencePrice,
   SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
   SOLANA_REFERENCE_MIN_TOLERANCE_BPS } from "./solana-reference-price";
@@ -62,6 +64,14 @@ export class SolanaAppRuntimeError extends Error {
   }
 }
 function fail(message: string, code: SolanaAppRuntimeError["code"] = "invalid"): never { throw new SolanaAppRuntimeError(code, message); }
+/**
+ * prepareLive's refusals of a SOL sold per trade worth under the live minimum
+ * at the independent price (a sale capped by it, smaller than the whole
+ * position, could never be admitted), and of a registration whose price could
+ * not be read to check it.
+ */
+export const SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM = "The SOL sold per trade is worth under 1 USDG at the current SOL price, so no sale smaller than your whole position could be made. Save a larger SOL amount per trade before registering.";
+export const SOLANA_LIVE_SELL_CAP_UNCHECKED = "The independent SOL price could not be read to check the SOL sold per trade against the 1 USDG live minimum. Nothing was prepared. Try again shortly.";
 /** A signed permission whose saved limits stopped validating after it was prepared (they expired inside the prepare window). */
 export const LIMITS_NO_LONGER_VALID = "The saved trading limits are no longer valid: they expired or changed before this permission was submitted. Nothing was saved or sent. Save current limits, then prepare the permission again.";
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
@@ -1191,8 +1201,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(limits)) fail("Save the reviewed live trading limits first.", "permission");
       let sell: ReturnType<typeof requireSolanaLiveSellLimits>;
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
+      // Admission refuses a live trade worth under 1 USDG: limits that could make only such trades are never signed.
+      try { requireSolanaLiveTradeMinimum(limits); } catch (error) { return fail((error as Error).message, "permission"); }
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
       await verifyDeployment(cfg);
+      // Every sale, exits included, sells at most perTradeWsol, and admission refuses one worth under 1 USDG
+      // unless it is the whole booked position: a cap worth less than that would let no larger position be sold
+      // in part. Valued at the lowest price any provider serves; refused, never assumed, when unreadable. A fall
+      // in the SOL price during the permission can still bring the cap below it (docs/solana-integration.md).
+      let generation: SolanaPythGeneration;
+      try { generation = requireSolanaPythGeneration(env, now()); } catch { return fail("The independent SOL price source (Pyth generation) is misconfigured.", "configuration"); }
+      let prices: SolanaReferencePrice[];
+      try { prices = await referencePrices(rpc(), generation); } catch (error) { if (error instanceof SolanaReferencePriceError) fail(SOLANA_LIVE_SELL_CAP_UNCHECKED, "pending"); throw error; }
+      if (prices.some(price => solanaReferenceWsolValue(sell.perTradeWsol, price) < SOLANA_LIVE_MIN_TRADE_USDG_RAW)) fail(SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, "permission");
       const floor = await ownerReadFloor(s);
       const prior = await rpc().read(async read => {
         // Never earlier than anything already booked (ownerReadFloor), nor than this provider's own current slot.

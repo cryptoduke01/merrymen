@@ -187,7 +187,24 @@ that as in band too: it waits its interval before trying again, never retrying
 every tick, and the worker says `[warn] Solana autonomous rebalance below the
 live minimum` (`kind: below-live-minimum`) at most every 10 minutes per
 account. Each try still costs a quote, a route, a simulation and a signature on
-the platform's providers, once per strategy interval. Paper trades have no
+the platform's providers, once per strategy interval.
+
+Limits that could only make trades below the minimum are refused where they are
+saved and registered, never later at a trade. The settings route and
+`prepareLive` refuse live limits whose USDG per trade is under 1 USDG
+(`requireSolanaLiveTradeMinimum`): no buy, and no sale but a whole small
+position, could pass. The strategy route refuses an enabled live strategy whose
+trade size is under 1 USDG. `prepareLive` also values the SOL sold per trade at
+the lowest Pyth price either provider serves and refuses a cap worth under
+1 USDG, since every sale is capped by it and a smaller sale that is not the
+whole position is refused. When that price cannot be read, nothing is prepared
+and the owner tries again; a misconfigured Pyth generation refuses as
+configuration. The page states the minimum beside the limit and strategy
+fields. A fall in the SOL price during the permission can still bring the cap
+below 1 USDG. Partial sales are then refused until the owner registers a larger
+SOL amount per trade; a sale of the whole position, if it fits the cap, and an
+owner withdrawal still work. Admission never applies these save-time checks, so
+limits already signed keep every exit they allow. Paper trades have no
 minimum. The platform's spend per tenant stays bounded by `maxOpsPerDay` swaps
 a day; there is no per-tenant fee budget.
 Owner-signed setup and recovery transactions use the owner as payer.

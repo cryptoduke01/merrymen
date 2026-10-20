@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder, getTransactionDecoder, signTransaction } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { SolanaPaperValidationError } from "../../packages/core/src/solana";
+import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SolanaPaperValidationError } from "../../packages/core/src/solana";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaSwapAuthority, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { sealSecret } from "./store-crypto";
@@ -27,7 +27,7 @@ import { pythAccount } from "./solana-reference-price-fixture";
 import { address as kitAddress, getProgramDerivedAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
-import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
+import { SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, SOLANA_LIVE_SELL_CAP_UNCHECKED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_ABOVE_BOOK,
   SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
@@ -68,7 +68,10 @@ async function fixture(options: { declared?: string } = {}) {
     // Owner-transaction simulation and recent priority fees; null: the provider cannot answer.
     simulatedUnits: null as number | null, simulationFails: false, priorityFees: null as number[] | null,
     // The USDG mint's TransferHook program: unset, as on mainnet today.
-    hookProgram: null as string | null };
+    hookProgram: null as string | null,
+    // Pyth SOL/USD (8 decimals) both providers serve, which a registration checks the SOL sold per trade against: $120.
+    // null: the account reads as a system account, which every reference read refuses.
+    pythPrice: 12_000_000_000n as bigint | null };
   const cashAta = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), wsolAta = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const ownerCashAta = await deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsolAta = await deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
   const feePayer = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(31))).publicKey);
@@ -113,6 +116,7 @@ async function fixture(options: { declared?: string } = {}) {
         return response({ ...account(programData.subarray(slice.offset, slice.offset + slice.length), LOADER), space: programData.length });
       }
       if (params[0] === vault) return response(accountFor(vault));
+      if (params[0] === PYTH_SOL_USD_ACCOUNT && controls.pythPrice !== null) return response(pythAccount({ price: controls.pythPrice, publishTimeMs: clock.now, postedSlot: 999n }));
       return response(accountFor(params[0]) ?? account(Buffer.alloc(0), SYSTEM));
     }
     if (method === "getMultipleAccounts") return response((params[0] as string[]).map(accountFor));
@@ -1853,6 +1857,7 @@ test("a WSOL withdrawal whose value cannot be read still prepares and lands, and
     try {
       await wsolCapital(f);
       if (unreadable !== "no reference price") servePyth(f);
+      else f.controls.pythPrice = null;
       const app = f.runtime({ market: pricedMarket(f, unreadable === "no quote"),
         ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}),
         ...(unreadable === "a misconfigured Pyth generation" ? { env: { ...f.env, MERRYMEN_SOLANA_PYTH_GENERATION: "both" } } : {}) });
@@ -2266,6 +2271,41 @@ test("a permission is prepared only from limits within the account bounds, paper
       assert.deepEqual(f.calls, [], "refused before any RPC read");
     }
     assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
+  } finally { f.raw.close(); }
+});
+
+test("a registration whose limits could make only live trades under the 1 USDG minimum is refused before anything is prepared; the SOL sold per trade is valued at the lowest provider's price", async () => {
+  const f = await fixture();
+  try {
+    const save = async (saved: typeof limits) => { const binding = (await f.bindings.get(TENANT))!; await f.bindings.settings(TENANT, f.owner, binding.revision, "live", saved); };
+    const refusal = (message: string, code: SolanaAppRuntimeError["code"]) => (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === code && error.message === message;
+    // USDG per trade under 1 USDG: refused with no RPC read at all.
+    const small = { ...limits, perTradeUsdg: "999999" };
+    await save(small); f.calls.length = 0;
+    await assert.rejects(f.app.prepareLive(f.scope, { limits: small, sessionPublicKey: f.session }), refusal(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, "permission"));
+    assert.deepEqual(f.calls, [], "refused before any RPC read");
+    // 0.008 SOL per trade is 0.96 USDG at $120: no sale smaller than the whole position could be admitted.
+    const capped = { ...limits, perTradeWsol: "8000000" };
+    await save(capped);
+    await assert.rejects(f.app.prepareLive(f.scope, { limits: capped, sessionPublicKey: f.session }), refusal(SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, "permission"));
+    // 0.0084 SOL is 1.008 USDG at $120, but one provider serving $110 values it at 0.924 USDG: the lower price decides.
+    const edge = { ...limits, perTradeWsol: "8400000" };
+    await save(edge);
+    const serving = (price: bigint): SolanaLiveRead => async (method, params = []) => method === "getAccountInfo" && params[0] === PYTH_SOL_USD_ACCOUNT
+      ? f.response(pythAccount({ price, publishTimeMs: f.clock.now, postedSlot: 999n })) : f.read(method, params);
+    f.providers.fallback = serving(11_000_000_000n);
+    await assert.rejects(f.app.prepareLive(f.scope, { limits: edge, sessionPublicKey: f.session }), refusal(SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, "permission"));
+    // A price that cannot be read refuses (retry later), never assumed.
+    f.providers.fallback = null; f.controls.pythPrice = null;
+    await assert.rejects(f.app.prepareLive(f.scope, { limits: edge, sessionPublicKey: f.session }), refusal(SOLANA_LIVE_SELL_CAP_UNCHECKED, "pending"));
+    await assert.rejects(f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_PYTH_GENERATION: "both" } }).prepareLive(f.scope, { limits: edge, sessionPublicKey: f.session }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "configuration");
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
+    // Both providers at $120: prepared, and the permission signs the cap as saved.
+    f.controls.pythPrice = 12_000_000_000n;
+    const setup = await f.app.prepareLive(f.scope, { limits: edge, sessionPublicKey: f.session });
+    assert.ok(setup.transactionBase64);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.limits.perTradeWsol, "8400000");
   } finally { f.raw.close(); }
 });
 

@@ -41,6 +41,7 @@ export function SolanaAutomation({ binding, api, refresh, workerOnline }: { bind
         <label>Maximum USDG per strategy trade<input inputMode="decimal" value={size} onChange={(e) => setSize(e.target.value)} /></label>
         <label>Check every (seconds)<input type="number" min="30" max="86400" value={interval} onChange={(e) => setInterval(e.target.value)} /></label>
       </div>
+      {binding.requestedMode === "live" && <p>Each live trade must be worth at least 1 USDG, so set at least 1 USDG per strategy trade. A rebalance worth less waits until it grows, checked once per interval.</p>}
       <button>Save autonomous strategy</button>
     </fieldset>
     <p role="status">{binding.strategy?.enabled

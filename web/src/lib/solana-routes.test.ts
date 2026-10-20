@@ -7,6 +7,7 @@ import * as api from "./solana-api";
 import * as auth from "./solana-auth";
 import * as bindings from "./solana-binding-store";
 import { CHAINS } from "../../../packages/core/src/ids";
+import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_LIVE_STRATEGY_BELOW_MINIMUM } from "../../../packages/core/src/solana";
 
 const tenant = `0x${"11".repeat(20)}` as const, owner = "So11111111111111111111111111111111111111112";
 const scope = { tenant, owner };
@@ -115,6 +116,29 @@ test("settings refuse paper limits beyond the account bounds with a 400 before s
   const widest = { ...limits, maxOpsPerDay: 96 };
   assert.equal((await post("settings", { mode: "paper", limits: widest, revision: 2 })).status, 200);
   assert.deepEqual(calls.pop(), { method: "settings", args: [tenant, owner, 2, "paper", widest] });
+});
+test("live settings and live strategies that could only trade under the 1 USDG live minimum are refused with a 400 before saving; paper has no minimum", async () => {
+  const live = { ...limits, perTradeWsol: "100000000", dailyWsol: "500000000" };
+  const small = { ...live, perTradeUsdg: "999999" };
+  const refused = await post("settings", { mode: "live", limits: small, revision: 2, liveConsent: true });
+  assert.equal(refused.status, 400);
+  assert.equal((await refused.json() as { error: string }).error, SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
+  assert.equal(calls.length, 0, "nothing saved");
+  assert.equal((await post("settings", { mode: "live", limits: { ...live, perTradeUsdg: "1000000" }, revision: 2, liveConsent: true })).status, 200);
+  assert.equal((await post("settings", { mode: "paper", limits: { ...limits, perTradeUsdg: "1" }, revision: 2 })).status, 200);
+  calls.length = 0;
+  // A strategy trade under 1 USDG: refused in live mode when enabled, saved when off and in paper mode.
+  const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "999999", intervalSeconds: 60 };
+  binding.requestedMode = "live"; binding.limits = live;
+  const strategyRefused = await post("strategy", { strategy, revision: 2 });
+  assert.equal(strategyRefused.status, 400);
+  assert.equal((await strategyRefused.json() as { error: string }).error, SOLANA_LIVE_STRATEGY_BELOW_MINIMUM);
+  assert.equal(calls.length, 0, "nothing saved");
+  assert.equal((await post("strategy", { strategy: { ...strategy, tradeUsdgRaw: "1000000" }, revision: 2 })).status, 200);
+  assert.equal((await post("strategy", { strategy: { ...strategy, enabled: false }, revision: 2 })).status, 200);
+  binding.requestedMode = "paper";
+  assert.equal((await post("strategy", { strategy, revision: 2 })).status, 200);
+  assert.deepEqual(calls.map(c => c.method), ["strategy", "strategy", "strategy"]);
 });
 test("strategy endpoint rejects excessive size and persists explicit enablement under the current revision", async () => {
   const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };

@@ -1,4 +1,4 @@
-import { requireSolanaLiveSellLimits, validateSolanaAccountLimits } from "../../../../../../packages/core/src/solana";
+import { requireSolanaLiveSellLimits, requireSolanaLiveTradeMinimum, validateSolanaAccountLimits } from "../../../../../../packages/core/src/solana";
 import { solanaContext, solanaRequestBody, solanaResponse } from "@/lib/solana-api";
 import { SolanaWebError } from "@/lib/solana-auth";
 
@@ -15,6 +15,8 @@ export async function POST(req: Request) {
     const limits = validateSolanaAccountLimits(body.limits, Date.now());
     if (body.mode === "live") {
       try { requireSolanaLiveSellLimits(limits); } catch { throw new SolanaWebError(400, "Set how much SOL a live trade and a live day may sell."); }
+      // Admission refuses a live trade worth under 1 USDG: a per-trade limit below it would let none through.
+      requireSolanaLiveTradeMinimum(limits);
     }
     return { binding: await store.settings(principal.tenant, binding.owner, body.revision, body.mode, limits) };
   });

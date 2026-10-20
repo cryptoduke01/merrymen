@@ -15,6 +15,9 @@ import {
   solanaPaperAgentId,
   solanaTradeFloorMet,
   requireSolanaLiveSellLimits,
+  requireSolanaLiveTradeMinimum,
+  SOLANA_LIVE_MIN_TRADE_USDG_RAW,
+  SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM,
   validateSolanaAccountLimits,
   validateSolanaPaperLimits,
   validateSolanaQuote,
@@ -205,6 +208,14 @@ describe("Solana paper limits", () => {
     // Paper accounts saved before the SOL sell limits still validate, but cannot go live.
     assert.deepEqual(validateSolanaPaperLimits(limits(), NOW), limits());
     assert.throws(() => requireSolanaLiveSellLimits(limits()), /SOL sell limits/);
+  });
+
+  it("refuses live limits whose per-trade USDG limit is under the 1 USDG live minimum, and leaves the shape check alone", () => {
+    const live = limits({ perTradeUsdg: "999999", perTradeWsol: "250000000", dailyWsol: "1000000000" });
+    // Still valid limits (admission and paper read them): only saving and registering them live refuses.
+    assert.deepEqual(validateSolanaAccountLimits(live, NOW), live);
+    assert.throws(() => requireSolanaLiveTradeMinimum(live), (error: unknown) => error instanceof SolanaPaperValidationError && error.message === SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
+    assert.doesNotThrow(() => requireSolanaLiveTradeMinimum({ ...live, perTradeUsdg: SOLANA_LIVE_MIN_TRADE_USDG_RAW.toString() }));
   });
 
   it("refuses at save the live operation count and permission length the vault cannot honour (audit core-abi-3, web-auth F4)", () => {

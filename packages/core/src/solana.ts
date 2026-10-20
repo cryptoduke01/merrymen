@@ -157,6 +157,22 @@ export const SOLANA_PERMISSION_CLOCK_SKEW_MS = 5 * 60_000;
  */
 export const SOLANA_LIVE_MIN_TRADE_USDG_RAW = 1_000_000n;
 export const SOLANA_LIVE_BELOW_MINIMUM = "A live Solana trade must be worth at least 1 USDG, unless it sells the whole recorded SOL position.";
+/**
+ * Live limits and strategies that could only make trades below the live
+ * minimum are refused where they are saved and registered, never later at a
+ * trade: a per-trade USDG limit under 1 USDG lets no buy through and no sale
+ * but a whole small position (requireSolanaLiveTradeMinimum, at the settings
+ * route and prepareLive), and a strategy trade under 1 USDG is refused the
+ * same way (the strategy route). The SOL sold per trade is checked against
+ * the independent price at registration (prepareLive). Admission never reads
+ * these: limits already signed keep every exit they allow.
+ */
+export const SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM = "A live trade must be worth at least 1 USDG: set USDG per trade to at least 1.";
+export const SOLANA_LIVE_STRATEGY_BELOW_MINIMUM = "A live strategy trade must be at least 1 USDG: set the maximum USDG per strategy trade to at least 1.";
+/** Refuse live limits whose per-trade USDG limit is under SOLANA_LIVE_MIN_TRADE_USDG_RAW (SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM). */
+export function requireSolanaLiveTradeMinimum(limits: SolanaPaperLimits): void {
+  if (parseSolanaRawAmount(limits.perTradeUsdg) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new SolanaPaperValidationError(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
+}
 
 /**
  * Generic limit shape. Limits that carry SOL sell caps are the ones a live vault

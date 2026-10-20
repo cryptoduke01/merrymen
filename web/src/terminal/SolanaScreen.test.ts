@@ -15,7 +15,7 @@ import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
-import { SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
+import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -382,6 +382,10 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   await ui.click("Save autonomous strategy");
   assert.deepEqual(saved, { revision: 0, strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
   assert.equal(signCount, 0);
+  // Paper strategies have no minimum; a live one says its 1 USDG minimum beside the fields.
+  assert.doesNotMatch(ui.container.textContent!, /set at least 1 USDG per strategy trade/);
+  state = initial("live"); await ui.click("Refresh account");
+  assert.match(ui.container.textContent!, /Each live trade must be worth at least 1 USDG, so set at least 1 USDG per strategy trade/);
 });
 test("a paced answer is a wait wherever it is read: the first status load, owner controls and the strategy, never a failure", async () => {
   const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
@@ -500,6 +504,37 @@ test("live limits carry the owner's SOL sell bounds in lamports; paper limits do
   await ui.click("Save Solana mode and limits");
   assert.equal("perTradeWsol" in (saved[1]!.limits as Record<string, unknown>), false);
   assert.equal(signCount, 0);
+});
+
+test("the live limits say the 1 USDG live minimum beside the fields, and a per-trade limit under it is refused before anything is sent", async () => {
+  state = initial("live");
+  state.binding.limits = { ...limits, perTradeWsol: "250000000", dailyWsol: "1000000000" } as typeof limits;
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.match(ui.container.textContent!, /Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller/);
+  const consent = ui.container.querySelector("input[type=checkbox]") as HTMLInputElement;
+  await act(async () => { consent.click(); });
+  await type("USDG per trade", "0.99");
+  await ui.click("Save Solana mode and limits");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM));
+  assert.equal(saved.length, 0, "nothing sent");
+  await type("USDG per trade", "1");
+  await ui.click("Save Solana mode and limits");
+  assert.equal((saved[0]!.limits as Record<string, unknown>).perTradeUsdg, "1000000");
+  // Paper mode has no minimum and says none.
+  state = initial("paper");
+  await ui.click("Refresh account");
+  const paperRadio = [...ui.container.querySelectorAll("input[type=radio]")][0] as HTMLInputElement;
+  await act(async () => { paperRadio.click(); });
+  assert.doesNotMatch(ui.container.textContent!, /Each live trade must be worth at least 1 USDG/);
+  await type("USDG per trade", "0.5");
+  await ui.click("Save Solana mode and limits");
+  assert.equal((saved[1]!.limits as Record<string, unknown>).perTradeUsdg, "500000");
 });
 
 test("wrapped SOL sent by someone else is shown held aside, not as trading performance", async () => {

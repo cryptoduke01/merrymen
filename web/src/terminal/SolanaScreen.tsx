@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
-import { SOLANA_QUOTE_MAX_AGE_MS, SOLANA_REGISTERED_AFTER_REVOKE, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
+import { SOLANA_LIVE_MIN_TRADE_USDG_RAW, SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_QUOTE_MAX_AGE_MS, SOLANA_REGISTERED_AFTER_REVOKE, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
 import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store";
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
@@ -286,6 +286,7 @@ function ConnectedSolana() {
     // Live sessions bound every sale by the SOL it puts in, not only the USDG it returns.
     const sell = mode === "live" ? { perTradeWsol: units(perTradeSol, 9), dailyWsol: units(dailySol, 9) } : {};
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
+    if (mode === "live" && BigInt(units(perTrade, 6)) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new Error(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
     return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
   };
   /** The form shows exactly the saved mode and limits: nothing typed is waiting to be saved. */
@@ -667,6 +668,7 @@ function ConnectedSolana() {
             <label>SOL sold per 24 hours<input inputMode="decimal" value={dailySol} onChange={(e) => setDailySol(e.target.value)} /></label>
           </>}
         </div>
+        {mode === "live" && <p>Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller. Set at least 1 USDG per trade, and SOL sold per trade worth at least 1 USDG: registering checks it against the independent SOL price.</p>}
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
         <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>
         <p>Saved preference: {binding.requestedMode}. A saved live preference becomes executable only after a verified wallet permission.</p>
