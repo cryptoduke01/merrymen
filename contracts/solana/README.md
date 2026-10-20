@@ -145,7 +145,12 @@ upload, so a run whose manifest differs still hands it over. It fails when a com
 Linux manifest exists and differs from that pinned Linux build, and when the commit under
 test deleted the manifest its first parent has (a pull request's base, or the commit
 before a push): once committed, it is replaced by the next reviewed one, never deleted.
-While none is committed on either side it only reports the recorded values.
+While none is committed on either side it only reports the recorded values. One case
+fails earlier: a committed Linux manifest with this build's source digest but another
+artifact. `build.sh`, run by `test.sh` in the Test step, stops on it ("same source,
+different artifact"), so the job fails before the comparison and the upload, and hands
+over no new manifest. The reviewed source did not change, so the toolchain or the build
+environment did: investigate that rather than commit a new manifest.
 
 To commit the first one, take the artifact from a run whose `app` check passed, check
 that the manifest's `source.digest` equals `build.sh --source-digest` at that commit and

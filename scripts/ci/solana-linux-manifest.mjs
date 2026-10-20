@@ -41,6 +41,13 @@
 // notice and the step summary) that the uploaded artifact carries the
 // manifest for the owner to review and commit. Committing it is what turns
 // the comparison on, and what lets a run on main be a release candidate.
+//
+// One case never gets this far: a committed manifest with the same source
+// digest as this build but another artifact. build.sh, run by test.sh in the
+// Test step, refuses it ("same source, different artifact"), so the job fails
+// before report and the upload, and hands over no new manifest. The reviewed
+// source did not change, so the toolchain or the build environment did; the
+// owner investigates that rather than committing a new manifest.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";

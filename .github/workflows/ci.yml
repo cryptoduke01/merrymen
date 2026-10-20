@@ -389,7 +389,10 @@ jobs:
       # and differs from this pinned Linux build, and when HEAD deleted the
       # manifest its first parent has. With none committed on either side it
       # passes: the owner reviews the uploaded manifest and commits it, which
-      # turns this comparison on.
+      # turns this comparison on. A committed manifest with this build's
+      # source digest but another artifact never gets this far: build.sh
+      # fails the Test step on it, before anything is uploaded, because the
+      # toolchain or environment changed and nothing should be committed.
       - name: Linux manifest matches the committed one
         if: needs.solana-paths.outputs.run == 'true'
         run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana
