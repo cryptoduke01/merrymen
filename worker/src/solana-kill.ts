@@ -9,7 +9,10 @@ import { solanaRuntimeDbFile } from "./solana-runtime-db";
  * Throws when it cannot be stopped, so the caller reports the kill incomplete.
  * Without a database there is nothing that could trade: hosted Solana refuses
  * to run without the shared database, and a self-hosted install that never
- * used Solana has no accounts file (none is created here).
+ * used Solana has no accounts file (none is created here). With one, the
+ * binding store first looks its table up read-only and answers "none" when it
+ * is absent (MERRYMEN_SOLANA off, or never used): a Robinhood kill writes no
+ * Solana schema and takes no Solana lock (SqlSolanaBindingStore killDb).
  */
 export async function stopSolanaForKill(tenant: `0x${string}`, store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
   if (!process.env.DATABASE_URL && (isHostedMode() || !existsSync(solanaRuntimeDbFile()))) return "none";

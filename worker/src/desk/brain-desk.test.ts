@@ -26,6 +26,9 @@ describe("Brain's desk answer", () => {
     // 39 characters is under Brain's floor; 40 is a read.
     assert.equal(parseDeskAnalysis({ read: "x".repeat(39), stance: "cautious", watch: "", invalidation: "" }), null);
     assert.ok(parseDeskAnalysis({ read: "x".repeat(40), stance: "cautious", watch: "", invalidation: "" }));
+    // Characters, as Python counts them: 39 emoji are 78 UTF-16 units but 39 characters to Brain.
+    assert.equal(parseDeskAnalysis({ read: "📉".repeat(39), stance: "cautious", watch: "", invalidation: "" }), null);
+    assert.ok(parseDeskAnalysis({ read: "📉".repeat(40), stance: "cautious", watch: "", invalidation: "" }));
     for (const bad of ["$PEPE looks weak here", "watch $sol into the close", "see http//x.test", "see HTTP://x.test", "join t.me/pump", "www.pump.example"]) {
       for (const field of ["read", "watch", "invalidation"] as const) {
         const answer = { read, stance: "cautious", watch: "", invalidation: "", [field]: field === "read" ? `${read} ${bad}` : bad };

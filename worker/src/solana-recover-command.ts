@@ -1,21 +1,36 @@
 /** `merrymen solana-recover`: argument parsing and key input for the owner recovery tool. */
 import { readFileSync, statSync } from "node:fs";
 import { base58Decode } from "../../packages/core/src/ids";
+import { redactUrls } from "./redact-urls";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import {
   isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
   type SolanaRecoveryResult, type SolanaVaultRelease,
 } from "./solana-recover";
 
+/** Where the owner's RPC URL is read from: an environment variable keeps a provider key out of shell history and ps. */
+export const SOLANA_RECOVER_RPC_ENV = "MERRYMEN_SOLANA_RECOVER_RPC";
+/** Printed (to stderr, never with the URL) when --rpc carries what looks like a provider key. */
+export const SOLANA_RECOVER_RPC_ARG_WARNING = `Warning: the --rpc URL looks like it carries an API key. It is not printed, but `
+  + `command-line arguments stay in your shell history and other users of this machine can see them while the command runs. `
+  + `Next time put the URL in ${SOLANA_RECOVER_RPC_ENV} instead, and consider rotating that key.`;
+
 export const SOLANA_RECOVER_HELP = `Solana vault recovery: withdraw everything from your Merrymen Solana vault
 with your own wallet key, without the Merrymen app or server.
 
-solana-recover --program PROGRAM_ID --rpc HTTPS_URL --owner PUBLIC_KEY
+First put your RPC URL in ${SOLANA_RECOVER_RPC_ENV}, without typing it into a
+command (it may carry your provider's API key). For example, in bash or zsh:
+    read -rs ${SOLANA_RECOVER_RPC_ENV}; export ${SOLANA_RECOVER_RPC_ENV}
+then paste the URL and press Enter.
+
+solana-recover --program PROGRAM_ID --owner PUBLIC_KEY
     Show the plan: vault, balances and the transactions it would send.
-solana-recover --program PROGRAM_ID --rpc HTTPS_URL --key-file PATH --send
+solana-recover --program PROGRAM_ID --key-file PATH --send
     Sign and send. Use --key-file - to read the key from standard input,
     for example: pbpaste | merrymen solana-recover ... --key-file - --send
 Options: --program-sha256 HEX checks the deployed program binary first.
+--rpc HTTPS_URL gives the RPC on the command line instead, for a URL with no
+API key in it (a public endpoint). Give one or the other, not both.
 
 --send signs only for a released Merrymen vault program, whose immutable
 binary is checked against its released hash first. Your key signs every
@@ -44,6 +59,20 @@ never from the command line, and is never printed, logged or sent anywhere.
 Delete the key file when you are done. PROGRAM_ID is the program shown
 next to your vault in Merrymen (the owner of the vault account). The RPC
 must be a mainnet-beta HTTPS endpoint you trust; the owner pays the fees.`;
+
+/**
+ * Whether an RPC URL looks like it carries a credential: anything redactUrls
+ * would hide (userinfo, a keyed provider's host, a key-named parameter, a
+ * key-shaped segment), any query string, or a long token-like path segment.
+ * Only for a warning, so erring towards it costs a line of text.
+ */
+function rpcUrlLooksKeyed(raw: string): boolean {
+  if (redactUrls(raw) !== raw) return true;
+  let url: URL;
+  try { url = new URL(raw); } catch { return false; }
+  if (url.search || url.username || url.password) return true;
+  return url.pathname.split("/").some((segment) => segment.length >= 16 && /^[A-Za-z0-9_-]+$/.test(segment) && /[0-9]/.test(segment));
+}
 
 const VALUE_FLAGS = new Set(["program", "rpc", "key-file", "owner", "program-sha256"]);
 const BOOLEAN_FLAGS = new Set(["send", "unlisted-program"]);
@@ -92,6 +121,8 @@ export interface SolanaRecoverCommandDeps {
   pollMs?: number;
   /** Released programs; defaults to SOLANA_VAULT_RELEASES. */
   releases?: readonly SolanaVaultRelease[];
+  /** Where SOLANA_RECOVER_RPC_ENV is read; process.env by default. */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 async function readKeyText(source: string, deps: SolanaRecoverCommandDeps): Promise<string> {
@@ -121,10 +152,21 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   if (!args.length) return SOLANA_RECOVER_HELP;
   const flags = parse(args);
   const text = (key: string) => typeof flags[key] === "string" ? flags[key] as string : undefined;
-  const programId = text("program"), rpcUrl = text("rpc"), keyFile = text("key-file"), expectedOwner = text("owner");
+  const programId = text("program"), rpcArg = text("rpc"), keyFile = text("key-file"), expectedOwner = text("owner");
   const send = flags.send === true;
   if (!programId) throw new SolanaRecoverError("--program is required: the program shown next to your vault in Merrymen.");
-  if (!rpcUrl) throw new SolanaRecoverError("--rpc is required: a mainnet-beta HTTPS RPC endpoint you trust.");
+  // The RPC URL from the environment, the documented path: a provider key in it stays out of
+  // shell history and the process list. --rpc remains for a keyless URL. Neither is ever echoed.
+  const rpcEnv = (deps.env ?? process.env)[SOLANA_RECOVER_RPC_ENV]?.trim() || undefined;
+  if (rpcEnv !== undefined && rpcArg !== undefined) {
+    throw new SolanaRecoverError(`Give the RPC once: ${SOLANA_RECOVER_RPC_ENV} or --rpc, not both. Nothing was read or sent.`);
+  }
+  const rpcUrl = rpcEnv ?? rpcArg;
+  if (!rpcUrl) {
+    throw new SolanaRecoverError(`Set ${SOLANA_RECOVER_RPC_ENV} to a mainnet-beta HTTPS RPC endpoint you trust (it keeps a provider key out of your shell history), `
+      + "or pass --rpc HTTPS_URL for a URL with no API key in it. Run solana-recover --help.");
+  }
+  if (rpcArg !== undefined && rpcUrlLooksKeyed(rpcArg)) (deps.warn ?? console.error)(SOLANA_RECOVER_RPC_ARG_WARNING);
   if (send && !keyFile) throw new SolanaRecoverError("--send needs --key-file PATH (or --key-file - for standard input).");
   if (!keyFile && !expectedOwner) throw new SolanaRecoverError("Give --owner PUBLIC_KEY for a plan, or --key-file to derive it from your key.");
   // Checked before anything is read or contacted, and never echoed: a value

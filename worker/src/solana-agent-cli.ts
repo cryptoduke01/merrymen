@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { runSolanaAgent } from "./solana-agent";
 import { EX_CONFIG, hostedSolanaRefusals } from "./deploy-guard-checks";
+import { guardStdio } from "./redact-stdio";
 
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 type StopSignal = (typeof STOP_SIGNALS)[number];
@@ -164,6 +165,8 @@ export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: Sol
 }
 
 async function main(): Promise<void> {
+  // First, before anything can print: a keyed RPC URL never reaches stdout or stderr (#347).
+  guardStdio();
   const args = process.argv.slice(2);
   if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
     process.stdout.write("merrymen solana-agent\nRuns explicitly enabled Solana rebalancing strategies in each account's selected paper or live mode. Configure the authenticated app, private RPC/Jupiter settings and shared storage first. Live mode additionally requires a verified immutable vault deployment and an owner-approved session.\n"

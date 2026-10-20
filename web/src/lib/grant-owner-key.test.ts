@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { describe, it } from "node:test";
 import { ed25519 } from "@noble/curves/ed25519";
@@ -102,6 +103,9 @@ describe("a real grant carrying a Solana secret key is refused", () => {
     assert.equal(carriesOwnerKey({ ...g, caps: { ...g.caps, backup: SOL.bytes } }), true);
     assert.equal(carriesOwnerKey({ ...g, binding: { ...g.binding!, nonce: SOL.b58 } }), true);
     assert.equal(carriesOwnerKey({ ...g, demoSessionPrivateKey: SOL.b58 as `0x${string}` }), true);
+    // Glued to the text around it (audit: 'pk<K>' was read as no secret, 'pk <K>' as one).
+    assert.equal(carriesOwnerKey({ ...g, label: `pk${SOL.b58}` }), true);
+    assert.equal(carriesOwnerKey({ ...g, label: `%22${SOL.b58}%22` }), true);
   });
 
   it("inside the ZeroDev blob, or in place of it", async () => {
@@ -116,16 +120,36 @@ describe("a real grant carrying a Solana secret key is refused", () => {
     // Any signed-in user reaches this from POST /api/grants. A label of small
     // byte values that fails at its end once backtracked for seconds per value.
     const label = `[${[...Array(22).fill("11"), ...Array(41).fill("1"), "999"].join(",")}]`;
-    let started = performance.now();
-    assert.equal(carriesOwnerKey({ ...g, label }), false);
-    assert.ok(performance.now() - started < 250, `label took ${Math.round(performance.now() - started)} ms`);
+    // CPU time (process.cpuUsage, user + system), never a wall clock: a loaded
+    // runner takes time from this process, not CPU (a status run at load ~98
+    // failed the wall-clock budget here). The same bounds still fail the old
+    // pattern, which spends seconds of CPU on this label.
+    const cpuMsOf = (fn: () => unknown): number => {
+      const started = process.cpuUsage();
+      fn();
+      const spent = process.cpuUsage(started);
+      return (spent.user + spent.system) / 1_000;
+    };
+    // First in a child the runner can stop, limited in CPU time: an exponential scan never returns, and
+    // run here it would hang the suite instead of failing this test by name.
+    const script = [
+      'import { readFileSync } from "node:fs";',
+      `const { carriesOwnerKey } = await import(${JSON.stringify(new URL("../../../packages/core/src/hosted.ts", import.meta.url).href)});`,
+      'process.stdout.write(String(carriesOwnerKey({ label: readFileSync(0, "utf8") })));',
+    ].join("\n");
+    // tsx by name, resolved from the repository root (this file runs as CommonJS: no import.meta.resolve).
+    const node = [process.execPath, "--import", "tsx", "--input-type=module", "-e", script];
+    const [file, ...args] = process.platform === "win32" ? node : ["/bin/sh", "-c", "ulimit -t 20 && exec \"$@\"", "sh", ...node];
+    const child = spawnSync(file!, args, { input: label, encoding: "utf8", timeout: 400_000, cwd: new URL("../../../", import.meta.url) });
+    assert.equal(child.stdout, "false", `the label scan did not finish within 20 s of CPU time (${child.signal ?? child.status}: ${String(child.stderr).slice(-400)})`);
+    let spent = cpuMsOf(() => assert.equal(carriesOwnerKey({ ...g, label }), false));
+    assert.ok(spent < 250, `label took ${Math.round(spent)} ms of CPU time`);
 
     // Key-shaped runs split across fields share the walk's one cap, and past it
     // the grant is refused rather than read run by run.
     const fields = Object.fromEntries(Array.from({ length: 2_000 }, (_, i) => [`f${i}`, SOL.sig]));
-    started = performance.now();
-    assert.equal(carriesOwnerKey({ ...g, ...fields }), true);
-    assert.ok(performance.now() - started < 1_000, `fields took ${Math.round(performance.now() - started)} ms`);
+    spent = cpuMsOf(() => assert.equal(carriesOwnerKey({ ...g, ...fields }), true));
+    assert.ok(spent < 1_000, `fields took ${Math.round(spent)} ms of CPU time`);
   });
 
   it("and halts the hosted boot", async () => {

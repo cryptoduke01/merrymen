@@ -69,7 +69,9 @@ export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {
   const read = text(a.read, 900);
   const watch = text(a.watch ?? "", 260);
   const invalidation = text(a.invalidation ?? "", 260);
-  if (!read || read.length < READ_MIN_CHARS || watch === null || invalidation === null) return null;
+  // Counted in characters (code points), as Python's len() counts Brain's min_length: in UTF-16
+  // units an emoji is two, so 39 of them passed here although Brain refuses them.
+  if (!read || [...read].length < READ_MIN_CHARS || watch === null || invalidation === null) return null;
   if (typeof a.stance !== "string" || !STANCES.has(a.stance)) return null;
   const confidence = typeof a.confidence === "number" && Number.isFinite(a.confidence) ? Math.min(1, Math.max(0, a.confidence)) : undefined;
   return { read, stance: a.stance as TgDeskStance, watch, invalidation, ...(confidence !== undefined ? { confidence } : {}) };

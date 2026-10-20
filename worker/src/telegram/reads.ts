@@ -940,11 +940,20 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * provider with every chat message. The model is told to point people to
  * /wallet instead; this makes sure it has nothing else to go on.
  *
- * Every 0x run of 20–40 hex digits standing alone is replaced — 40 is an
- * address, and a shorter run is one cut off by a length cap, still most of an
- * address. A longer run (a 64-digit transaction hash) is left alone: nothing
- * can be sent to it. The owner-facing alert, /status and report keep their
- * addresses; only what a model reads is redacted.
+ * Every 0x run of 20 or more hex digits is replaced, wherever it starts
+ * ("tx0x<address>" too). 40 digits is an address, and a shorter run is one cut
+ * off by a length cap, still most of an address: "[address]". A longer run can
+ * carry an address inside it ("0x<address><24 hex>"), so it goes too: a run of
+ * exactly 64 is "[hash]" (a transaction hash, or that, or a private key; the
+ * model needs none of them), any other length "[address]". The owner-facing
+ * alert, /status, report and trade notices keep their addresses and hashes;
+ * only what a model reads is redacted, and where it narrates the daily
+ * report, the owner still gets the report itself, hashes included,
+ * underneath. NOT YET /why (review RHS, round 2): its evidence reaches the
+ * model through here, and when the model fails narrateWhy answers with that
+ * redacted evidence, so the receipt's line reads "tx: [hash]" where it showed
+ * the hash. The fix is the /why handler's (service.ts): the owner's own
+ * evidence, unredacted, when narration fails.
  *
  * A Solana key (base58, 32 bytes, found by core's onchainIdsIn) is an address
  * the same way and is replaced too, inside an explorer link as well, and glued
@@ -962,15 +971,15 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * base58 key cut short does not decode, so unlike a cut 0x run it is not
  * caught.
  */
-const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
+const HEX_RUN = /0[xX]([0-9a-fA-F]{20,})(?![0-9a-fA-F])/g;
 export function redactAddresses(text: string): string {
   // Longest value first (core's redactSolanaIds): a glued run can end in a key that also stands alone.
   // A whole run that is itself a signature (idFamily: it decodes to 64 bytes) is named as one.
-  // Solana first, on the text as written: ADDRESS_RUN takes "0x" and 20-40 hex, so run first on
+  // Solana first, on the text as written: HEX_RUN takes "0x" and its hex, so run first on
   // "0x<hex><key>" it ate the key's leading hex and left a tail too short to decode (review GE,
-  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still ADDRESS_RUN's.
+  // round 2). The glued scan skips a run that is "0x" then hex alone, so an address is still HEX_RUN's.
   const solana = redactSolanaIds(text, (hit) => (hit.shape === "hash" && idFamily(hit.value) === "solana" ? "[signature]" : "[address]"));
-  return solana.replace(ADDRESS_RUN, "[address]");
+  return solana.replace(HEX_RUN, (_run, hex: string) => (hex.length === 64 ? "[hash]" : "[address]"));
 }
 
 /** Recent event-feed lines (for the LLM's context) — addresses redacted. */

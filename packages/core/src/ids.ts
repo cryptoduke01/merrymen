@@ -22,6 +22,7 @@
  * browser-safe (web imports it).
  */
 import { ed25519 } from "@noble/curves/ed25519";
+import { sha256 } from "@noble/hashes/sha256";
 
 /** The chain families Merrymen can name. */
 export type ChainFamily = "evm" | "solana";
@@ -253,8 +254,26 @@ const EVM_IN_TEXT = /0x[0-9a-fA-F]{64}(?![0-9a-fA-F])|0x[0-9a-fA-F]{40}(?![0-9a-
 const BASE58_IN_TEXT = /(?<![0-9A-Za-z])[1-9A-HJ-NP-Za-km-z]{32,88}(?![0-9A-Za-z])/g;
 const SOLANA_LINK = /\b(?:https?:\/\/)?(?:www\.)?(?:solscan\.io|explorer\.solana\.com|solana\.fm|solanabeach\.io|orb\.helius\.dev)\/[^\s)>\]]*/gi;
 
-/** A maximal run of base58 characters, wherever it sits (the glued scan). */
-const BASE58_RUN = /[1-9A-HJ-NP-Za-km-z]{32,}/g;
+/** Base58's characters by code (B58): 1 for each. */
+const B58_CODE = Uint8Array.from({ length: 128 }, (_, code) => (B58.includes(String.fromCharCode(code)) ? 1 : 0));
+/**
+ * Every maximal run of base58 characters at least `min` long, wherever it
+ * sits, as [start, end) in order (the glued scans). A loop, never a regex:
+ * V8 runs /[…]{32,}/ out of stack on a run of about 5.6 million characters
+ * and throws RangeError, and a scan that throws is a check skipped wherever
+ * its caller swallows the error (review RHS, round 1).
+ */
+function* base58Runs(text: string, min: number): Generator<[number, number]> {
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && B58_CODE[text.charCodeAt(i)] === 1) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= min) yield [start, i];
+    start = -1;
+  }
+}
 function hexDigit(code: number): boolean {
   return (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
 }
@@ -371,9 +390,8 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
   for (const m of text.matchAll(SOLANA_LINK)) hits.push({ family: "solana", shape: "link", value: m[0] });
   if (scan.glued) {
     const budget = { left: GLUED_DECODES };
-    for (const m of text.matchAll(BASE58_RUN)) {
-      const s = m[0];
-      const start = m.index!;
+    for (const [start, end] of base58Runs(text, 32)) {
+      const s = text.slice(start, end);
       // "0x" then hex alone is that hex (an EVM id, or one split at its zeros), never a base58 id
       // glued to anything. With anything else after it the x is the run's own: a key can begin
       // with one ("10x<key>", "CA0x<key>"), and dropping it hid such a key from every window.
@@ -386,7 +404,12 @@ export function onchainIdsIn(text: unknown, scan: OnchainIdScan = {}): OnchainId
         // Glued: the whole run counts only when it is neither hex alone nor filler.
         whole = hexFrom(s, 0) || filler(s) ? null : base58Shape(s);
       }
-      const inside = whole ?? (s.length > 32 ? gluedShape(s, budget) : null);
+      // A run of hex alone or of filler has no window gluedShape would read: skipped whole, in O(n).
+      let inside: "address" | "hash" | "unread" | null = whole;
+      if (!inside && s.length > 32 && !hexFrom(s, 0) && !filler(s)) {
+        // Its tables are O(run): a run too long to allocate them for is an id unread, never no id.
+        try { inside = gluedShape(s, budget); } catch { inside = "unread"; }
+      }
       if (inside) hits.push({ family: "solana", shape: inside === "hash" ? "hash" : "address", value: s });
     }
     return hits;
@@ -456,20 +479,103 @@ const BYTE = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
 const BYTE_ARRAY_64 = new RegExp(String.raw`\[\s*(?:${BYTE}\s*,\s*){63}${BYTE}\s*\]`, "g");
 
 /**
- * How many key-shaped candidates one scan reads. Reading one costs a base58
- * decode, and a keypair check an ed25519 scalar multiplication (about 0.4 ms),
- * so an uncapped scan let a text of 64-byte runs hold the process for seconds
- * per megabyte. Past the cap every further candidate counts as a secret
- * unread: a false alarm on a text no owner sends, never a key let through.
+ * How many exact candidates one scan reads: a whole base58 run that can be a
+ * keypair as it stands (87 or 88 characters, or shorter after leading "1"s:
+ * keypairLengthsAfter; hex digits alone and filler excepted), and a JSON array
+ * of 64 byte values. Reading one costs a base58 decode and, at 64 bytes, a
+ * keypair check: an ed25519 scalar multiplication, about 0.2 ms of CPU
+ * (measured 2026-10-20 on a loaded machine, 0.15 ms idle). Uncapped, a text of
+ * 64-byte runs held the process for seconds per megabyte. Past the cap every
+ * further candidate counts as a secret unread, whole: a false alarm on a text
+ * no owner sends, never a key let through. A standalone signature is one
+ * candidate, so the 257th in a text is the first refused, as before glued keys
+ * were read.
  */
 const SECRET_CANDIDATES = 256;
+/**
+ * What one scan spends on windows inside runs, looking for a key glued to its
+ * neighbours (solanaSecretsIn, GLUED KEYS): keypair checks, base58 decodes
+ * (about 6 µs each) and window starts examined (the hex and filler tests, tens
+ * of ns each), so at most about 50 + 25 + 15 ms of CPU. Past any of them no
+ * further window is read, in this scan or any that shares its budget, and the
+ * answer is what the exact candidates say. BEST EFFORT, NEVER A FALSE ALARM:
+ * long base58 stretches (base64 in a notebook or an SVG, a list of signatures)
+ * are never refused for the windows inside them, and a key glued inside such
+ * a text past the budget is missed. The other direction, every window past
+ * the budget read as a secret, refused base64 notebooks and images in
+ * send_file from about 800 KB. A CHOICE OF AVAILABILITY OVER SECRECY that
+ * awaits Milla's sign-off: proposed with both directions and their measured
+ * costs in the RHS track's round-2 report (ownerDecisions), for the docs pass
+ * to record in docs/solana-integration.md, which does not have it yet.
+ */
+const SECRET_WINDOW_CHECKS = 256;
+const SECRET_WINDOW_DECODES = 4_096;
+const SECRET_WINDOW_STARTS = 262_144;
+/**
+ * The edge of a run a glued key is looked for first: windows that start within
+ * this many characters of a long run's start, or of the end of a key found in
+ * it, or end within it of the run's end, or of a key's start. "pk<key>",
+ * "%22<key>%22", "<key>is mine" and "<K1><K2><K3>" are found there. Edges are
+ * read before any other window, best effort too, SHORTEST RUN FIRST: a run
+ * with a few characters of glue (89 to 112 characters) before a long blob,
+ * whose edges cost about 28 keypair checks when no key is there, so about
+ * nine such blobs spend the budget, and a key at the edge of a run longer
+ * than all of them can go unread. A run a keypair's length that is not 64
+ * bytes as a whole ("secret:<key>x", an 87-character key) is read with the
+ * edges. The rest are read after, in the order written, while the budget
+ * lasts: windows deeper in a long run ("<sig><key><sig>",
+ * "mysecretkeyis<key>thankyoumybro") and those inside a run a keypair's length
+ * that is 64 bytes whole ("2<key>"), which a list of signatures is made of, so
+ * a long list cannot starve the edges.
+ */
+const SECRET_GLUE = 12;
+/** Window starts one set of tables covers (windowTables): memory stays bounded however long the run. */
+const SECRET_SWEEP_CHUNK = 4_096;
 
-/** The candidates a secret scan may still read. Hand one to several scans to cap them together. */
-export type SecretScanBudget = { left: number };
+/** What a secret scan may still read. Hand one to several scans to cap them together. */
+export type SecretScanBudget = {
+  /** Exact candidates (SECRET_CANDIDATES). */
+  left: number;
+  /** Windows inside runs (SECRET_WINDOW_*): keypair checks, decodes and starts. A full set when absent. */
+  windows?: { checks: number; decodes: number; starts: number };
+};
+type WindowBudget = NonNullable<SecretScanBudget["windows"]>;
 
-/** A fresh budget of SECRET_CANDIDATES candidates. */
-export function secretScanBudget(): SecretScanBudget {
-  return { left: SECRET_CANDIDATES };
+/**
+ * A fresh budget: SECRET_CANDIDATES exact candidates and the SECRET_WINDOW_*
+ * window reads. `{ windows: false }`: exact candidates only, no window read,
+ * for a caller that already replaces every run a glued key could hide in (the
+ * group-chat prompt quoting, whose encodedRuns turns any such run into "(a
+ * code)"): a 400-character line of random base58 then costs microseconds, not
+ * the window budget's tens of milliseconds.
+ */
+export function secretScanBudget(opts: { windows?: boolean } = {}): SecretScanBudget {
+  return { left: SECRET_CANDIDATES, windows: opts.windows === false ? { checks: 0, decodes: 0, starts: 0 }
+    : { checks: SECRET_WINDOW_CHECKS, decodes: SECRET_WINDOW_DECODES, starts: SECRET_WINDOW_STARTS } };
+}
+
+/**
+ * SCANS ARE REMEMBERED (review RHS, round 2). A scan with a fresh budget is a
+ * pure function of its text, and the windows can cost tens of milliseconds a
+ * text (about 256 keypair checks for a 400-character line of random base58),
+ * while the group chat quotes the same stored lines in every prompt it builds
+ * (30 in voice.ts alone): 1.2 s of CPU a prompt, in the worker that also
+ * trades. So the answer for a text of up to SECRET_MEMO_CHARS, scanned with no
+ * budget handed in, is kept for the next scan of the same text: where its
+ * secrets are, as offsets, under the SHA-256 of its UTF-16 code units, so the
+ * memo holds neither the text nor any secret in it. A scan handed a budget is
+ * never remembered (its answer depends on what the budget had left), nor is
+ * a scan that threw, nor a text with no base58 run of 64 characters (prose,
+ * byte arrays alone), which costs less to scan than to digest. The oldest of
+ * SECRET_MEMO_ENTRIES goes first.
+ */
+const SECRET_MEMO_CHARS = 4_096;
+const SECRET_MEMO_ENTRIES = 1_024;
+const secretMemo = new Map<string, ReadonlyArray<readonly [number, number]>>();
+function secretMemoKey(text: string): string {
+  const units = new Uint16Array(text.length);
+  for (let i = 0; i < text.length; i++) units[i] = text.charCodeAt(i);
+  return String.fromCharCode(...sha256(new Uint8Array(units.buffer)));
 }
 
 /**
@@ -482,29 +588,233 @@ export function solanaSecretIn(text: unknown, budget?: SecretScanBudget): boolea
 }
 
 /**
- * Every Solana secret key in a text (solanaSecretIn), exactly as written, so a
- * redactor can strip each one. A candidate past the budget is returned as a
- * secret without being read (SECRET_CANDIDATES).
+ * The lengths a 64-byte value takes in base58 after `z` leading "1"s (its `z`
+ * leading zero bytes): `z` plus the shortest to the longest encoding of a
+ * (64 - z)-byte value whose first byte is not zero. [87, 88] for z = 0, which
+ * is all but one keypair in 256. Exact (computed with base58Encode), once.
  */
-export function solanaSecretsIn(text: unknown, budget: SecretScanBudget = secretScanBudget()): string[] {
-  if (typeof text !== "string" || text.length < 64) return [];
-  const found: string[] = [];
-  for (const m of text.matchAll(BASE58_IN_TEXT)) {
-    // 64 bytes never encode shorter than 64 characters, so a shorter run (an
-    // address) is no candidate and costs nothing.
-    if (m[0].length < 64) continue;
-    if (budget.left-- <= 0) found.push(m[0]);
-    else {
-      const b = base58Decode(m[0]);
-      if (b && b.length === 64 && isSolanaKeypair(b)) found.push(m[0]);
+let keypairLengths: ReadonlyArray<readonly [number, number]> | null = null;
+function keypairLengthsAfter(z: number): readonly [number, number] {
+  keypairLengths ??= Array.from({ length: 65 }, (_, ones) => ones === 64 ? [64, 64] as const : [
+    ones + base58Encode(Uint8Array.from({ length: 64 - ones }, (_, i) => (i === 0 ? 1 : 0))).length,
+    ones + base58Encode(new Uint8Array(64 - ones).fill(255)).length,
+  ] as const);
+  return keypairLengths[Math.min(z, 64)]!;
+}
+/** The most characters a keypair's base58 takes, whatever its leading zero bytes (88). */
+let keypairCharsMax = 0;
+function longestKeypair(): number {
+  return keypairCharsMax ||= Math.max(...Array.from({ length: 65 }, (_, z) => keypairLengthsAfter(z)[1]));
+}
+
+/**
+ * The tests that skip a window of run[a, b) unread, in O(1): a window of hex
+ * digits alone, or of filler ("xxxx…", "abab…"), can hold no key. A keypair's
+ * base58 is never either (a random 64-byte value's 87 characters are all hex
+ * with odds of about 1 in 10^37), and digests, numbers and filler would
+ * otherwise spend the budget. Also the "1"s from each start (its leading zero
+ * bytes, at most 64), which set the lengths a window there can take.
+ */
+function windowTables(run: string, a: number, b: number): { ones(start: number): number; skip(start: number, end: number): boolean } {
+  const len = b - a;
+  // nonHex[i]: characters in [a, a + i) that are not hex digits. ones[i]: "1"s from a + i on, unbroken.
+  const nonHex = new Uint32Array(len + 1), ones = new Uint8Array(len + 1);
+  for (let i = 0; i < len; i++) nonHex[i + 1] = nonHex[i]! + (hexDigit(run.charCodeAt(a + i)) ? 0 : 1);
+  for (let i = len - 1; i >= 0; i--) ones[i] = run.charCodeAt(a + i) === 49 ? Math.min(ones[i + 1]! + 1, 64) : 0;
+  // breaks[k - 1][i]: positions p in [a, a + i) where run[p] differs from run[p + k] (period-k filler check).
+  const breaks = Array.from({ length: FILLER_PERIOD }, (_, j) => {
+    const br = new Uint32Array(len + 1);
+    for (let i = 0; i < len; i++) br[i + 1] = br[i]! + (i + j + 1 < len && run.charCodeAt(a + i) !== run.charCodeAt(a + i + j + 1) ? 1 : 0);
+    return br;
+  });
+  return {
+    ones: (start) => ones[start - a]!,
+    skip: (start, end) => nonHex[end - a] === nonHex[start - a] || breaks.some((br, j) => br[end - a - j - 1] === br[start - a]),
+  };
+}
+
+/** The window budget spent out, so every later sweep sharing it reads nothing. */
+function spentOut(w: WindowBudget): "spent" {
+  w.checks = 0;
+  w.decodes = 0;
+  w.starts = 0;
+  return "spent";
+}
+
+/**
+ * The first keypair among the windows of `run` that start in [from, to], in
+ * order, and end in [endMin, endMax] (`notWhole`: other than the whole run, an
+ * exact candidate read already). [start, end) when found, null when there is
+ * none, "spent" once the window budget runs out. `minLength`: the shortest a
+ * window of this run can hold a keypair in (shortestKeypairIn).
+ */
+function sweep(run: string, w: WindowBudget, from: number, to: number, endMin: number, endMax: number, minLength: number, notWhole = false): [number, number] | null | "spent" {
+  // Spent already: no tables built for a sweep that could read nothing.
+  if (w.checks <= 0 || w.decodes <= 0 || w.starts <= 0) return spentOut(w);
+  const last = Math.min(to, endMax - minLength);
+  for (let a = Math.max(from, 0); a <= last; a += SECRET_SWEEP_CHUNK) {
+    const chunkLast = Math.min(last, a + SECRET_SWEEP_CHUNK - 1);
+    const t = windowTables(run, a, Math.min(endMax, chunkLast + longestKeypair()));
+    for (let start = a; start <= chunkLast; start++) {
+      if (w.starts <= 0) return spentOut(w);
+      w.starts--;
+      const [shortest, longest] = keypairLengthsAfter(t.ones(start));
+      for (let end = Math.max(start + shortest, endMin); end <= start + longest && end <= endMax; end++) {
+        if ((notWhole && start === 0 && end === run.length) || t.skip(start, end)) continue;
+        if (w.decodes <= 0) return spentOut(w);
+        w.decodes--;
+        const bytes = base58Decode(run.slice(start, end));
+        if (bytes?.length !== 64) continue;
+        if (w.checks <= 0) return spentOut(w);
+        w.checks--;
+        if (isSolanaKeypair(bytes)) return [start, end];
+      }
     }
   }
+  return null;
+}
+
+/** "1"s a run starts with, at most 64: its leading zero bytes. */
+function leadingOnes(run: string): number {
+  let z = 0;
+  while (z < 64 && run.charCodeAt(z) === 49) z++;
+  return z;
+}
+/**
+ * The fewest characters any window of a run can hold a keypair in: the more
+ * leading "1"s a window has, the shorter it can be, so its longest stretch of
+ * "1"s decides (87 with none). A shorter run can hold no key at all.
+ */
+function shortestKeypairIn(run: string): number {
+  let most = 0;
+  for (let i = 0, ones = 0; i < run.length && most < 64; i++) most = Math.max(most, ones = run.charCodeAt(i) === 49 ? ones + 1 : 0);
+  return keypairLengthsAfter(most)[0];
+}
+
+/**
+ * Every Solana secret key in a text (solanaSecretIn), exactly as written, so a
+ * redactor can strip each one, in the order written (base58, then byte
+ * arrays). An exact candidate past the budget is returned as a secret without
+ * being read (SECRET_CANDIDATES): the whole run it is.
+ *
+ * GLUED KEYS TOO. Every maximal base58 run is read, not only one standing
+ * alone: "pk<key>", "%22<key>%22" (URL-encoded JSON), "<key>is mine",
+ * "secret:<key>x", "2<key>", "<K1><K2><K3>" and "<sig><key><sig>" each hide
+ * the key in a longer run. Every window of a run that can hold a keypair (87
+ * or 88 characters, or shorter after leading "1"s: keypairLengthsAfter) is
+ * decoded, edges first (SECRET_GLUE), while the window budget lasts
+ * (SECRET_WINDOW_CHECKS), and a keypair is recognised by its own public key,
+ * so a signature, an address or ordinary text is never one. The only false
+ * alarm is an exact candidate past its budget.
+ *
+ * FAIL CLOSED. A scan that cannot finish reads the whole text as a secret:
+ * the Telegram agent's send_file once swallowed a throw here and sent the file
+ * unscanned (review RHS, round 1).
+ */
+export function solanaSecretsIn(text: unknown, budget?: SecretScanBudget): string[] {
+  if (typeof text !== "string" || text.length < 64) return [];
+  try {
+    // A fresh scan of a short text is remembered (SECRET_MEMO_CHARS): the same answer, without the work. Not a
+    // text with no base58 run long enough to hold a key: its scan costs less than the digest.
+    const key = budget === undefined && text.length <= SECRET_MEMO_CHARS && !base58Runs(text, 64).next().done ? secretMemoKey(text) : null;
+    let spans = key === null ? undefined : secretMemo.get(key);
+    if (spans) {
+      secretMemo.delete(key!);
+      secretMemo.set(key!, spans);
+    } else {
+      spans = secretsIn(text, budget ?? secretScanBudget());
+      if (key !== null) {
+        secretMemo.set(key, spans);
+        if (secretMemo.size > SECRET_MEMO_ENTRIES) secretMemo.delete(secretMemo.keys().next().value!);
+      }
+    }
+    return spans.map(([start, end]) => text.slice(start, end));
+  } catch {
+    return [text];
+  }
+}
+
+/** Where each secret is in `text`, [start, end), in the order solanaSecretsIn returns them. */
+function secretsIn(text: string, budget: SecretScanBudget): Array<[number, number]> {
+  const w = (budget.windows ??= { checks: SECRET_WINDOW_CHECKS, decodes: SECRET_WINDOW_DECODES, starts: SECRET_WINDOW_STARTS });
+  const hits: Array<[start: number, end: number]> = [];
+  const found = (at: number, _run: string, key: [number, number]) => hits.push([at + key[0], at + key[1]]);
+  /**
+   * Runs whose windows are still to read, in the order written: longer than a
+   * keypair (`long`: any key in one is glued; [lo, hi) is what its edges left),
+   * or a keypair's length (one character of glue at most). `edge`: read with
+   * the edges (phase 1), every long run, and a run a keypair's length that is
+   * not 64 bytes as a whole, so neither a signature nor a key ("secret:<key>x"
+   * with an 87-character key): its windows are a key's edges. A signature's
+   * windows wait for phase 2, so a list of signatures cannot starve the edges.
+   */
+  const runs: Array<{ at: number; run: string; min: number; long: boolean; edge: boolean; lo: number; hi: number }> = [];
+  // 64 bytes never encode shorter than 64 characters, so a shorter run (an address) costs nothing.
+  for (const [at, end] of base58Runs(text, 64)) {
+    const run = text.slice(at, end);
+    // Nor does one too short for any window of it to be a key, or of hex alone, or filler.
+    const min = shortestKeypairIn(run);
+    if (run.length < min || hexFrom(run, 0) || filler(run)) continue;
+    const [shortest, longest] = keypairLengthsAfter(leadingOnes(run));
+    let whole64 = false;
+    if (run.length <= longest && run.length >= shortest) {
+      // EXACT: the run as it stands, as every scan before glued keys read it.
+      if (budget.left-- <= 0) {
+        hits.push([at, end]);
+        continue;
+      }
+      const bytes = base58Decode(run);
+      if (bytes?.length === 64 && isSolanaKeypair(bytes)) {
+        hits.push([at, end]);
+        continue;
+      }
+      whole64 = bytes?.length === 64;
+    }
+    const long = run.length > longest;
+    runs.push({ at, run, min, long, edge: long || !whole64, lo: 0, hi: run.length });
+  }
+  // 1. The edges, SHORTEST RUN FIRST (review RHS, round 2): a key behind a few characters of glue ("pk<key>",
+  // a run of 89 to 112 characters) before the edges of a long blob (a serialized transaction), which cost
+  // about 28 keypair checks each: in the order written, ten blobs spent the budget and left it unread.
+  // Again from the end of each key found there ("<K1><K2><K3>").
+  for (const r of runs.filter((x) => x.edge).sort((x, y) => x.run.length - y.run.length)) {
+    if (!r.long) {
+      const key = sweep(r.run, w, 0, r.run.length, 0, r.run.length, r.min, true);
+      if (Array.isArray(key)) found(r.at, r.run, key);
+      continue;
+    }
+    const left = () => sweep(r.run, w, r.lo, r.lo + SECRET_GLUE, r.lo, r.hi, r.min);
+    for (let key = left(); Array.isArray(key); key = left()) {
+      found(r.at, r.run, key);
+      r.lo = key[1];
+    }
+    // Windows ending near the end, other than those just read.
+    const right = () => sweep(r.run, w, Math.max(r.lo + SECRET_GLUE + 1, r.hi - SECRET_GLUE - longestKeypair()), r.hi, r.hi - SECRET_GLUE, r.hi, r.min);
+    for (let key = right(); Array.isArray(key); key = right()) {
+      found(r.at, r.run, key);
+      r.hi = key[0];
+    }
+  }
+  // 2. The rest, in the order written: inside a run a keypair's length that is 64 bytes whole, a key behind or
+  // before one character ("2<key>"); inside a long run past its edges, a key glued on both sides ("<sig><key><sig>").
+  for (const r of runs) {
+    if (!r.long) {
+      if (r.edge) continue;
+      const key = sweep(r.run, w, 0, r.run.length, 0, r.run.length, r.min, true);
+      if (Array.isArray(key)) found(r.at, r.run, key);
+      continue;
+    }
+    const inside = (from: number) => sweep(r.run, w, from, r.hi, 0, r.hi - SECRET_GLUE - 1, r.min);
+    for (let key = inside(r.lo + SECRET_GLUE + 1); Array.isArray(key); key = inside(key[1])) found(r.at, r.run, key);
+  }
+  const secrets = hits.sort((x, y) => x[0] - y[0]);
   for (const m of text.matchAll(BYTE_ARRAY_64)) {
-    if (budget.left-- <= 0) found.push(m[0]);
+    const span: [number, number] = [m.index, m.index + m[0].length];
+    if (budget.left-- <= 0) secrets.push(span);
     else {
       const nums = m[0].slice(1, -1).split(",").map((x) => Number(x.trim()));
-      if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) found.push(m[0]);
+      if (nums.length === 64 && isSolanaKeypair(Uint8Array.from(nums))) secrets.push(span);
     }
   }
-  return found;
+  return secrets;
 }

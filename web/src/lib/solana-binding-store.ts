@@ -138,15 +138,52 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
     if (saved.changes !== 1) throw new SolanaBindingError("stale");
     return (await this.get(tenant))!;
   }
+  /**
+   * THE KILL PATHS' DATABASE, or null when Solana was never used here.
+   *
+   * Robinhood's "kill all agents" and Telegram /kill call the two methods
+   * below for every tenant, MERRYMEN_SOLANA on or off. database() writes the
+   * schema (under an advisory lock on Postgres), so a kill would create Solana
+   * tables in a production database that never ran Solana, and a fault there
+   * would report a Robinhood kill incomplete. So the table and its
+   * strategy_json column are looked up first, read-only, with no lock and no
+   * DDL (to_regclass and pg_attribute on Postgres, which resolve the
+   * unqualified name on this connection's search path as every query here
+   * does; sqlite_master and pragma_table_info on SQLite). Either absent, no
+   * strategy can exist and there is nothing to stop. Both present, the kill
+   * runs on the connection as it is: it needs only UPDATE and SELECT, and
+   * database()'s ALTER TABLE takes an ACCESS EXCLUSIVE lock that waits behind
+   * every open reader of the table (review RHS, round 1: 3 s and a statement
+   * timeout behind one read transaction). The lookup runs on every kill, even
+   * once this process has started database(): a kill never awaits that schema
+   * step, so neither its advisory lock nor its failure holds up or fails a
+   * kill (review RHS, round 2). Two catalog reads cost little. One wait is
+   * PostgreSQL's own: an ALTER already sent and queued for its lock queues the
+   * kill's row lock behind it, from this process or any other. A failure of
+   * the kill's own statements still fails the kill.
+   */
+  private async killDb(): Promise<Db | null> {
+    const db = await this.connect();
+    const row = await db.prepare(this.dialect === "postgres"
+      ? `SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found, EXISTS (SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass('solana_wallet_bindings') AND attname = 'strategy_json' AND NOT attisdropped) AS strategy`
+      : `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'solana_wallet_bindings') AS found,
+          EXISTS (SELECT 1 FROM pragma_table_info('solana_wallet_bindings') WHERE name = 'strategy_json') AS strategy`).get() as { found?: unknown; strategy?: unknown } | undefined;
+    const yes = (value: unknown) => value === true || value === 1;
+    return yes(row?.found) && yes(row?.strategy) ? db : null;
+  }
   async strategyTenants(): Promise<`0x${string}`[]> {
-    const rows = await (await this.database()).prepare("SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL ORDER BY tenant").all() as Array<{ tenant: string }>;
+    const db = await this.killDb();
+    if (!db) return [];
+    const rows = await db.prepare("SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL ORDER BY tenant").all() as Array<{ tenant: string }>;
     return rows.map((row) => { tenantKey(row.tenant); return row.tenant; });
   }
   async disableForKill(tenant: `0x${string}`): Promise<boolean> {
     tenantKey(tenant);
     const nowMs = this.now();
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new SolanaBindingError("invalid");
-    const db = await this.database();
+    const db = await this.killDb();
+    if (!db) return false;
     return db.tx(async (tx) => {
       // The same row lock trade admission takes. The revision bump below fences
       // any autonomous admission already in flight, whatever revision it read.

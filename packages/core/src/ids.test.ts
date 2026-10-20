@@ -23,12 +23,14 @@ import {
   secretScanBudget,
   solanaSecretIn,
   solanaSecretsIn,
+  type SecretScanBudget,
 } from "./ids";
 import { CASH } from "./tokens";
 
 const EVM = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const EVM_HASH = `0x${"Ab".repeat(32)}`;
 const SYSTEM_PROGRAM = "11111111111111111111111111111111";
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /** A real ed25519 keypair, its base58 secret, and a real signature by it. */
 function keypair(seedByte: number) {
@@ -294,6 +296,12 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     return { ok: false, how };
   }
 
+  it("finishes on a run of millions of characters (review RHS, round 1: the run regex threw RangeError)", () => {
+    const run = "a".repeat(6_000_000);
+    assert.deepEqual(onchainIdsIn(`${run} ${SOLANA_USDG_MINT}`, glued).map((h) => h.value), [SOLANA_USDG_MINT]);
+    assert.deepEqual(onchainIdsIn(`${run}${SOLANA_USDG_MINT}`, glued).map((h) => h.value.length), [run.length + SOLANA_USDG_MINT.length], "glued to its end: the whole run");
+  });
+
   it("reads a megabyte of long base58 runs in linear time and fails closed past its budget", () => {
     // Runs that hold no 43- or 44-character key window (short of one, or hex alone), and runs that hold a signature.
     const noKeyRun = (i: number) => (i % 3 ? "1" + "z".repeat(31 + (i % 10)) : "abcdef12345".repeat(9));
@@ -352,6 +360,36 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
 });
 
 describe("Solana secret detection", () => {
+  /**
+   * A RUNAWAY SECRET SCAN FAILS BY NAME, as gluedScanFinishes does for the glued id scan: node:test
+   * cannot stop synchronous code, so run here, a scan that never returns hangs the suite and names no
+   * test. This runs solanaSecretsIn over `texts` in a child limited to SECRET_RUNAWAY_CPU_SECONDS of
+   * CPU time (ulimit -t: what the child spent, never what a loaded machine took from it), with a
+   * wall-clock backstop well past that. A healthy run costs about 1.5 s of CPU, tsx startup included.
+   */
+  const SECRET_RUNAWAY_CPU_SECONDS = 20;
+  function secretScanFinishes(texts: string[]): { ok: boolean; how: string } {
+    const script = [
+      'import { readFileSync } from "node:fs";',
+      `const { solanaSecretsIn } = await import(${JSON.stringify(new URL("./ids.ts", import.meta.url).href)});`,
+      'for (const text of JSON.parse(readFileSync(0, "utf8"))) solanaSecretsIn(text);',
+      'process.stdout.write("scanned");',
+    ].join("\n");
+    const node = [process.execPath, "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script];
+    const [file, ...args] = process.platform === "win32" ? node : ["/bin/sh", "-c", `ulimit -t ${SECRET_RUNAWAY_CPU_SECONDS} && exec "$@"`, "sh", ...node];
+    const child = spawnSync(file!, args, { input: JSON.stringify(texts), encoding: "utf8", timeout: 20 * SECRET_RUNAWAY_CPU_SECONDS * 1_000 });
+    if (child.status === 0 && child.stdout === "scanned") return { ok: true, how: "scanned" };
+    const how = child.error ? String(child.error) : child.signal ? `stopped by ${child.signal}` : `exit ${child.status}: ${child.stderr.slice(-400)}`;
+    return { ok: false, how };
+  }
+  /** Milliseconds of CPU time (user + system) `fn` spent in this process: what it cost, not what others took. */
+  const cpuMsOf = (fn: () => unknown): number => {
+    const started = process.cpuUsage();
+    fn();
+    const spent = process.cpuUsage(started);
+    return (spent.user + spent.system) / 1_000;
+  };
+
   it("flags a keypair as base58 or as an id.json byte array", () => {
     const { secret, secretB58 } = keypair(11);
     assert.equal(isSolanaKeypair(secret), true);
@@ -391,33 +429,208 @@ describe("Solana secret detection", () => {
       `[${Array(64).fill("10").join(",")}`,
       `${"[11,".repeat(2_000)}999]`,
     ];
-    const started = performance.now();
-    for (const text of nearMisses) assert.deepEqual(solanaSecretsIn(text), []);
-    assert.ok(performance.now() - started < 250, `took ${Math.round(performance.now() - started)} ms`);
+    // First, in a child the runner can stop: an exponential scan never returns, so run here it would hang
+    // the suite instead of failing (the old pattern ran a mutant past four minutes of CPU on these texts).
+    const runaway = secretScanFinishes(nearMisses);
+    assert.ok(runaway.ok, `the secret scan did not finish the near misses within ${SECRET_RUNAWAY_CPU_SECONDS} s of CPU time (${runaway.how})`);
+    // Then CPU time here (process.cpuUsage, user + system), never a wall clock: a loaded runner takes
+    // time from this process, not CPU. A scan that finishes but slowly (quadratic) fails this bound.
+    const spent = cpuMsOf(() => { for (const text of nearMisses) assert.deepEqual(solanaSecretsIn(text), []); });
+    assert.ok(spent < 250, `took ${Math.round(spent)} ms of CPU time`);
   });
 
   it("caps the candidates it reads, and counts what it did not read as a secret", () => {
     const distinct = Array.from({ length: 150 }, (_, i) => keypair(i).sig);
     const sigs = [...distinct, ...distinct];
     const { secretB58 } = keypair(29);
+    // An exact candidate is a whole run that can be a keypair, so a standalone signature is one and the
+    // 257th is the first refused, as before glued keys were read: the windows inside a signature (a key
+    // glued to one character) are read best effort and never refuse anything (review RHS, round 1).
+    const budget = secretScanBudget();
+    let read = 0;
+    while (read < sigs.length && !solanaSecretIn(sigs[read], budget)) read++;
+    assert.equal(read, 256, `read ${read} signatures before the cap`);
+    assert.equal(solanaSecretIn(sigs[read + 1], budget), true, "scans sharing a budget are capped together");
+    assert.deepEqual(solanaSecretsIn(sigs.slice(0, read).join(" ")), [], "up to the cap, signatures stay signatures");
     const found = solanaSecretsIn([...sigs, secretB58].join(" "));
-    assert.equal(found.length, 300 - 256 + 1, "the first 256 are read; the rest, the key included, are refused unread");
-    assert.equal(found.at(-1), secretB58, "a key past the cap is never let through");
-    assert.deepEqual(solanaSecretsIn(sigs.slice(0, 256).join(" ")), [], "up to the cap, signatures stay signatures");
+    assert.deepEqual(found, [...sigs.slice(read), secretB58], "the rest, the key included, are refused unread, each whole");
     const addresses = Array.from({ length: 1_000 }, (_, i) => keypair(i % 150).pub).join(" ");
     assert.deepEqual(solanaSecretsIn(`${addresses} ${secretB58}`), [secretB58], "an address is too short to be a candidate");
+  });
 
+  it("finds a key glued to letters or digits, and returns only the key, as written", () => {
+    // audit: 'pk<K>', '%22<K>%22', '<K>is mine' and 'secret:<K>x' were each read as no secret.
+    const { secretB58: key } = keypair(31);
+    const { secretB58: other, sig } = keypair(37);
+    const { secretB58: third } = keypair(43);
+    const fromSeed = (seed: Uint8Array) => base58Encode(Uint8Array.from([...seed, ...ed25519.getPublicKey(seed)]));
+    // A seed with a leading zero byte encodes one character shorter, after a "1"; an all-zero seed, after 32.
+    const oneZero = fromSeed(Uint8Array.from({ length: 32 }, (_, i) => i));
+    const allZero = fromSeed(new Uint8Array(32));
+    assert.ok(oneZero.startsWith("1") && !oneZero.startsWith("11") && oneZero.length < 87 && allZero.startsWith("1".repeat(32)));
+    for (const [text, keys, why] of [
+      [`pk${key}`, [key], "a prefix"],
+      [`%22${key}%22`, [key], "URL-encoded JSON quotes"],
+      [`${key}is mine`, [key], "a word after it"],
+      [`secret:${key}x`, [key], "one letter after it"],
+      [`0${key}`, [key], "a digit outside base58 before it (the old scan read no id against it)"],
+      [`l${key}O`, [key], "letters outside base58 either side"],
+      [`thekeyforthisaccountwas${key}`, [key], "glue of any length on one side"],
+      [`${key}${other}`, [key, other], "two keys written together"],
+      [`pk${oneZero}x`, [oneZero], "a key that begins with a zero byte"],
+      [`ab${allZero}cd`, [allZero], "a key of 32 zero bytes and its public key"],
+      [`${"a".repeat(12)}${key}${"b".repeat(12)}`, [key], "twelve characters of glue either side"],
+      // Review RHS, round 1: past twelve characters either side, and between keys, a key went unread.
+      [`${"a".repeat(13)}${key}${"b".repeat(13)}`, [key], "thirteen characters of glue either side"],
+      [`mysecretkeyis${key}thankyoumybro`, [key], "words glued either side"],
+      [`hereismyprivatekey${key}dontsharethiswithanyone`, [key], "eighteen and twenty-three characters of glue"],
+      [`${"x".repeat(40)}${key}${"y".repeat(40)}`, [key], "forty characters of glue either side"],
+      [`${sig}${key}${sig}`, [key], "between two signatures"],
+      [`${key}${other}${third}`, [key, other, third], "three keys written together"],
+      [`pk${key}${other}${third}x`, [key, other, third], "three keys written together, glued"],
+      [`${sig}${other}${key}${third}${sig}`, [other, key, third], "three keys between two signatures"],
+    ] as const) {
+      assert.deepEqual(solanaSecretsIn(text), keys, why);
+      for (const k of keys) assert.ok(text.includes(k));
+    }
+    // A key behind one base58 digit can decode, whole, to 64 bytes that are no keypair: the window still is one.
+    let glued = "";
+    for (let i = 1; i < 256 && !glued; i++) {
+      const k = keypair(i).secretB58;
+      if (k.length === 87 && base58Decode(`2${k}`)?.length === 64) glued = k;
+    }
+    assert.ok(glued, "a key whose '2<key>' decodes to 64 bytes");
+    assert.deepEqual(solanaSecretsIn(`2${glued}`), [glued]);
+    // A signature glued to words stays a signature, and so does ordinary text.
+    assert.deepEqual(solanaSecretsIn(`landed tx${sig}done`), []);
+    assert.deepEqual(solanaSecretsIn(`#${"ToTheMoonAndBackAgainAndAgainForeverAndEverFam".repeat(4)}`), []);
+  });
+
+  it("reads the windows inside runs best effort: the edges of every run first, then the rest in order, never refusing", () => {
+    // A DECISION AWAITING MILLA'S SIGN-OFF (review RHS, rounds 1 and 2; ids.ts SECRET_WINDOW_CHECKS): every window
+    // of every run is read while the window budget lasts, and past it a window goes unread instead of refusing
+    // the text. 200 signatures spend that budget (an
+    // 88-character signature holds two 87-character windows, a key behind or before one character), as a
+    // notebook's base64 does, yet stay under the exact cap.
+    const list = Array.from({ length: 200 }, (_, i) => keypair(i).sig).join("\n");
+    const { secretB58: key } = keypair(59);
+    const { sig } = keypair(61);
+    const spent = secretScanBudget();
+    assert.deepEqual(solanaSecretsIn(list, spent), []);
+    assert.equal(spent.windows?.checks, 0, "the list alone spends the window budget");
+    assert.ok(spent.left > 0, "and not the exact one");
+    assert.deepEqual(solanaSecretsIn(`${list}\npk${key}`), [key], "an edge window is read before any signature's windows");
+    // Review RHS, round 2: the edge's WIDTH. A key a few characters in from both ends of its run, after the list
+    // has spent the window budget, is found at the edges; with no edge width (SECRET_GLUE 0) it went unread.
+    assert.deepEqual(solanaSecretsIn(`${list}\npk${key}is`), [key], "two characters of glue either side");
+    assert.deepEqual(solanaSecretsIn(`${list}\n${"a".repeat(12)}${key}${"b".repeat(12)}`), [key], "twelve either side: the whole edge");
+    assert.deepEqual(solanaSecretsIn(`${sig}${key}${sig}\n${list}`), [key], "a deep window written first is read");
+    assert.deepEqual(solanaSecretsIn(`${list}\n${sig}${key}${sig}`), [], "written after, it goes unread: missed, and nothing is refused");
+    assert.deepEqual(solanaSecretsIn(`${list}\n${key}`), [key], "a key standing alone is an exact candidate, read whatever the windows spent");
+  });
+
+  it("reads the edges of the shortest runs first, so long blobs cannot starve a key with a little glue", () => {
+    // Review RHS, round 2: the edges were read in the order written. Ten random base58 runs of 300 characters
+    // (serialized transactions in a log) spent the window budget on their own edges, about 28 checks each, and
+    // 'pk<key>' or 'secret:<key>x' after them went unread. With an 87-character key, 'secret:<key>x' is a run a
+    // keypair's length, read only after every edge: missed after a single blob.
+    let x = 0x9e3779b9;
+    const blob = () => Array.from({ length: 300 }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join("");
+    const blobs = Array.from({ length: 20 }, blob).join("\n");
+    const spent = secretScanBudget();
+    assert.deepEqual(solanaSecretsIn(blobs, spent), []);
+    assert.equal(spent.windows?.checks, 0, "the blobs alone spend the window budget");
+    const keys = { long: "", short: "" };
+    for (let i = 1; i < 256 && (!keys.long || !keys.short); i++) {
+      const k = keypair(i).secretB58;
+      if (k.length === 88) keys.long ||= k;
+      else if (k.length === 87 && base58Decode(`${k}x`)?.length !== 64) keys.short ||= k;
+    }
+    assert.ok(keys.long && keys.short, "an 88- and an 87-character key");
+    for (const key of [keys.long, keys.short]) {
+      for (const [text, why] of [
+        [`${blobs}\nexport PK=pk${key}`, "a prefix"],
+        [`${blobs}\nsecret:${key}x`, "one letter after it"],
+        [`${blobs}\n${"a".repeat(12)}${key}${"b".repeat(12)}`, "twelve characters of glue either side"],
+        [`pk${key}\n${blobs}`, "written first"],
+      ] as const) assert.deepEqual(solanaSecretsIn(text), [key], `${why}, ${key.length}-character key`);
+    }
+    // Still best effort: a key glued to a blob's edge, in a run longer than all twenty blobs, waits behind them.
+    assert.deepEqual(solanaSecretsIn(`${blobs}\n${blob()}${keys.long}`), [], "missed, and nothing is refused");
+  });
+
+  it("remembers a fresh scan of a short text, never a scan handed a budget, and answers as before", () => {
+    // Review RHS, round 2: the group chat quotes the same stored lines in every prompt it builds, and the windows
+    // of a 400-character line of random base58 cost about 256 keypair checks every time.
+    let x = 0x7f4a7c15;
+    const random = (n: number) => Array.from({ length: n }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join("");
+    const line = random(400);
+    const first = cpuMsOf(() => assert.deepEqual(solanaSecretsIn(line), []));
+    let again = Infinity;
+    for (let round = 0; round < 3; round++) again = Math.min(again, cpuMsOf(() => assert.deepEqual(solanaSecretsIn(line), [])));
+    assert.ok(again < 5 && again < first / 4, `first scan ${first.toFixed(2)} ms, again ${again.toFixed(2)} ms of CPU time`);
+    // A scan handed a budget reads the text itself, and spends that budget, remembered or not.
     const budget = secretScanBudget();
-    for (const sig of sigs.slice(0, 256)) assert.equal(solanaSecretIn(sig, budget), false);
-    assert.equal(solanaSecretIn(sigs[256], budget), true, "scans sharing a budget are capped together");
+    assert.deepEqual(solanaSecretsIn(line, budget), []);
+    assert.ok(budget.windows!.checks < secretScanBudget().windows!.checks, "the windows were read and counted");
+    // A remembered answer is the same answer: each secret as written, in a fresh array every time.
+    const { secretB58: key } = keypair(79);
+    const { secretB58: other } = keypair(83);
+    const array = `[${[...keypair(89).secret].join(",")}]`;
+    const text = `${random(30)} pk${key}is ${other} ${array}`;
+    const answer = solanaSecretsIn(text);
+    assert.deepEqual(answer, [key, other, array]);
+    answer.push("changed by a caller");
+    assert.deepEqual(solanaSecretsIn(text), [key, other, array]);
+    assert.equal(solanaSecretIn(text), true);
+    assert.deepEqual(solanaSecretsIn(`${text} `), [key, other, array], "a different text is its own scan");
+  });
+
+  it("reads exact candidates only when asked, for a caller that replaces every glued run itself", () => {
+    const { secretB58: key, secret } = keypair(97);
+    const exact = () => secretScanBudget({ windows: false });
+    assert.deepEqual(solanaSecretsIn(`key ${key}`, exact()), [key]);
+    assert.deepEqual(solanaSecretsIn(`[${[...secret].join(",")}]`, exact()).length, 1);
+    assert.deepEqual(solanaSecretsIn(`pk${key}`, exact()), [], "no window is read");
+    assert.deepEqual(solanaSecretsIn(`pk${key}`), [key], "as the default scan does");
+    let x = 0x3c6ef372;
+    const lines = Array.from({ length: 30 }, () => Array.from({ length: 400 }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join(""));
+    const spent = cpuMsOf(() => { for (const l of lines) assert.deepEqual(solanaSecretsIn(l, exact()), []); });
+    assert.ok(spent < 50, `30 fresh 400-character lines, exact only: ${spent.toFixed(1)} ms of CPU time`);
+  });
+
+  it("never refuses base64 for the base58 runs inside it", () => {
+    // Review RHS, round 1: with every window refused past the budget, random bytes as base64 in an .ipynb were
+    // refused from about 800 KB (1 in 10) and always from 2 MB, so send_file refused notebooks and images.
+    let x = 0x2545f491;
+    const random = (n: number) => Uint8Array.from({ length: n }, () => (x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 24);
+    for (const size of [1_500_000, 6_000_000]) {
+      const notebook = JSON.stringify({ cells: [{ outputs: [{ data: { "image/png": Buffer.from(random(size)).toString("base64") } }] }] });
+      assert.deepEqual(solanaSecretsIn(notebook), [], `${notebook.length} characters of notebook`);
+    }
+  });
+
+  it("finishes on a run of millions of characters, and reads a scan that cannot finish as a secret", () => {
+    // Review RHS, round 1: the run regex threw RangeError (out of stack) from about 5.6 million characters,
+    // and send_file swallowed the throw and sent the file unscanned.
+    const { secretB58: key } = keypair(67);
+    const run = "a".repeat(6_000_000);
+    assert.deepEqual(solanaSecretsIn(`${run} ${key}`), [key]);
+    assert.deepEqual(solanaSecretsIn(`${run}${key}`), [key], "glued to its end");
+    const mixed = Array.from({ length: 6_000_000 }, (_, i) => "ABCDEFGHJKLMNPQRSTUVWXYZghijkmnopqrstuvwxyz"[(i * 7919) % 42]).join("");
+    assert.deepEqual(solanaSecretsIn(`${mixed} ${key}`), [key], "a run that spends the window budget");
+    const text = `id: ${key}`;
+    const overflow = (): never => { throw new RangeError("Maximum call stack size exceeded"); };
+    const broken = { get left(): number { return overflow(); }, set left(_: number) {}, get windows(): never { return overflow(); } };
+    assert.deepEqual(solanaSecretsIn(text, broken as SecretScanBudget), [text], "fails closed, the whole text");
+    assert.equal(solanaSecretIn(`a signature, no secret: ${keypair(71).sig}`, broken as SecretScanBudget), true);
   });
 
   it("reads a megabyte of key-shaped text in bounded time", () => {
     const runs = Array.from({ length: 64 }, (_, i) => base58Encode(Uint8Array.from({ length: 64 }, (_, j) => (i * 7 + j * 13 + 1) % 256)));
     const text = Array.from({ length: 12_000 }, (_, i) => (i % 2 ? runs[i % 64] : `[${Array(64).fill(i % 200).join(",")}]`)).join(" ");
     assert.ok(text.length > 1_000_000);
-    const started = performance.now();
-    assert.equal(solanaSecretIn(text), true, "past the cap it fails closed");
-    assert.ok(performance.now() - started < 1_000, `took ${Math.round(performance.now() - started)} ms`);
+    const spent = cpuMsOf(() => assert.equal(solanaSecretIn(text), true, "past the cap it fails closed"));
+    assert.ok(spent < 1_000, `took ${Math.round(spent)} ms of CPU time`);
   });
 });

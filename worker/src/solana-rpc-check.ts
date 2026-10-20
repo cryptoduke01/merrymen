@@ -1,5 +1,8 @@
+import { guardStdio } from "./redact-stdio";
 import { probeSolanaMainnetRpc, readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
 
+// First, before anything can print: a keyed RPC URL never reaches stdout or stderr (#347).
+guardStdio();
 try {
   const result = await probeSolanaMainnetRpc(readSolanaMainnetRpcConfig());
   console.log(`Solana RPC: ${result.cluster} identity verified; healthy; finalized slot ${result.slot}.`);
