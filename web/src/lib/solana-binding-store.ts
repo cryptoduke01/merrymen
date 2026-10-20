@@ -154,11 +154,15 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
    * runs on the connection as it is: it needs only UPDATE and SELECT, and
    * database()'s ALTER TABLE takes an ACCESS EXCLUSIVE lock that waits behind
    * every open reader of the table (review RHS, round 1: 3 s and a statement
-   * timeout behind one read transaction). Once this process has set the
-   * schema up, database() answers at once. A failure still fails the kill.
+   * timeout behind one read transaction). The lookup runs on every kill, even
+   * once this process has started database(): a kill never awaits that schema
+   * step, so neither its advisory lock nor its failure holds up or fails a
+   * kill (review RHS, round 2). Two catalog reads cost little. One wait is
+   * PostgreSQL's own: an ALTER already sent and queued for its lock queues the
+   * kill's row lock behind it, from this process or any other. A failure of
+   * the kill's own statements still fails the kill.
    */
   private async killDb(): Promise<Db | null> {
-    if (this.ready) return this.ready;
     const db = await this.connect();
     const row = await db.prepare(this.dialect === "postgres"
       ? `SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found, EXISTS (SELECT 1 FROM pg_attribute

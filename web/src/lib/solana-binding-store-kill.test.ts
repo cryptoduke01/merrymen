@@ -96,11 +96,48 @@ test("a PostgreSQL kill looks the table and its column up in the catalog, and ne
   assert.deepEqual(await store.strategyTenants(), []);
   assert.deepEqual(writes(sql), ["UPDATE solana_wallet_bindings SET revision = revision WHERE tenant = ?"]);
   assert.ok(sql.some((s) => /^SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL/.test(s)));
-  // Set up by this process (a Solana route ran first): its schema step, once, then no catalog lookup.
+  // Set up by this process (a Solana route ran first): the kill still looks the table up, and never reruns the
+  // schema step (review RHS, round 2: a kill no longer reuses that step's promise).
   await store.get(TENANT);
   const before = sql.length;
   assert.equal(await store.disableForKill(TENANT), false);
-  assert.ok(sql.slice(before).every((s) => !/to_regclass|pg_advisory|CREATE|ALTER/.test(s)), sql.slice(before).join("\n"));
+  assert.ok(/to_regclass/.test(sql[before]!), sql.slice(before).join("\n"));
+  assert.ok(sql.slice(before).every((s) => !/pg_advisory|CREATE|ALTER/.test(s)), sql.slice(before).join("\n"));
+});
+
+test("a kill never waits on, or fails with, this process's own schema step still in flight", async () => {
+  // Review RHS, round 2: killDb returned database()'s promise whenever it was set, so a kill that landed while a
+  // Solana route in this process was still setting up waited for that step (its advisory lock, then an ALTER
+  // TABLE queued behind every open reader of the table), and failed when the step failed.
+  const sql: string[] = [];
+  let fail!: (error: Error) => void;
+  const altering = new Promise<void>((_, reject) => { fail = reject; });
+  altering.catch(() => {});
+  const db: Db = {
+    prepare: (text) => {
+      sql.push(text);
+      return { run: async () => ({ changes: 0, lastInsertRowid: 0 }), get: async () => (/to_regclass/.test(text) ? { found: true, strategy: true } : undefined), all: async () => [] };
+    },
+    // The schema step's ALTER waits for its ACCESS EXCLUSIVE lock until the test ends it.
+    exec: async (text) => { sql.push(text); if (/^ALTER/.test(text)) await altering; },
+    tx: async (fn) => fn(db),
+  };
+  const store = new SqlSolanaBindingStore(async () => db, "postgres", () => NOW);
+  const setup = store.get(TENANT);
+  setup.catch(() => {});
+  const turns = async (until: () => boolean) => { for (let i = 0; i < 50 && !until(); i++) await new Promise((resolve) => setImmediate(resolve)); };
+  await turns(() => sql.some((s) => /^ALTER/.test(s)));
+  assert.ok(sql.some((s) => /^ALTER/.test(s)), "the schema step is waiting on its ALTER");
+  let answered: boolean | null = null;
+  const kill = store.disableForKill(TENANT).then((stopped) => { answered = stopped; return stopped; });
+  const tenants = store.strategyTenants();
+  await turns(() => answered !== null);
+  assert.equal(answered, false, "the kill answered while the schema step still waited for its lock");
+  assert.deepEqual(await tenants, []);
+  fail(new Error("canceling statement due to statement timeout"));
+  await assert.rejects(setup, /statement timeout/);
+  assert.equal(await kill, false, "and the schema step's failure is not the kill's");
+  assert.equal(await store.disableForKill(TENANT), false, "nor does a later kill wait on, or fail with, it");
 });
 
 test("on SQLite too, a table without strategy_json has nothing to stop, and a kill never adds the column", async (t) => {

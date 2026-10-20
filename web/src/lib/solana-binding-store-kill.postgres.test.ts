@@ -121,6 +121,28 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
       } finally { await holder.query("ROLLBACK"); }
       assert.equal((await owner.get(TENANT))!.strategy!.enabled, false);
     });
+
+    await t.test("a kill in a process whose own schema step waits on another's schema lock neither waits nor fails with it", async () => {
+      // Review RHS, round 2: killDb returned this store's schema-step promise once a Solana route had started it,
+      // so this kill waited on the advisory lock held below and failed with that step's statement timeout (3 s).
+      const owner = new SqlSolanaBindingStore(() => makePgDb(scoped("owner3")), "postgres", () => NOW + 4);
+      const before = (await owner.get(TENANT))!;
+      await owner.strategy(TENANT, OWNER, before.revision, strategy);
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock($1)", [ADVISORY]);
+      const store = new SqlSolanaBindingStore(() => makePgDb(scoped("store3")), "postgres", () => NOW + 5);
+      let setup: Promise<unknown> | null = null;
+      try {
+        setup = store.get(TENANT); // its schema step now waits for the advisory lock
+        setup.catch(() => {});
+        const started = Date.now();
+        assert.deepEqual(await store.strategyTenants(), [TENANT]);
+        assert.equal(await store.disableForKill(TENANT), true);
+        assert.ok(Date.now() - started < 2_500, `the kill took ${Date.now() - started} ms, as if it waited on the schema lock`);
+      } finally { await holder.query("ROLLBACK"); }
+      await setup;
+      assert.equal((await owner.get(TENANT))!.strategy!.enabled, false);
+    });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
