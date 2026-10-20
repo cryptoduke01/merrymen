@@ -733,6 +733,38 @@ async function dustBook(f: Awaited<ReturnType<typeof fixture>>) {
       minOutAmount: "0", slippageBps: 100, contextSlot: 1000, quotedAtMs: f.clock.value } };
   return { service, dust, buy, before, input };
 }
+/**
+ * PostgreSQL only: a transaction holding the tenant's binding row lock and its paper book row.
+ * releaseWhenWaiting(n) commits it once n other backends wait on a lock in this test's schema
+ * (or directly on it), and fails if they never do.
+ */
+async function holdBookLocks(db: Db) {
+  const schema = String((await db.prepare("SELECT current_schema() AS s").get() as { s: string }).s);
+  let started!: (pid: number) => void, release!: () => void;
+  const pid = new Promise<number>(resolve => { started = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const held = db.tx(async tx => {
+    await tx.prepare("UPDATE solana_wallet_bindings SET revision=revision WHERE tenant=? AND owner=? AND chain=?").run(TENANT, OWNER, CHAINS.solana);
+    await tx.prepare("UPDATE solana_runtime_paper_books SET book_json=book_json WHERE tenant=? AND owner=?").run(TENANT, OWNER);
+    started(Number((await tx.prepare("SELECT pg_backend_pid() AS pid").get() as { pid: number }).pid));
+    await gate;
+  });
+  const holderPid = await Promise.race([pid, held.then(() => assert.fail("the lock holder finished early"))]);
+  const waiting = async () => Number((await db.prepare(`SELECT count(DISTINCT a.pid) AS n FROM pg_stat_activity a
+    WHERE a.pid <> pg_backend_pid() AND a.wait_event_type = 'Lock' AND (? = ANY(pg_blocking_pids(a.pid)) OR EXISTS (
+      SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE l.pid = a.pid AND NOT l.granted AND n.nspname = ?))`).get(holderPid, schema) as { n: number | string }).n);
+  return {
+    async releaseWhenWaiting(count: number) {
+      try {
+        const deadline = Date.now() + 10_000;
+        while (await waiting() < count) {
+          if (Date.now() > deadline) assert.fail(`fewer than ${count} transactions ever waited on the held locks`);
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      } finally { release(); await held; }
+    },
+  };
+}
 const bookCode = (code: SolanaPaperStoreError["code"]) => (error: unknown) => error instanceof SolanaPaperStoreError && error.code === code;
 for (const dialect of ["sqlite", "postgres"] as const) {
   const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
@@ -762,7 +794,15 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   });
   test(`${dialect}: two write-offs of the same lot at once apply exactly one`, options, async t => {
     const f = await fixture(t, dialect), d = await dustBook(f);
-    const results = await Promise.allSettled([f.store.paper().writeOff!(d.input), f.store.paper().writeOff!(d.input)]);
+    // SQLite runs one transaction at a time, so there the version check alone decides. On
+    // PostgreSQL a third transaction holds the tenant binding row and the book row until both
+    // write-offs are waiting on it, so both start before either can finish: under the binding
+    // lock the second reads the first's book and is refused by version; without the lock both
+    // read the same book, and the compare-and-set (or nothing) decides instead.
+    const holder = dialect === "postgres" ? await holdBookLocks(f.db) : null;
+    const settled = Promise.allSettled([f.store.paper().writeOff!(d.input), f.store.paper().writeOff!(d.input)].map(p => Promise.resolve(p)));
+    if (holder) await holder.releaseWhenWaiting(2);
+    const results = await settled;
     assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
     const refused = results.find(r => r.status === "rejected") as PromiseRejectedResult;
     assert.ok(bookCode("version_conflict")(refused.reason), String(refused.reason));
