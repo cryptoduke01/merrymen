@@ -175,7 +175,14 @@ With a Privy embedded wallet the new identity holds the key only if it was
 exported and imported; otherwise use the original login.
 
 The distinct house fee payer pays swap fees and temporary-account rent. It must
-differ from every owner and session and receives no custody authority.
+differ from every owner and session and receives no custody authority. Because
+it pays every tenant's swaps, a live trade must be worth at least 1 USDG at the
+independent reference price (`SOLANA_LIVE_MIN_TRADE_USDG_RAW`), checked at
+durable admission; a sale of the whole recorded SOL position is exempt so a
+position that fell below it can still be exited, and the autonomous strategy
+treats a smaller live rebalance as in band. Paper trades have no minimum. The
+platform's spend per tenant stays bounded by `maxOpsPerDay` swaps a day; there
+is no per-tenant fee budget.
 Owner-signed setup and recovery transactions use the owner as payer.
 
 ## Custody, limits and buy breakers

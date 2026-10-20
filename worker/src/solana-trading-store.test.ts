@@ -454,39 +454,39 @@ test("finalized and failed attempts consume the daily operation cap and successf
 });
 
 test("by default a proven-expired attempt counts toward maxOpsPerDay like any signed transaction (owner decision, audit G2-3)", async t => {
-  const f = await fixture(t), first = submission(); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
-  await f.store.recordSigned(first); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
-  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  const f = await fixture(t), first = tenUsdgBuy(); await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
+  await f.store.recordSigned(first); await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
+  const book = TEN_BOOK;
   // One executed operation of two; the first exit is dropped and proven expired: the session key signed two.
-  const dropped = sale("exit-1", "1", "1000000", book); assert.equal(await f.store.recordSigned(dropped), true);
+  const dropped = sale("exit-1", "1", "10000000", book); assert.equal(await f.store.recordSigned(dropped), true);
   await f.store.settle(OWNER, dropped.intent.requestId, dropped.signature, expired(dropped));
-  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book)), /expired without landing in the last 24 hours: they count toward the daily operation limit/);
+  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "10000000", book)), /expired without landing in the last 24 hours: they count toward the daily operation limit/);
   assert.equal((await f.store.pending()).length, 0);
   // An explicit allowance of 0 is the same; a malformed one admits nothing.
-  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book), { expiredAttemptAllowance: 0 }), /expired without landing/);
+  await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "10000000", book), { expiredAttemptAllowance: 0 }), /expired without landing/);
   for (const bad of [-1, 97, 1.5, Number.NaN]) {
-    await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "1000000", book), { expiredAttemptAllowance: bad }), /allowance setting is misconfigured/, String(bad));
+    await assert.rejects(f.store.recordSigned(sale("exit-2", "1", "10000000", book), { expiredAttemptAllowance: bad }), /allowance setting is misconfigured/, String(bad));
   }
   // Later, the dropped attempt leaves the window and trading resumes.
   f.clock.value = NOW + 86_400_001;
-  const later = sale("later", "1", "1000000", book); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
+  const later = sale("later", "1", "10000000", book); later.preparedAtMs = later.safetyObservedAtMs = later.risk.observedAtMs = later.quote.quotedAtMs = f.clock.value;
   later.quote.expiresAtMs = f.clock.value + 30_000; later.risk.reference = pythBound(later.intent, f.clock.value);
   await f.binding.settings(TENANT, OWNER, 2, "live", { ...limits, maxOpsPerDay: 2, expiresAtMs: f.clock.value + 3_600_000 });
   assert.equal(await f.store.recordSigned(later), true);
 });
 
 test("an expired-attempt allowance lets that many dropped attempts a day leave the operation count, never more (owner decision, audit G2-3)", async t => {
-  const f = await fixture(t), first = submission(), allow = (n: number) => ({ expiredAttemptAllowance: n });
+  const f = await fixture(t), first = tenUsdgBuy(), allow = (n: number) => ({ expiredAttemptAllowance: n });
   await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
-  await f.store.recordSigned(first, allow(1)); await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
-  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
-  const dropped = sale("exit-1", "1", "1000000", book); await f.store.recordSigned(dropped, allow(1));
+  await f.store.recordSigned(first, allow(1)); await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
+  const book = TEN_BOOK;
+  const dropped = sale("exit-1", "1", "10000000", book); await f.store.recordSigned(dropped, allow(1));
   await f.store.settle(OWNER, dropped.intent.requestId, dropped.signature, expired(dropped));
   // With an allowance of one the retry is admitted: the program never counted the dropped one.
-  const retry = sale("exit-2", "1", "1000000", book); assert.equal(await f.store.recordSigned(retry, allow(1)), true);
-  await f.store.settle(OWNER, retry.intent.requestId, retry.signature, { ...settlement(retry), slot: 1002, amountIn: "1000000", amountOut: "500000" });
+  const retry = sale("exit-2", "1", "10000000", book); assert.equal(await f.store.recordSigned(retry, allow(1)), true);
+  await f.store.settle(OWNER, retry.intent.requestId, retry.signature, { ...settlement(retry), slot: 1002, amountIn: "10000000", amountOut: "5000000" });
   // Two executed operations now: the owner's limit is spent, whatever the allowance.
-  await assert.rejects(f.store.recordSigned(sale("exit-3", "2", "500000", { slot: 1002, cash: "99900000", wsol: "980000" }), allow(96)), /daily limit/);
+  await assert.rejects(f.store.recordSigned(sale("exit-3", "2", "5000000", { slot: 1002, cash: "99000000", wsol: "9800000" }), allow(96)), /daily limit/);
   // At most maxOpsPerDay + allowance are signed: two operations and an allowance of two admit four dropped attempts, not five.
   const g = await fixture(t); await g.binding.settings(TENANT, OWNER, 1, "live", { ...limits, maxOpsPerDay: 2 });
   for (const id of ["drop-1", "drop-2", "drop-3", "drop-4"]) {
@@ -536,36 +536,48 @@ function sale(id: string, seq: string, amountRaw: string, book: { slot: number; 
   s.risk.notionalUsdg = (BigInt(out) > BigInt(s.risk.reference.valueUsdg) ? out : s.risk.reference.valueUsdg);
   return s;
 }
+/**
+ * A 10 USDG buy at $500/SOL and its fill, which books 94 USDG and 0.0198 SOL: partial sells of that
+ * position can be worth the live minimum (1 USDG), which a 1 USDG buy's position never is.
+ */
+function tenUsdgBuy(id = "trade-1"): SolanaSignedSubmission {
+  const s = submission(id);
+  s.intent.amountRaw = s.quote.inAmount = "10000000"; s.quote.outAmount = s.quotedOutAmount = "20000000";
+  s.quote.minOutAmount = s.minOutAmount = "19800000"; s.risk.notionalUsdg = "10000000"; s.risk.reference = pythBound(s.intent, NOW);
+  return s;
+}
+const tenUsdgFill = (s: SolanaSignedSubmission): SolanaLiveSettlement => ({ ...settlement(s), amountIn: "6000000", amountOut: "19800000" });
+const TEN_BOOK = { slot: 1001, cash: "94000000", wsol: "19800000" };
 
 test("admission re-checks the independent price floor and charges a cheap sell at its reference value", async t => {
-  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
-  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
-  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  const f = await fixture(t), first = tenUsdgBuy(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
+  const book = TEN_BOOK;
   // An edited floor, a floor from another trade or a stale price is refused before anything is reserved.
   for (const forge of [(s: SolanaSignedSubmission) => { s.risk.reference = { ...s.risk.reference, minOutFloor: "1" }; },
     (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(first.intent, NOW); },
     (s: SolanaSignedSubmission) => { s.risk.reference = pythBound(s.intent, NOW - 121_000); },
     (s: SolanaSignedSubmission) => { delete (s.risk as Partial<typeof s.risk>).reference; }]) {
-    const forged = sale("forged", "1", "1000000", book); forge(forged);
+    const forged = sale("forged", "1", "10000000", book); forge(forged);
     await assert.rejects(f.store.recordSigned(forged), /independent SOL price evidence/);
   }
   // A dust quote cannot sign: its guaranteed output is far below the $500 floor.
-  await assert.rejects(f.store.recordSigned(sale("dust", "1", "1000000", book, "100")), /below the independent SOL price floor/);
+  await assert.rejects(f.store.recordSigned(sale("dust", "1", "10000000", book, "100")), /below the independent SOL price floor/);
   // 2% under the reference passes the 3% floor, but is charged at the full reference value.
-  const cheap = sale("cheap", "1", "1000000", book, "490000");
-  assert.equal(cheap.risk.notionalUsdg, "500000");
+  const cheap = sale("cheap", "1", "10000000", book, "4900000");
+  assert.equal(cheap.risk.notionalUsdg, "5000000");
   assert.equal(await f.store.recordSigned(cheap), true);
   const row = await f.db.prepare("SELECT notional_raw FROM solana_runtime_submissions WHERE request_id='cheap'").get() as { notional_raw: string };
-  assert.equal(row.notional_raw, "500000");
+  assert.equal(row.notional_raw, "5000000");
   assert.equal((await f.store.pending()).length, 1);
 });
 
 test("admission re-checks the price bound against the configured tolerance, not the one the evidence carries", async t => {
-  const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
-  await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
-  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  const f = await fixture(t), first = tenUsdgBuy(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
+  const book = TEN_BOOK;
   // A sell bounded at 10% instead of 3%: consistent with itself, and its minimum clears its own (lower) floor.
-  const wide = (id: string) => { const s = sale(id, "1", "1000000", book, "480000"); s.risk.reference = pythBound(s.intent, NOW, undefined, undefined, 1000);
+  const wide = (id: string) => { const s = sale(id, "1", "10000000", book, "4800000"); s.risk.reference = pythBound(s.intent, NOW, undefined, undefined, 1000);
     s.risk.notionalUsdg = s.risk.reference.valueUsdg; return s; };
   await assert.rejects(f.store.recordSigned(wide("wide-default")), /independent SOL price evidence/);
   await assert.rejects(f.store.recordSigned(wide("wide-300"), { referenceToleranceBps: 300 }), /independent SOL price evidence/);
@@ -659,19 +671,35 @@ for (const dialect of ["sqlite", "postgres"] as const) {
   });
 }
 
-test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
+test("a live trade worth under 1 USDG is refused at admission, except a sale of the whole recorded SOL position", async t => {
   const f = await fixture(t), first = submission(); await f.store.recordSigned(first);
   await f.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
+  const book = { slot: 1001, cash: "99400000", wsol: "1980000" };
+  // A buy of a few micro-USDG at the shared fee payer's expense.
+  const dust = submission("dust-buy", "1"); dust.intent.amountRaw = dust.quote.inAmount = "999999";
+  dust.quote.outAmount = dust.quotedOutAmount = "1999998"; dust.quote.minOutAmount = dust.minOutAmount = "1979998";
+  dust.risk = { ...dust.risk, slot: 1001, cashUsdg: book.cash, wsolRaw: book.wsol, notionalUsdg: "999999" }; dust.risk.reference = pythBound(dust.intent, NOW);
+  await assert.rejects(f.store.recordSigned(dust), /must be worth at least 1 USDG/);
+  // Half the position, worth $0.495: refused.
+  await assert.rejects(f.store.recordSigned(sale("part", "1", "990000", book)), /must be worth at least 1 USDG/);
+  assert.equal((await f.store.pending()).length, 0);
+  // The whole position, worth $0.99, can still be exited.
+  assert.equal(await f.store.recordSigned(sale("whole", "1", "1980000", book)), true);
+});
+
+test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
+  const f = await fixture(t), first = tenUsdgBuy(); await f.store.recordSigned(first);
+  await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
   const revision = (await f.binding.get(TENANT))!.revision;
-  await f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, perTradeWsol: "1000000", dailyWsol: "1500000" });
-  await assert.rejects(f.store.recordSigned(sale("too-big", "1", "1000001", { slot: 1001, cash: "99400000", wsol: "1980000" })), /per-trade SOL sell limit/);
-  const one = sale("sell-1", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1980000" });
+  await f.binding.settings(TENANT, OWNER, revision, "live", { ...limits, perTradeWsol: "10000000", dailyWsol: "15000000" });
+  await assert.rejects(f.store.recordSigned(sale("too-big", "1", "10000001", TEN_BOOK)), /per-trade SOL sell limit/);
+  const one = sale("sell-1", "1", "10000000", TEN_BOOK);
   assert.equal(await f.store.recordSigned(one), true);
   await f.store.settle(OWNER, one.intent.requestId, one.signature, { status: "finalized", signature: one.signature, slot: 1002, feeLamports: "10000",
-    amountIn: "1000000", amountOut: "500000", finalizedAtMs: NOW + 1 });
-  const after = { slot: 1002, cash: "99900000", wsol: "980000" };
-  await assert.rejects(f.store.recordSigned(sale("sell-2", "2", "600000", after)), /daily SOL sell limit/);
-  assert.equal(await f.store.recordSigned(sale("sell-3", "2", "500000", after)), true);
+    amountIn: "10000000", amountOut: "5000000", finalizedAtMs: NOW + 1 });
+  const after = { slot: 1002, cash: "99000000", wsol: "9800000" };
+  await assert.rejects(f.store.recordSigned(sale("sell-2", "2", "6000000", after)), /daily SOL sell limit/);
+  assert.equal(await f.store.recordSigned(sale("sell-3", "2", "5000000", after)), true);
 });
 
 test("limits beyond the vault's 96 daily operations or a 168-hour permission are refused at save and never admitted (audit core-abi-3, web-auth F4)", async t => {
@@ -1163,15 +1191,15 @@ test("withdrawals made outside Merrymen are refused while a trade or an owner tr
 
 
 test("an unbooked excess never blocks admission, a shortfall does, and no sale reaches quarantined SOL", async t => {
-  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
-  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  const f = await fixture(t), s = tenUsdgBuy(); await f.store.recordSigned(s);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, tenUsdgFill(s));
   // Dust that finality has not booked yet: the sale sizes against the book alone.
-  assert.equal(await f.store.recordSigned(sale("with-dust", "1", "1000000", { slot: 1001, cash: "99400001", wsol: "1980001" })), true);
-  const g = await fixture(t), first = submission(); await g.store.recordSigned(first);
-  await g.store.settle(OWNER, first.intent.requestId, first.signature, settlement(first));
-  await assert.rejects(g.store.recordSigned(sale("whole-chain", "1", "1980001", { slot: 1001, cash: "99400000", wsol: "1980001" })), /quarantined SOL is not traded/);
-  await assert.rejects(g.store.recordSigned(sale("short", "1", "1000000", { slot: 1001, cash: "99400000", wsol: "1979999" })), /below the recorded book/);
-  await assert.rejects(g.store.recordSigned(sale("short-cash", "1", "1000000", { slot: 1001, cash: "99399999", wsol: "1980000" })), /below the recorded book/);
+  assert.equal(await f.store.recordSigned(sale("with-dust", "1", "10000000", { slot: 1001, cash: "94000001", wsol: "19800001" })), true);
+  const g = await fixture(t), first = tenUsdgBuy(); await g.store.recordSigned(first);
+  await g.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));
+  await assert.rejects(g.store.recordSigned(sale("whole-chain", "1", "19800001", { slot: 1001, cash: "94000000", wsol: "19800001" })), /quarantined SOL is not traded/);
+  await assert.rejects(g.store.recordSigned(sale("short", "1", "10000000", { slot: 1001, cash: "94000000", wsol: "19799999" })), /below the recorded book/);
+  await assert.rejects(g.store.recordSigned(sale("short-cash", "1", "10000000", { slot: 1001, cash: "93999999", wsol: "19800000" })), /below the recorded book/);
 });
 
 test("a first live book on a vault that already holds WSOL starts with it quarantined instead of refusing forever", async t => {

@@ -1,7 +1,8 @@
 /** Deterministic, opt-in USDG/SOL rebalancer. Both modes use the same admission boundary. */
 import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_MIN_TRADE_USDG_RAW, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits,
+  type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
 import { getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
@@ -39,6 +40,9 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   // A sell never asks for more WSOL input than the owner signed for one trade.
   if (!buying && limits.perTradeWsol !== undefined && amount > BigInt(limits.perTradeWsol)) amount = BigInt(limits.perTradeWsol);
   if (amount === 0n) return null;
+  // Live admission refuses a trade worth under SOLANA_LIVE_MIN_TRADE_USDG_RAW (the shared fee payer pays it),
+  // except a sale of the whole position: such a rebalance is in band, not a refusal every tick.
+  if (input.mode === "live" && (buying ? amount : amount * value / held) < SOLANA_LIVE_MIN_TRADE_USDG_RAW && (buying || amount !== held)) return null;
   // Never an earlier attempt's ID: a proven-expired request is never re-sent, a new attempt is a new request.
   const requestId = `${SOLANA_AUTONOMOUS_REQUEST_PREFIX}${input.revision}-${input.attempt}`;
   return { ...parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId,

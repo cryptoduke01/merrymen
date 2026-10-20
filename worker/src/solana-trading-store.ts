@@ -1,6 +1,6 @@
 /** Tenant-bound Solana paper books and live broadcast journal, on SQLite or Postgres. */
 import { CHAINS, SOLANA_USDG_MINT, canonicalId } from "../../packages/core/src/ids";
-import { SOLANA_REGISTERED_AFTER_REVOKE } from "../../packages/core/src/solana";
+import { SOLANA_LIVE_BELOW_MINIMUM, SOLANA_LIVE_MIN_TRADE_USDG_RAW, SOLANA_REGISTERED_AFTER_REVOKE } from "../../packages/core/src/solana";
 import { SOLANA_MAX_OPS_PER_DAY, parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, solanaPaperAgentId, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
@@ -1054,6 +1054,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const hwm = [book ? raw(book.hwmRaw) : 0n, peak, equity].reduce((a, b) => a > b ? a : b);
       const tradable = buying ? (book ? raw(book.cashRaw) : cash) : (book ? raw(book.wsolRaw) : 0n);
       if (tradable < raw(s.intent.amountRaw, false)) refuse(buying ? "Insufficient real Solana vault balance." : "The sale exceeds the recorded SOL position; quarantined SOL is not traded.");
+      // The shared fee payer pays every live swap: no dust trades at its expense, except a whole-position exit.
+      if (notional < SOLANA_LIVE_MIN_TRADE_USDG_RAW && (buying || raw(s.intent.amountRaw, false) !== tradable)) refuse(SOLANA_LIVE_BELOW_MINIMUM);
       // A first book on a vault that already holds WSOL starts with it quarantined: its cost basis is unknown.
       if (!book) book = { hwmRaw: hwm.toString(), cashRaw: cash.toString(), wsolRaw: "0", costBasisUsdgRaw: "0", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: s.risk.slot, updatedAtMs: now,
         ...(wsol > 0n ? { quarantinedWsolRaw: wsol.toString() } : {}) };

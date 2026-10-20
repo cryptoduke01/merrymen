@@ -148,6 +148,15 @@ export const SOLANA_MAX_OPS_PER_DAY = 96;
 export const SOLANA_MAX_PERMISSION_MS = 168 * 3_600_000;
 /** A duration picked against the browser's clock may run this far past the cap. */
 export const SOLANA_PERMISSION_CLOCK_SKEW_MS = 5 * 60_000;
+/**
+ * The least a live trade may be worth, in raw USDG at the independent
+ * reference price: 1 USDG. One shared, platform-funded fee payer pays every
+ * live swap's signature and priority fees, so no tenant trades dust at its
+ * expense. A sale of the whole booked SOL position is exempt, so a position
+ * that fell below it can still be exited.
+ */
+export const SOLANA_LIVE_MIN_TRADE_USDG_RAW = 1_000_000n;
+export const SOLANA_LIVE_BELOW_MINIMUM = "A live Solana trade must be worth at least 1 USDG, unless it sells the whole recorded SOL position.";
 
 /**
  * Generic limit shape. Limits that carry SOL sell caps are the ones a live vault
