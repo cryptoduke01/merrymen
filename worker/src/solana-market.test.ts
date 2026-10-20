@@ -185,7 +185,7 @@ describe("Token-2022 buy screening", () => {
     const locked = token2022Mint([{ extension: "transferHook", state: { authority: null, programId: null } }]);
     assert.deepEqual((await fixture({ mint: locked }).market.readMint(TOKEN)).buyBlockedReasons, []);
   });
-  it("permits known USDG issuer powers but still rejects activated hooks or transfer fees", async () => {
+  it("permits known USDG issuer powers but refuses USDG with a hook program, a transfer fee or another extension outright, as the vault does", async () => {
     const extensions = [{ extension: "permanentDelegate", state: { delegate: OTHER } }, feeExtension(),
       { extension: "transferHook", state: { authority: OTHER, programId: null } },
       { extension: "confidentialTransferFeeConfig", state: { authority: OTHER,
@@ -195,10 +195,19 @@ describe("Token-2022 buy screening", () => {
     // The configured cash issuer mints USDG; that power is not a reason to refuse cash.
     mint.value.data.parsed.info.mintAuthority = OTHER;
     assert.deepEqual((await fixture({ mint }).market.readMint(SOLANA_USDG_MINT)).buyBlockedReasons, []);
-    for (const [ext, reason] of [[feeExtension(fee(), fee(10, 100)), "transfer-fee"],
-      [{ extension: "transferHook", state: { authority: OTHER, programId: OTHER } }, "transfer-hook"]] as const) {
+    // The vault's check_mint fails every swap, exits included, on such a USDG mint
+    // (solanaVaultUsdgMintRefusal), so the worker refuses the mint itself, not only buys.
+    for (const ext of [feeExtension(fee(), fee(10, 100)), feeExtension(fee(), fee(10, 0)), feeExtension(fee(10, 0), fee()),
+      { extension: "transferHook", state: { authority: OTHER, programId: OTHER } },
+      { extension: "defaultAccountState", state: { accountState: "initialized" } },
+      { extension: "groupPointer", state: { authority: OTHER, groupAddress: SOLANA_USDG_MINT } }]) {
       const active = token2022Mint([extensions[0], ext], true); active.value.data.parsed.info.freezeAuthority = OTHER;
-      assert.deepEqual((await fixture({ mint: active }).market.readMint(SOLANA_USDG_MINT)).buyBlockedReasons, [reason]);
+      await assert.rejects(fixture({ mint: active }).market.readMint(SOLANA_USDG_MINT), marketError("invalid-mint"));
+    }
+    // Another token keeps its buy-blocking reasons.
+    for (const [ext, reason] of [[feeExtension(fee(), fee(10, 100)), "transfer-fee"],
+      [{ extension: "transferHook", state: { authority: null, programId: OTHER } }, "transfer-hook"]] as const) {
+      assert.deepEqual((await fixture({ mint: token2022Mint([ext]) }).market.readMint(TOKEN)).buyBlockedReasons, [reason]);
     }
   });
   it("rejects corrupt confidential ciphertext without mistaking it for a raw token amount", async () => {

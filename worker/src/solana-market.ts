@@ -4,6 +4,7 @@ import {
   parseSolanaSwapIntent, validateSolanaQuote, SOLANA_QUOTE_MAX_AGE_MS,
   type SolanaMint, type SolanaQuote, type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
+import { solanaVaultUsdgMintRefusal } from "../../packages/core/src/solana-live";
 import {
   readSolanaMainnetRpcConfig, readSolanaJson, requireSolanaSlot, SolanaRpcError,
   withSolanaMainnetRead, withSolanaReadDeadline,
@@ -127,6 +128,9 @@ function mintFromRpc(raw: unknown, mint: string, minSlot: number, observedAtMs: 
   if ((data.space > 82 && list.length === 0) || (value.owner === SPL_TOKEN_PROGRAM && list.length !== 0)) return invalidMint();
   const trustedCash = mint === SOLANA_USDG_MINT && value.owner === TOKEN_2022_PROGRAM && info.decimals === 6;
   if (mint === SOLANA_USDG_MINT && !trustedCash) return invalidMint();
+  // The vault program's check_mint fails every swap, buys and exits alike, on a USDG mint it
+  // refuses (a transfer fee or hook program, or any other extension): sign none of them.
+  if (trustedCash && solanaVaultUsdgMintRefusal(info) !== null) return invalidMint();
   const reasons = new Set<string>();
   if (info.freezeAuthority !== null && !trustedCash) reasons.add("freeze-authority");
   // A live mint authority can inflate supply after the buy and dilute every holder.

@@ -167,13 +167,7 @@ async function workerVerdict(account: unknown): Promise<Verdict> {
  * the entry (the test then requires the vault's verdict); a regression elsewhere fails
  * too. Nothing here is todo or skipped.
  */
-const WORKER_GAPS = new Map<string, Verdict>([
-  ["a newer transfer fee of 25 bps with no maximum", "accepts"],
-  ["a newer transfer fee of 25 bps with the largest maximum", "refuses buys only"],
-  ["a transfer hook program (the Memo program)", "refuses buys only"],
-  ["DefaultAccountState Initialized appended", "accepts"],
-  ["GroupPointer appended (the issuer as authority, the mint as group)", "accepts"],
-]);
+const WORKER_GAPS = new Map<string, Verdict>([]);
 
 describe("the mainnet USDG mint, as the worker and the vault see it", () => {
   it("is the mint read from mainnet, carrying only extensions the vault accepts", () => {
@@ -195,6 +189,8 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
       const info = (agaveAccount(variant!).data as { parsed: { info: unknown } }).parsed.info;
       assert.notEqual(solanaVaultUsdgMintRefusal(info), null, name);
     }
+    // solana-market.ts refuses every USDG mint the vault refuses: a new gap is a regression.
+    assert.equal(WORKER_GAPS.size, 0, "the worker refuses every USDG mint the vault refuses");
   });
   it("is decoded by Agave's own jsonParsed decoder, and this file decodes every variant exactly as Agave does", () => {
     assert.equal(agave.source, "usdg-mainnet-mint.json");
