@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import {
   installSolanaWorkerStop, SOLANA_WORKER_IPC_ENV, SOLANA_WORKER_PARENT_GRACE_MS, SOLANA_WORKER_REPEAT_MS, SOLANA_WORKER_STOP_MESSAGE,
+  solanaWorkerParentPid,
 } from "../worker/src/solana-agent-cli.ts";
 
 const BIN = fileURLToPath(new URL("./bin.mjs", import.meta.url));
@@ -36,7 +37,7 @@ async function until(check, ms, what) {
  * The real `merrymen solana-agent` command and its real TypeScript worker, with
  * a temporary home, no bindings, no keys and every network call refused.
  */
-function startAgent(t, { detached = false, wedge = false, stall = false, linger = false, direct = null } = {}) {
+function startAgent(t, { detached = false, wedge = false, stall = false, linger = false, holdStart = false, direct = null } = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), "msa-signal-"));
   const home = path.join(directory, "home");
   const pids = path.join(directory, "pids");
@@ -44,6 +45,7 @@ function startAgent(t, { detached = false, wedge = false, stall = false, linger 
   const wedgeFile = path.join(directory, "wedge");
   const lingerFile = path.join(directory, "lingering");
   const stallFile = path.join(directory, "stall");
+  const releaseFile = path.join(directory, "release");
   const guard = path.join(directory, "guard.mjs");
   writeFileSync(guard, `
 import { appendFileSync, existsSync } from "node:fs";
@@ -71,6 +73,11 @@ if (${JSON.stringify(linger)} && isWorker) {
 import net from "node:net";
 import { syncBuiltinESMExports } from "node:module";
 appendFileSync(${JSON.stringify(pids)}, process.pid + "\\t" + process.argv.slice(1).join(" ") + "\\n");
+// A worker held before its own code runs: no event loop turn, so a closed
+// channel is not read yet, until the file appears.
+if (${JSON.stringify(holdStart)} && isWorker) {
+  for (const end = Date.now() + 30_000; !existsSync(${JSON.stringify(releaseFile)}) && Date.now() < end;) { /* held */ }
+}
 const refuse = () => { appendFileSync(${JSON.stringify(network)}, "attempt\\n"); throw new Error("network disabled"); };
 globalThis.fetch = async () => refuse();
 const connect = net.Socket.prototype.connect;
@@ -99,6 +106,11 @@ syncBuiltinESMExports();
   cli.stderr.on("data", (chunk) => { output += chunk; });
   const exited = once(cli, "exit");
   let worker;
+  const workerPid = () => until(() => {
+    if (!existsSync(pids)) return null;
+    const line = readFileSync(pids, "utf8").split("\n").find((entry) => entry.includes("solana-agent-cli.ts"));
+    return line ? Number(line.split("\t")[0]) : null;
+  }, 20_000, "the Solana worker process");
   t.after(async () => {
     for (const pid of [worker, cli.pid]) if (pid && alive(pid)) process.kill(pid, "SIGKILL");
     await delay(100);
@@ -109,14 +121,14 @@ syncBuiltinESMExports();
     /** Holds the worker's event loop for 1.5 s, starting within about 20 ms. */
     async stall() { writeFileSync(stallFile, ""); await delay(200); },
     database: () => path.join(home, "solana-accounts.sqlite"),
+    /** The worker's pid, once its preload ran (before its own code, with holdStart). */
+    async started() { worker = await workerPid(); return worker; },
+    /** Lets a holdStart worker go on to its own code. */
+    release: () => writeFileSync(releaseFile, ""),
     networkAttempted: () => existsSync(network),
     /** Resolves once the worker's first tick wrote its heartbeat, after it installed its handlers. */
     async ready() {
-      worker = await until(() => {
-        if (!existsSync(pids)) return null;
-        const line = readFileSync(pids, "utf8").split("\n").find((entry) => entry.includes("solana-agent-cli.ts"));
-        return line ? Number(line.split("\t")[0]) : null;
-      }, 20_000, "the Solana worker process");
+      worker = await workerPid();
       const db = path.join(home, "solana-accounts.sqlite");
       await until(() => {
         if (!existsSync(db)) return false;
@@ -251,9 +263,9 @@ test("a pid-based stop still ends a worker that lingers after its run finished",
 });
 
 test("a worker whose command is gone before it starts never opens storage or trades", { skip: !posix, timeout: 60_000 }, async (t) => {
-  // Started as the CLI starts it, but with no channel: as if the CLI was killed
-  // before the worker could listen for the channel's close.
-  const agent = startAgent(t, { direct: { [SOLANA_WORKER_IPC_ENV]: "1" } });
+  // Started as the CLI starts it, naming its parent, but with no channel: as if
+  // the CLI's channel had closed and been read before the worker listened.
+  const agent = startAgent(t, { direct: { [SOLANA_WORKER_IPC_ENV]: String(process.pid) } });
   const [code, signal] = await Promise.race([agent.exited, delay(30_000).then(() => ["timeout", null])]);
   assert.deepEqual([code, signal], [1, null], agent.output());
   assert.match(agent.output(), /command that started this worker is gone/);
@@ -261,15 +273,38 @@ test("a worker whose command is gone before it starts never opens storage or tra
   assert.equal(agent.networkAttempted(), false);
 });
 
+test("a worker whose command is killed before the worker's own code runs never opens storage or trades", { skip: !posix, timeout: 60_000 }, async (t) => {
+  // The command dies after spawning the worker but before the worker's main()
+  // runs. Its channel still reads as open then: the close is read only on a
+  // later event loop turn, which a busy first tick may not reach for a while.
+  const agent = startAgent(t, { holdStart: true });
+  const worker = await agent.started();
+  process.kill(agent.cli.pid, "SIGKILL");
+  await agent.exited;
+  // The kernel re-parented the worker before the command's exit was reported.
+  agent.release();
+  await until(() => !alive(worker), 30_000, "the orphaned worker to exit");
+  assert.equal(existsSync(agent.database()), false, "no storage was opened, so no tick ran");
+  assert.equal(agent.networkAttempted(), false);
+});
+
+test("worker stop: the parent named by the command is parsed strictly, and anything else matches no parent", () => {
+  assert.equal(solanaWorkerParentPid({}), undefined, "not started by merrymen solana-agent");
+  assert.equal(solanaWorkerParentPid({ [SOLANA_WORKER_IPC_ENV]: "4242" }), 4242);
+  for (const value of ["", "0", "-1", "01", "1.5", "4242 ", "abc", "99999999999"]) {
+    assert.equal(solanaWorkerParentPid({ [SOLANA_WORKER_IPC_ENV]: value }), -1, JSON.stringify(value));
+  }
+});
+
 /** The worker's stop handling, driven directly: a fake process, abort, exit and timers. */
-function stopHarness({ connected = true, expectParent = undefined, finishedExitCode = undefined } = {}) {
-  const host = Object.assign(new EventEmitter(), { connected, disconnected: 0, disconnect() { this.disconnected++; this.connected = false; } });
+function stopHarness({ connected = true, ppid = 4242, parentPid = undefined, finishedExitCode = undefined } = {}) {
+  const host = Object.assign(new EventEmitter(), { connected, ppid, disconnected: 0, disconnect() { this.disconnected++; this.connected = false; } });
   const events = { aborts: 0, exits: [], writes: [], timers: [] };
   const clock = { ms: 1_000_000 };
   const handle = installSolanaWorkerStop(host, {
     abort: () => { events.aborts++; }, exit: (code) => { events.exits.push(code); }, write: (text) => { events.writes.push(text); },
     setTimer: (callback, ms) => { const timer = { callback, ms, unrefed: false, unref() { this.unrefed = true; } }; events.timers.push(timer); return timer; },
-    now: () => clock.ms, expectParent, finishedExitCode,
+    now: () => clock.ms, parentPid, finishedExitCode,
   });
   return { host, events, handle, later: (ms = SOLANA_WORKER_REPEAT_MS) => { clock.ms += ms; } };
 }
@@ -316,13 +351,33 @@ test("worker stop: after the run finished, a stop exits at once with the run's o
 });
 
 test("worker stop: started by the command whose channel is already closed, it stops before trading", () => {
-  const { events } = stopHarness({ connected: false, expectParent: true });
+  const { events, handle } = stopHarness({ connected: false, parentPid: 4242 });
   assert.equal(events.aborts, 1, "aborted at install: the loop never runs a tick");
+  assert.equal(handle.parentLost(), true);
   assert.match(events.writes.join(""), /command that started this worker is gone/);
   assert.equal(events.timers[0].ms, SOLANA_WORKER_PARENT_GRACE_MS);
   // Started by anything else (npm run start:solana, a supervisor), no channel is expected.
   const plain = stopHarness({ connected: false });
   assert.equal(plain.events.aborts, 0);
+  assert.equal(plain.handle.parentLost(), false);
+});
+
+test("worker stop: re-parented before it started, it stops before trading although its channel still reads as open", () => {
+  // The command died; the channel's close is not read yet, but the kernel already gave the worker a new parent.
+  for (const ppid of [1, 777]) {
+    const { events, handle } = stopHarness({ connected: true, ppid, parentPid: 4242 });
+    assert.equal(events.aborts, 1, `parent ${ppid}: aborted at install`);
+    assert.equal(handle.parentLost(), true);
+    assert.match(events.writes.join(""), /command that started this worker is gone/);
+  }
+  // A marker that is not a pid matches no parent.
+  assert.equal(stopHarness({ connected: true, parentPid: -1 }).events.aborts, 1);
+  // Its own command, channel open: it runs.
+  const running = stopHarness({ connected: true, ppid: 4242, parentPid: 4242 });
+  assert.equal(running.events.aborts, 0);
+  assert.equal(running.handle.parentLost(), false);
+  running.host.emit("disconnect");
+  assert.equal(running.handle.parentLost(), true, "a close read later is a lost parent too");
 });
 
 test("worker stop: the command's message for the same press does not count twice; its force message forces", () => {

@@ -1666,10 +1666,11 @@ switch (cmd) {
       cwd: ROOT,
       // The worker's IPC channel closes when this process dies for any reason,
       // SIGKILL and the OOM killer included, so the worker never trades as an orphan.
-      // The variable tells the worker to expect that channel: one that is
-      // already closed when the worker starts means this command is gone.
+      // The variable names this process as the worker's parent: a worker that
+      // starts with another parent (re-parented) or a closed channel knows this
+      // command is gone and never opens storage (SOLANA_WORKER_IPC_ENV).
       stdio: agent ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
-      ...(agent ? { env: { ...process.env, MERRYMEN_SOLANA_WORKER_IPC: "1" } } : {}),
+      ...(agent ? { env: { ...process.env, MERRYMEN_SOLANA_WORKER_IPC: String(process.pid) } } : {}),
       shell: false,
     });
     const running = () => child.exitCode === null && child.signalCode === null;
