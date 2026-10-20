@@ -51,6 +51,7 @@ The orchestrator injects these into each child; a tenant never sets them (they a
 | `MERRYMEN_PUBLIC_ORIGIN` | the web service's public URL, e.g. `https://merrymen.up.railway.app` — auth binds signatures to it |
 | `PORT` | set by Railway automatically; `start:web` honours it |
 | `GROQ_API_KEY` *(or `ANTHROPIC_API_KEY`)* | **the dashboard chat's brain.** Not optional if you want the chat to think — see below |
+| `MERRYMEN_SOLANA` | **leave unset.** Solana stays off in production until its release gates are signed off; see [Solana (off in production)](#solana-off-in-production) |
 
 > **The chat needs a key on the WEB service, not just the orchestrator.**
 > `/api/chat` resolves a model from the web container's own environment, so
@@ -725,6 +726,65 @@ and live execution still requires the verified immutable program and finalized
 owner-approved session. The app displays **Waiting for Solana worker** when an
 enabled strategy has no recent worker heartbeat. Adding this role does not
 provision or start a hosted service.
+
+### Solana (off in production)
+
+Merging the Solana work deploys nothing and turns nothing on. Production keeps
+it off; the full plan, settings and runbooks are in
+[`solana-integration.md`](solana-integration.md), and every setting is listed in
+[`.env.solana.example`](../.env.solana.example).
+
+- **`MERRYMEN_SOLANA` stays unset on the web service.** Unset, the network
+  switch, the `/solana` screen and Privy's Solana wallets are not rendered, and
+  every `/api/solana` route answers 404 before sign-in, body parsing or any
+  database read. Set it (to `1`) only after the release gates in
+  `solana-integration.md` are signed off. No `start:solana` service exists, and
+  none should until then.
+- **`NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT` is a Dockerfile build ARG,
+  not a runtime variable.** Next inlines it when the web app is built, so a
+  change needs a rebuild and redeploy of the web service, not a restart. The
+  default is empty, which is off; only the exact value `1` shows the Solana
+  "Back up your owner key" card. Set it on the Railway web service only after
+  wallet export is enabled for the Privy app in its dashboard and the deployed
+  vault's release entry ships in the published `merrymen` CLI. It is public by
+  design, like the other `NEXT_PUBLIC_` values.
+- **Settings that must match.** `MERRYMEN_SOLANA_PYTH_GENERATION`,
+  `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`,
+  `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` and the fee settings go on every
+  service that runs the Solana runtime (web and the Solana worker) with the same
+  values. `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC` goes on an operator's machine only,
+  and `MERRYMEN_SOLANA_RECOVER_RPC` only on an owner's own computer.
+- **Alert lines.** Once Solana is on, page on every line starting `[alert]` in
+  the web and Solana worker services' logs (stderr), as for the orchestrator.
+  From both web and worker (the runtime's status and trade paths):
+  `[alert] Solana fee payer is low|cannot fund buys|cannot fund exits…`,
+  `[alert] solana fee-payer-threshold misconfigured`,
+  `[alert] solana-reference-price refused: reason=… generation=…`,
+  `[alert] solana-reference-tolerance misconfigured` and
+  `[alert] solana-jupiter-key misconfigured`. From the Solana worker only:
+  `[alert] Solana transactions stuck pending`,
+  `[alert] Solana vault below its book`,
+  `[alert] Solana autonomous strategy refused: proven-expired attempts used up…`
+  and the earlier warning `[warn] Solana proven-expired attempts use more than
+  half…`. Each line, its cause and what to do are in `solana-integration.md`
+  ("Operator runbooks"). Every Solana process installs the stdio guard before it
+  prints, and URL redaction treats `helius-rpc.com`, `helius.xyz`, `rpcpool.com`
+  and `syndica.io` as keyed hosts, so a provider key does not reach these logs.
+- **Robinhood kills and the Solana tables.** "Kill all agents" and Telegram
+  `/kill` also stop the tenant's Solana strategy. They first look
+  `solana_wallet_bindings` (and its `strategy_json` column) up read-only in the
+  catalog. On a database where Solana was never used, which is production today,
+  the table is absent: the kill creates nothing, takes no Solana lock, runs no
+  Solana DDL and reports done exactly as before. Both kills remove the Robinhood
+  grant first; only where the Solana table exists can a Solana fault make the
+  web answer 503 "Kill incomplete" or keep a Telegram kill pending for a retry.
+- **`/api/grants` request limits** (Robinhood code, changed with this work).
+  `POST /api/grants` refuses a body over 256 KiB with 413 ("That request is too
+  large. Nothing was saved."), the same bound as partner activation, and a body
+  that is not JSON with 400 `not a grant`. The kill switch's `DELETE` body is
+  limited to 8 KiB (413). A grant whose `chainId` is not Robinhood Chain (4663)
+  or its testnet (46630), or that names no chain, is refused with 400
+  `unsupported_chain`; the dashboard's signers always send one of the two.
 
 ## 5b. The AI gateway (its own Railway project)
 
