@@ -519,8 +519,12 @@ test("a live account whose vault holds less than its book is held, and says an [
   assert.equal(f.control.trades, 0);
   assert.equal(f.lines.length, 1);
   assert.match(f.lines[0]!, /^\[alert\] Solana vault below its book: /);
-  // It names the remedy: nothing books a decrease, so an operator reconciles the book, as the plan of record says.
-  assert.match(f.lines[0]!, /Nothing reconciles the book by itself: an operator must find what moved the tokens and reconcile the book with the vault \(docs\/solana-integration\.md, "A vault below its book"\)/);
+  // It names the remedies: the owner records their own withdrawals; anything else an operator finds and writes off with the
+  // shortfall tool, named by the account reference the alert carries (no tenant identity), as the plan of record says.
+  const account = solanaAccountRef({ tenant: TENANT, owner: OWNER });
+  assert.match(f.lines[0]!, /If the owner withdrew with their own key \(the recovery tool or another wallet\), they record those withdrawals under Owner controls/);
+  assert.ok(f.lines[0]!.includes(`npm run solana:resolve -- shortfall show ${account} shows both providers' balances beside the book, and shortfall book writes an explained `
+    + `shortfall off as a loss (docs/solana-integration.md, "A vault below its book")`), f.lines[0]);
   assert.deepEqual(fieldsOf(f.lines[0]!), { solana: "alert", kind: "vault-below-book", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }) });
   assert.ok(!f.lines[0]!.includes(TENANT) && !f.lines[0]!.includes(OWNER));
   f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1, "said once per repeat window");

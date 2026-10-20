@@ -157,19 +157,23 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     return true;
   };
   /**
-   * A live account whose vault holds less than its book (SOLANA_STATUS_BELOW_BOOK): tokens left it outside
-   * Merrymen, and its automated trades and exits stay held until the book matches the vault again. Nothing in
-   * the worker books a decrease: an operator finds what moved the tokens and reconciles the book, as the
-   * plan of record says (docs/solana-integration.md, "A vault below its book"). Said as an [alert] at most
-   * once per SOLANA_AGENT_ALERT_REPEAT_MS per account while it persists, and at once again after it clears.
+   * A live account whose vault holds less than its book (SOLANA_STATUS_BELOW_BOOK) while nothing of its own is
+   * settling: tokens left it outside Merrymen, and its automated trades and exits stay held until the book
+   * matches the vault again. Nothing in the worker books a decrease. The owner records their own withdrawals
+   * made outside Merrymen under Owner controls; anything else an operator finds and, once explained, writes off
+   * as a loss with `npm run solana:resolve -- shortfall` (solana-resolve-shortfall.ts), named by this alert's
+   * account reference (docs/solana-integration.md, "A vault below its book"). Said as an [alert] at most once
+   * per SOLANA_AGENT_ALERT_REPEAT_MS per account while it persists, and at once again after it clears.
    */
   const belowBook = (scope: SolanaAccountScope, blockers: readonly string[] | undefined) => {
     const account = solanaAccountRef(scope);
     if (!blockers?.includes(SOLANA_STATUS_BELOW_BOOK)) { said.delete(`below-book:${account}`); return; }
     say(`below-book:${account}`, `[alert] Solana vault below its book: an account's vault holds less USDG or SOL than its recorded trades, so its automated trades `
-      + `and exits are held: ${JSON.stringify({ solana: "alert", kind: "vault-below-book", account })} — tokens left the vault outside Merrymen (a recovery-tool or wallet `
-      + "withdrawal, say). Nothing reconciles the book by itself: an operator must find what moved the tokens and reconcile the book with the vault "
-      + "(docs/solana-integration.md, \"A vault below its book\"). Until then the owner can revoke, and withdraw what the vault holds up to its book");
+      + `and exits are held: ${JSON.stringify({ solana: "alert", kind: "vault-below-book", account })} — tokens left the vault outside Merrymen. If the owner `
+      + "withdrew with their own key (the recovery tool or another wallet), they record those withdrawals under Owner controls and trading resumes. Otherwise "
+      + `find what moved the tokens: npm run solana:resolve -- shortfall show ${account} shows both providers' balances beside the book, and shortfall book `
+      + "writes an explained shortfall off as a loss (docs/solana-integration.md, \"A vault below its book\"). Until then the owner can revoke, and withdraw "
+      + "what the vault holds");
   };
   /**
    * STUCK, SAID TO THE OPERATOR. After receipt recovery, any live trade admitted, or signed owner transaction
