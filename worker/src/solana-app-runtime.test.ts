@@ -12,7 +12,7 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit, SOLANA_STATUS_NO_FALLBACK } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -1072,12 +1072,16 @@ test("status names the RPC configuration an operator must fix: no independent fa
     const unpaired = f.runtime({ rpc: undefined, env: { ...f.env, MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example" } });
     const missing = await unpaired.status(f.scope);
     assert.equal(missing.live.ready, false); assert.equal(missing.live.canExit, false);
-    assert.ok(missing.live.blockers.includes(new SolanaRpcError("invalid-fallback").message), missing.live.blockers.join(" | "));
-    assert.doesNotMatch(missing.live.blockers.join(" "), /could not be verified/);
+    assert.ok(missing.live.blockers.includes(SOLANA_STATUS_NO_FALLBACK), missing.live.blockers.join(" | "));
+    assert.equal(SOLANA_STATUS_NO_FALLBACK, "Live trading needs a second, independent RPC provider; an operator must configure one.");
+    // The owner is never shown a deployment variable's name (the RPC error's own text names one).
+    assert.match(new SolanaRpcError("invalid-fallback").message, /MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK/);
+    assert.doesNotMatch(missing.live.blockers.join(" "), /MERRYMEN_|could not be verified/);
     // A transport that cannot ask two providers cannot verify the deployment.
     const { readEach: _readEach, ...single } = f.rpc;
     const lone = await f.runtime({ rpc: single }).status(f.scope);
     assert.ok(lone.live.blockers.includes(new SolanaRpcError("no-quorum").message), lone.live.blockers.join(" | "));
+    assert.doesNotMatch(lone.live.blockers.join(" "), /MERRYMEN_/);
     // Any other provider failure stays generic: its text is never shown.
     const failing = await f.runtime({ rpc: { ...f.rpc, read: async () => { throw new SolanaRpcError("timeout"); } } }).status(f.scope);
     assert.match(failing.live.blockers.join(" "), /could not be verified/);

@@ -77,14 +77,23 @@ function publicTrade(record: SolanaLiveRecord) {
     preparedAtMs, minOutAmount, quotedOutAmount, settlement: record.settlement ?? null };
 }
 /**
+ * What status tells the owner when no independent fallback RPC provider is
+ * configured. Like every configuration refusal an owner may see, it names no
+ * setting: SolanaRpcError("invalid-fallback") names the deployment variable,
+ * which stays in operator tools (check:solana-rpc, the worker's own errors).
+ */
+export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
+/**
  * A failed live status read as the owner sees it. This module's own refusals,
  * and the two RPC problems only an operator can fix (no independent fallback
- * provider, or a transport without two providers), are shown by their fixed
- * text; SolanaRpcError never carries provider content. Anything else is generic.
+ * provider, or a transport without two providers), are shown by fixed text
+ * that names no setting; SolanaRpcError never carries provider content.
+ * Anything else is generic.
  */
 function statusBlocker(error: unknown): string {
   if (error instanceof SolanaAppRuntimeError) return error.message;
-  if (error instanceof SolanaRpcError && (error.code === "invalid-fallback" || error.code === "no-quorum")) return error.message;
+  if (error instanceof SolanaRpcError && error.code === "invalid-fallback") return SOLANA_STATUS_NO_FALLBACK;
+  if (error instanceof SolanaRpcError && error.code === "no-quorum") return error.message;
   return "The configured vault, balances or live permissions could not be verified.";
 }
 /** What the owner is told when a donation waits for an owner token account that is closed or unsafe. */
