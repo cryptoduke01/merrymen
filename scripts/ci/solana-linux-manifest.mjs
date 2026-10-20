@@ -45,6 +45,15 @@
 // manifest for the owner to review and commit. Committing it is what turns
 // the comparison on, and what lets a run on main be a release candidate.
 //
+// A manifest's own commit names the run and runner image it came from. The
+// manifest is image-free (differences() compares every field, and an image
+// update alone must not change it), and the run's artifact and summary
+// expire, so for an outcome where the owner may commit the uploaded manifest
+// (uncommitted, differs) report gives a Vault-Linux-Manifest line
+// (manifestTrailer) in the log, the step summary and the record, to end that
+// commit's message with. A later mismatch is then compared with the image
+// that built the committed manifest (RUNNER_IMAGE_NOTE).
+//
 // One case never gets this far: a committed manifest with the same source
 // digest as this build but another artifact. build.sh, run by test.sh in the
 // Test step, refuses it ("same source, different artifact"), so the job fails
@@ -187,6 +196,21 @@ export function committedManifests(dir) {
   return { committed: at(head), parent: at(first) };
 }
 
+/** The git trailer token naming the run and runner image that built a committed Linux manifest. */
+export const MANIFEST_TRAILER = "Vault-Linux-Manifest";
+/**
+ * The line that ends the message of the commit adding `manifest`: the run
+ * (`run`, solana-program-record.mjs provenance) and runner image (`image`,
+ * the build record's runnerImage) that built it, and its artifact. Unknown
+ * parts say unknown.
+ */
+export function manifestTrailer({ manifest, run = null, image = null }) {
+  const v = value => (typeof value === "string" && value ? value : "unknown");
+  return `${MANIFEST_TRAILER}: run ${v(run?.runId)}.${v(run?.runAttempt)} of ${v(run?.repository)} `
+    + `(${v(run?.event)} on ${v(run?.ref)} at ${v(run?.commit)}), runner image ${v(image?.os)} ${v(image?.version)}, `
+    + `artifact ${manifest.artifact.sha256} (${manifest.artifact.bytes} bytes), source digest ${manifest.source.digest}`;
+}
+
 const USAGE = "usage: solana-linux-manifest.mjs verify <contracts/solana dir> <tested sha256> | "
   + "report <contracts/solana dir> <record.json> | compare <contracts/solana dir>";
 
@@ -219,8 +243,13 @@ function report(dir, recorded, recordPath) {
     throw new Error(`the build record ${recordPath} is for artifact ${JSON.stringify(record?.sha256)}, the Linux manifest for ${result.manifest.artifact.sha256}`);
   }
   // The record names the program and the local test id: a build of that id is never a candidate.
-  const release = releaseStatus(provenance(process.env), result.status, record);
-  record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem };
+  const run = provenance(process.env);
+  const release = releaseStatus(run, result.status, record);
+  // Only where the owner may commit the uploaded manifest: none committed, or this one differs.
+  const trailer = result.status === "uncommitted" || result.status === "differs"
+    ? manifestTrailer({ manifest: result.manifest, run, image: record.runnerImage })
+    : null;
+  record.linuxManifest = { file: LINUX_MANIFEST, status: result.status, problem: result.problem, commitTrailer: trailer };
   record.release = release;
   writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
   const line = outcomeLine(result);
@@ -233,8 +262,12 @@ function report(dir, recorded, recordPath) {
   if (result.status === "matches") console.error(`${line} ${named}`);
   else if (result.status === "uncommitted") console.error(`::notice title=Linux build manifest::${line} ${named}`);
   else console.error(`::warning title=Linux build manifest::${line} ${named} The job's last step fails on this.`);
+  const commitWith = "If this manifest is committed (after review, never just to make the comparison pass), end that commit's message with this line, "
+    + "so a later mismatch can be compared with the run and runner image that built it:";
+  if (trailer !== null) console.error(`${commitWith} ${trailer}`);
   if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, "", releaseLine(release), ""].join("\n"));
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, ["### Linux build manifest", "", line, "", releaseLine(release), "",
+      ...(trailer !== null ? [commitWith, "", `    ${trailer}`, ""] : [])].join("\n"));
   }
   process.stdout.write(`${release.label}\n`);
 }

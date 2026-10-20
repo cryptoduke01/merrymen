@@ -187,8 +187,9 @@ export function provenance(env) {
  */
 export const RUNNER_IMAGE_NOTE = "GitHub-hosted runner image, named by release (ubuntu-24.04) but not digest-pinned: GitHub updates it in place. "
   + "If the pinned Linux build stops matching the committed manifest while the program source and scripts/ci/solana-toolchain.env did not change, "
-  + "compare this image version with the one recorded by the run that produced the committed manifest and investigate the toolchain and image; "
-  + "never commit a new manifest just to make the comparison pass.";
+  + "compare this image version with the one in the Vault-Linux-Manifest line of the commit that added the committed manifest "
+  + "(git log -1 -- contracts/solana/build-manifests/Linux-x86_64.json; the producing run's own artifact and summary expire) "
+  + "and investigate the toolchain and image; never commit a new manifest just to make the comparison pass.";
 
 /**
  * The runner image that built an artifact: ImageOS and ImageVersion, which

@@ -32,7 +32,9 @@ import {
 import { releaseArtifactName, releaseRecord, releaseSource } from "./solana-release.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
-import { ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, verifyRecorded } from "./solana-linux-manifest.mjs";
+import {
+  ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, MANIFEST_TRAILER, manifestTrailer, verifyRecorded,
+} from "./solana-linux-manifest.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -1264,6 +1266,8 @@ describe("solana-program-record.mjs", () => {
     }
     assert.match(RUNNER_IMAGE_NOTE, /^GitHub-hosted runner image, named by release \(ubuntu-24\.04\) but not digest-pinned: GitHub updates it in place\./);
     assert.match(RUNNER_IMAGE_NOTE, /never commit a new manifest just to make the comparison pass\.$/);
+    // The baseline image is the one the committed manifest's own commit names, which outlives the run's artifact.
+    assert.ok(RUNNER_IMAGE_NOTE.includes(`the ${MANIFEST_TRAILER} line of the commit that added the committed manifest (git log -1 -- contracts/solana/${LINUX_MANIFEST};`), RUNNER_IMAGE_NOTE);
     assert.equal(runnerImageLine(runnerImage(image)), `- runner image: \`ubuntu24\` version \`20251012.1.0\`, not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
     assert.equal(runnerImageLine(runnerImage({})), `- runner image: unknown (no ImageOS or ImageVersion: not a GitHub-hosted runner), not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
     const so = elf(TOKEN_BYTES);
@@ -1688,7 +1692,13 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(none.status, 0, none.stderr);
     assert.equal(none.stdout, "not-a-release\n");
     assert.match(none.stderr, /^::notice title=Linux build manifest::No build-manifests\/Linux-x86_64\.json is committed.*The artifact is uploaded as not-a-release \(no Linux build manifest is committed yet\)\.$/m);
-    assert.deepEqual(none.record.linuxManifest, { file: LINUX_MANIFEST, status: "uncommitted", problem: null });
+    // The line to end the manifest's commit message with: the run and image that built it, which the artifact's expiry would lose.
+    const noneTrailer = manifestTrailer({ manifest: JSON.parse(readFileSync(manifest, "utf8")), run: provenance(mainRun), image: null });
+    assert.equal(noneTrailer, `${MANIFEST_TRAILER}: run unknown.unknown of millw14/merrymen (push on refs/heads/main at ${"c".repeat(40)}), `
+      + `runner image unknown unknown, artifact ${soSha} (${so.length} bytes), source digest ${darwin.source.digest}`);
+    assert.deepEqual(none.record.linuxManifest, { file: LINUX_MANIFEST, status: "uncommitted", problem: null, commitTrailer: noneTrailer });
+    assert.match(none.stderr, new RegExp(`^If this manifest is committed \\(after review, never just to make the comparison pass\\), end that commit's message with this line, .*: ${MANIFEST_TRAILER}: run unknown`, "m"));
+    assert.ok(none.summary.includes(`\n\n    ${noneTrailer}\n`), none.summary);
     assert.equal(none.record.release.label, "not-a-release");
     assert.equal(none.record.program, "merrymen_vault", "the rest of the record is kept");
 
@@ -1704,6 +1714,9 @@ describe("solana-linux-manifest.mjs", () => {
     assert.match(matches.summary, /^### Linux build manifest\n\nThe pinned Linux build matches the committed build-manifests\/Linux-x86_64\.json: /);
     assert.match(matches.summary, /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(a run on main whose pinned Linux build matched the committed manifest\)\. A release artifact comes only/m);
     assert.match(matches.stderr, /The artifact is uploaded as candidate-unconfirmed \(a run on main whose pinned Linux build matched the committed manifest\)\.$/m);
+    // Nothing to commit when it matches.
+    assert.equal(matches.record.linuxManifest.commitTrailer, null);
+    for (const out of [matches.stderr, matches.summary]) assert.ok(!out.includes(MANIFEST_TRAILER), out);
     build(so);
     const pr = report(prRun);
     assert.equal(pr.status, 0, pr.stderr);
@@ -1751,6 +1764,11 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(imaged.status, 0, imaged.stderr);
     assert.match(imaged.stderr, /\(its pinned Linux build differs from the committed manifest\)\. This run's runner image: ubuntu24 20251012\.1\.0 \(not digest-pinned\); if the program source and toolchain pins did not change, the image may have: investigate before committing anything\. The job's last step fails on this\.$/m);
     assert.deepEqual(imaged.record.runnerImage, withImage.runnerImage, "report keeps the record's image");
+    // A manifest that differs may be committed on purpose: its commit line names this run's image.
+    assert.equal(imaged.record.linuxManifest.commitTrailer,
+      manifestTrailer({ manifest: JSON.parse(readFileSync(manifest, "utf8")), run: provenance(mainRun), image: withImage.runnerImage }));
+    assert.match(imaged.record.linuxManifest.commitTrailer, /, runner image ubuntu24 20251012\.1\.0, artifact [0-9a-f]{64} \(/);
+    assert.ok(imaged.summary.includes(`\n\n    ${imaged.record.linuxManifest.commitTrailer}\n`), imaged.summary);
 
     // A main run that deleted the committed manifest: not-a-release too.
     gitIn("rm", "-q", "-f", "contracts/solana/build-manifests/Linux-x86_64.json");
@@ -1761,6 +1779,7 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(removed.stdout, "not-a-release\n");
     assert.equal(removed.record.linuxManifest.status, "removed");
     assert.equal(removed.record.release.reason, "the committed Linux build manifest was deleted");
+    assert.equal(removed.record.linuxManifest.commitTrailer, null, "restored, not committed anew");
 
     // Errors fail the step, so nothing is uploaded: a record for another
     // artifact, a missing record, no recorded manifest.
@@ -1775,6 +1794,19 @@ describe("solana-linux-manifest.mjs", () => {
     assert.match(missing.stderr, /^::error::cannot read the build record/m);
     rmSync(manifest);
     assert.equal(run(process.execPath, [script, "report", dir, recordPath], mainRun).status, 1);
+  });
+
+  it("manifestTrailer names the run, runner image and artifact on one line, unknown parts as unknown", () => {
+    const m = linux({ "artifact.sha256": soSha, "artifact.bytes": so.length });
+    const run = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main", commit: "d".repeat(40), runId: "123", runAttempt: "2" };
+    assert.equal(manifestTrailer({ manifest: m, run, image: runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" }) }),
+      `Vault-Linux-Manifest: run 123.2 of millw14/merrymen (push on refs/heads/main at ${"d".repeat(40)}), runner image ubuntu24 20251012.1.0, `
+      + `artifact ${soSha} (${so.length} bytes), source digest ${m.source.digest}`);
+    assert.equal(manifestTrailer({ manifest: m }),
+      `Vault-Linux-Manifest: run unknown.unknown of unknown (unknown on unknown at unknown), runner image unknown unknown, `
+      + `artifact ${soSha} (${so.length} bytes), source digest ${m.source.digest}`);
+    // A git trailer: one line, "token: value".
+    assert.match(manifestTrailer({ manifest: m, run }), /^Vault-Linux-Manifest: [^\n]+$/);
   });
 
   it("assess: a manifest HEAD deleted while its first parent has one is removed, and fails the comparison", () => {
