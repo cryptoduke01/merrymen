@@ -79,23 +79,53 @@ def _base58_encode(b: bytes) -> str:
     return "1" * (len(b) - len(b.lstrip(b"\x00"))) + out
 
 
-def test_the_glued_scan_is_bounded_and_fails_closed_past_its_budget():
+def _best_ms(runs: int, scan) -> float:
+    """The fastest of several runs, in milliseconds: load only ever adds time."""
+    least = float("inf")
+    for _ in range(runs):
+        started = time.perf_counter()
+        scan()
+        least = min(least, time.perf_counter() - started)
+    return least * 1000
+
+
+def test_the_glued_scan_is_linear_and_fails_closed_past_its_budget():
     # ids.test.ts builds the same text. Runs that hold no 43- or 44-character
-    # key window: short of one, or hex alone.
-    no_key = " ".join(("1" + "z" * (31 + i % 10)) if i % 3 else "abcdef12345" * 9 for i in range(30_000))
+    # key window (short of one, or hex alone), and runs that hold a signature.
+    def no_key_run(i: int) -> str:
+        return ("1" + "z" * (31 + i % 10)) if i % 3 else "abcdef12345" * 9
+
+    def key_like_run(i: int) -> str:
+        return _base58_encode(bytes((i * 7 + j * 13 + 1) % 256 for j in range(64))) + f"x{i}"
+
+    def text_of(count: int, run) -> str:
+        return " ".join(run(i) for i in range(count))
+
+    no_key = text_of(30_000, no_key_run)
     assert len(no_key) > 1_000_000
     assert onchain_ids_in(no_key[:5_000], glued=True) == [], "none of these runs holds an id"
-    started = time.monotonic()
     assert onchain_ids_in(no_key, glued=True), "past the decode budget, the remaining runs are refused unread"
-    assert time.monotonic() - started < 10
-    key_like = " ".join(
-        _base58_encode(bytes((i * 7 + j * 13 + 1) % 256 for j in range(64))) + f"x{i}" for i in range(12_000)
-    )
+    key_like = text_of(12_000, key_like_run)
     assert len(key_like) > 1_000_000
-    started = time.monotonic()
     assert onchain_id_in(key_like, glued=True)
-    assert time.monotonic() - started < 10
     assert GLUED_DECODES == 4096
+
+    # BOUNDED TIME, MEASURED AGAINST THIS MACHINE IN THIS RUN, never a wall
+    # clock, as ids.test.ts measures it: a fixed budget fails on a runner with
+    # a load average near 100. Linear: 32 times the text costs at most 4 x 32
+    # times the time (measured 17-28x); a scan quadratic in its text costs about
+    # 1,000x. And within 100x of the default scan over the same text, which
+    # decodes every standalone run with no budget (measured 4-15x). The 5 ms is
+    # timer and scheduling slack on the smaller figure, not a budget.
+    for name, big, run, count in (("no key", no_key, no_key_run, 30_000), ("key-like", key_like, key_like_run, 12_000)):
+        small = text_of(-(-count // 32), run)
+        _best_ms(2, lambda: onchain_ids_in(small, glued=True))
+        t_small = _best_ms(5, lambda: onchain_ids_in(small, glued=True))
+        t_big = _best_ms(3, lambda: onchain_ids_in(big, glued=True))
+        t_default = _best_ms(3, lambda: onchain_ids_in(big))
+        took = f"{name}: {t_big:.1f} ms for {len(big)} characters, {t_small:.1f} ms for {len(small)}, default scan {t_default:.1f} ms"
+        assert t_big < 4 * 32 * t_small + 5, f"not linear in the text: {took}"
+        assert t_big < 100 * t_default + 5, f"far slower than the default scan: {took}"
 
 
 def test_base58_decodes_lengths_and_leading_zeros():
