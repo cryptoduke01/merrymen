@@ -38,6 +38,19 @@ describe("promptSafe over stored group lines", () => {
     assert.ok(again < 50, `the next prompt's 30 quotes took ${again.toFixed(1)} ms of CPU time`);
   });
 
+  it("quotes 30 fresh 400-character base58 lines, each the first time, in under 50 ms of CPU", () => {
+    // The first scan of each new untrusted line: no memo helps. promptSafe reads no glued-key
+    // windows (secretScanBudget({ windows: false })); encodedRuns quotes those runs as "(a code)".
+    let x = 0x7f4a7c15;
+    const line = () => Array.from({ length: 400 }, () => ALPHABET[((x = (Math.imul(x, 1664525) + 1013904223) >>> 0) >>> 16) % 58]).join("");
+    let first = Infinity;
+    for (let round = 0; round < 3; round++) {
+      const lines = Array.from({ length: 30 }, line);
+      first = Math.min(first, cpuMsOf(() => lines.forEach((l) => promptSafe(l, 240))));
+    }
+    assert.ok(first < 50, `30 fresh quotes took ${first.toFixed(1)} ms of CPU time`);
+  });
+
   it("still never quotes a key, glued or not, on a rescan", () => {
     const seed = Uint8Array.from({ length: 32 }, (_, i) => (i * 29 + 3) & 255);
     const key = base58Encode(Uint8Array.from([...seed, ...ed25519.getPublicKey(seed)]));

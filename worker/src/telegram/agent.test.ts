@@ -275,6 +275,26 @@ test("send_file scans the WHOLE file — a secret past the old 200KB window is r
   }
 });
 
+test("send_file refuses a file whose secret scan throws: only a file that cannot be read falls through to sending", async () => {
+  const root = temporaryRoot("mm-agent-");
+  const sends: string[] = [];
+  const fetchFn = (async (url: unknown) => {
+    sends.push(String(url));
+    return Response.json({ ok: false, description: "not in tests" });
+  }) as unknown as typeof fetch;
+  try {
+    writeFileSync(path.join(root, "notes.txt"), "nothing secret-shaped in here");
+    // A scan that cannot finish, whatever the reason (here a known value that throws when compared).
+    const unscannable = { length: 9, toString: () => { throw new RangeError("Maximum call stack size exceeded"); } } as unknown as string;
+    const sendFile = buildTools(baseCfg({ capabilities: new Set(["files"]), filesRoot: root, secrets: [unscannable] }), { ...io(), opts: { token: "t", fetchFn } })
+      .find((t) => t.spec.name === "send_file")!;
+    assert.equal(await sendFile.exec({ path: "notes.txt" }), "REFUSED: I could not finish scanning that file for secrets — I won't send it.");
+    assert.deepEqual(sends, [], "nothing was sent");
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
 test("the remember tool persists via the injected callback", async () => {
   const saved: string[] = [];
   const tools = buildTools(baseCfg({ capabilities: new Set(["files"]), filesRoot: os.tmpdir() }), io((n) => {
