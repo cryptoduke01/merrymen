@@ -1,7 +1,7 @@
 /** Deterministic, opt-in USDG/SOL rebalancer. Both modes use the same admission boundary. */
 import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_MIN_TRADE_USDG_RAW, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits,
+import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_BELOW_MINIMUM, SOLANA_LIVE_MIN_TRADE_USDG_RAW, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits,
   type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
@@ -42,7 +42,8 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   if (amount === 0n) return null;
   // Live admission refuses a trade worth under SOLANA_LIVE_MIN_TRADE_USDG_RAW (the shared fee payer pays it):
   // such a live buy is in band, not a refusal every tick. Sells are left to admission, which values them at the
-  // independent reference: the mark here can be a dust quote, and a sale it undervalues must still be tried and refused.
+  // independent reference: the mark here can be a dust quote, and a sale it undervalues must still be tried. One
+  // admission refuses is treated as in band by the agent (BELOW THE LIVE MINIMUM in createSolanaAgent).
   if (input.mode === "live" && buying && amount < SOLANA_LIVE_MIN_TRADE_USDG_RAW) return null;
   // Never an earlier attempt's ID: a proven-expired request is never re-sent, a new attempt is a new request.
   const requestId = `${SOLANA_AUTONOMOUS_REQUEST_PREFIX}${input.revision}-${input.attempt}`;
@@ -220,6 +221,25 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
     feePayerCheckedAtMs = at;
     await options.runtime.feePayerCheck(vault === undefined ? {} : { vault });
   };
+  /**
+   * BELOW THE LIVE MINIMUM. Admission refuses a live trade worth under
+   * SOLANA_LIVE_MIN_TRADE_USDG_RAW at the independent reference, unless it sells
+   * the whole booked position (SOLANA_LIVE_BELOW_MINIMUM), after the executor
+   * has quoted, routed, simulated and signed it. A strategy whose rebalance is
+   * that small (a sale capped by a small strategy size, per-trade limit or SOL
+   * sell limit, or a small vault's deviation) is treated as in band: tried
+   * again once its interval passes, never every tick. Said as a [warn] at most
+   * once per SOLANA_AGENT_ALERT_REPEAT_MS per account while it persists, and at
+   * once again after it clears (the strategy trades, or plans nothing). Logging
+   * never changes an outcome.
+   */
+  const belowMinimum = (scope: SolanaAccountScope, side: "buy" | "sell", intervalSeconds: number) => {
+    const account = solanaAccountRef(scope);
+    say(`below-minimum:${account}`, `[warn] Solana autonomous rebalance below the live minimum: admission refused an account's strategy trade worth under `
+      + `1 USDG at the independent SOL price, so the strategy waits its interval and tries again: ${JSON.stringify({ solana: "warn", kind: "below-live-minimum",
+        account, side, minimumUsdgRaw: SOLANA_LIVE_MIN_TRADE_USDG_RAW.toString(), intervalSeconds })} — the owner's strategy trade size, USDG per trade and SOL `
+      + "sold per trade must each be worth at least 1 USDG (docs/solana-integration.md); a small vault's rebalance stays below it until the band widens");
+  };
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
   // When each tenant's strategy last found nothing to do (in band), or admission refused it
   // because expired attempts used up its daily operations, by settings revision.
@@ -310,19 +330,22 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
           if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
-          if (!intent) { inBand(); continue; }
+          if (!intent) { said.delete(`below-minimum:${solanaAccountRef(scope)}`); inBand(); continue; }
           if (row.requested_mode === "live" && !status.live.ready && intent.inputMint === SOLANA_USDG_MINT) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           if (options.signal?.aborted) break;
           // Already admitted under this ID (another worker got there first): a replay submits nothing.
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
           try { await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal }); }
           catch (error) {
+            if (row.requested_mode !== "live" || !(error instanceof SolanaTradingStoreError)) throw error;
             // Held by the owner's daily operations, which expired attempts used up (counted by admission after the
             // check above): said as an [alert], and not tried again until the interval passes, as when in band.
-            if (row.requested_mode !== "live" || !(error instanceof SolanaTradingStoreError) || error.message !== SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) throw error;
-            await expiredUse(scope, limits.maxOpsPerDay, true);
-            inBand(); continue;
+            if (error.message === SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) { await expiredUse(scope, limits.maxOpsPerDay, true); inBand(); continue; }
+            // Worth under the live minimum at the reference: in band until the interval passes (BELOW THE LIVE MINIMUM).
+            if (error.message === SOLANA_LIVE_BELOW_MINIMUM) { belowMinimum(scope, intent.inputMint === SOLANA_USDG_MINT ? "buy" : "sell", strategy.intervalSeconds); inBand(); continue; }
+            throw error;
           }
+          said.delete(`below-minimum:${solanaAccountRef(scope)}`);
           if (row.requested_mode === "live") await expiredUse(scope, limits.maxOpsPerDay, false);
           results.push({ owner: row.owner, outcome: "submitted" });
         } catch { results.push({ owner: row.owner, outcome: "unavailable" }); }

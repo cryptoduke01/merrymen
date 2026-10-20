@@ -180,10 +180,16 @@ it pays every tenant's swaps, a live trade must be worth at least 1 USDG at the
 independent reference price (`SOLANA_LIVE_MIN_TRADE_USDG_RAW`), checked at
 durable admission; a sale of the whole recorded SOL position is exempt so a
 position that fell below it can still be exited, and the autonomous strategy
-treats a smaller live rebalance buy as in band (a smaller sale is planned and
-refused at admission, which values it at the reference, not at the mark). Paper trades have no minimum. The
-platform's spend per tenant stays bounded by `maxOpsPerDay` swaps a day; there
-is no per-tenant fee budget.
+treats a smaller live rebalance buy as in band. A smaller sale is still
+planned, since the mark can undervalue it and admission values it at the
+reference. When admission refuses one as below the minimum, the strategy treats
+that as in band too: it waits its interval before trying again, never retrying
+every tick, and the worker says `[warn] Solana autonomous rebalance below the
+live minimum` (`kind: below-live-minimum`) at most every 10 minutes per
+account. Each try still costs a quote, a route, a simulation and a signature on
+the platform's providers, once per strategy interval. Paper trades have no
+minimum. The platform's spend per tenant stays bounded by `maxOpsPerDay` swaps
+a day; there is no per-tenant fee budget.
 Owner-signed setup and recovery transactions use the owner as payer.
 
 ## Custody, limits and buy breakers
@@ -897,6 +903,7 @@ interval shown while it persists.
 | `[alert] Solana vault below its book` (`kind: vault-below-book`, account ref) | worker | Tokens left a vault outside Merrymen | [A vault below its book](#a-vault-below-its-book). Every 10 min per account. |
 | `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations` (`kind: expired-attempts-exhausted`) | worker | Automated trades and exits of that account pause until the attempts leave the 24 h window | Check provider health and congestion. Raising `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` is an owner decision. Every 10 min per account. |
 | `[warn] Solana proven-expired attempts use more than half of an account's daily operations` (`kind: expired-attempts-high`) | worker | Early warning for the line above | Watch; same remedies. |
+| `[warn] Solana autonomous rebalance below the live minimum` (`kind: below-live-minimum`, account ref, side, interval) | worker | Admission refused an account's strategy trade as worth under 1 USDG at the reference; the strategy tries again once per interval | Nothing for the operator. The owner's strategy size, USDG per trade and SOL sold per trade must each be worth at least 1 USDG; a small vault's rebalance stays below it until it grows. Every 10 min per account. |
 
 Point the log alert that already watches the orchestrator's `[alert]` lines at
 the web and Solana worker services too. Not alerted yet: a stale worker

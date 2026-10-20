@@ -11,6 +11,7 @@ import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { runSolanaHoldCommand } from "./solana-operator-hold";
 import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_LIVE_BELOW_MINIMUM } from "../../packages/core/src/solana";
 import { SOLANA_AGENT_ALERT_REPEAT_MS, SOLANA_AGENT_FEE_PAYER_CHECK_MS, SOLANA_PENDING_STUCK_MS, solanaAccountRef } from "./solana-agent";
 import { SolanaMarketError } from "./solana-market";
 
@@ -471,6 +472,59 @@ test("admission's own refusal for expired attempts is said as the [alert] and no
   f.clock.now += 15_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
   assert.equal(f.control.trades, 4, "the untyped refusal came from runtime.trade, and an unavailable tick is not spaced");
   assert.equal(f.lines.length, 1);
+});
+
+test("a live rebalance admission refuses as below the 1 USDG minimum is tried at most once per strategy interval, and says a [warn] why", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, lines: string[] = [];
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+  await bindings.bind(TENANT, "did:privy:minimum", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: NOW + 100 * 3_600_000 });
+  // A 0.50 USDG strategy trade against a book of 1 SOL and no USDG: every rebalance is a sale worth under the minimum.
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, tradeUsdgRaw: "500000", intervalSeconds: 30 });
+  await ensureSolanaTradingSchema(db);
+  const control = { refuse: new SolanaTradingStoreError(SOLANA_LIVE_BELOW_MINIMUM) as Error | null, trades: [] as Array<{ inputMint: string; amountRaw: string }>, statuses: 0, quotes: 0 };
+  const runtime = {
+    status: async () => { control.statuses++; return { paper: null, live: { balances: {}, tradable: { cashUsdg: "0", wsolRaw: "1000000000" }, pending: [], ready: true, canExit: true, blockers: [] } }; },
+    // In production each call is the executor's whole quote, route, simulation and signature before admission refuses.
+    trade: async (_scope: unknown, request: { intent: { inputMint: string; amountRaw: string } }) => { control.trades.push(request.intent); if (control.refuse) throw control.refuse; return {}; },
+  } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  // 1 SOL at 100 USDG.
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async i => {
+    control.quotes++;
+    const out = BigInt(i.amountRaw) / 10n;
+    return { source: "jupiter", inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),
+      minOutAmount: (out * 995n / 1000n).toString(), slippageBps: 50, contextSlot: 1, quotedAtMs: clock.now, expiresAtMs: clock.now + 30000 };
+  } };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now, log: line => lines.push(line) });
+  // The worker's 15 s loop for two minutes: tried at 0, 30, 60 and 90 s, waiting in between, never unavailable.
+  const outcomes: string[] = [];
+  for (let i = 0; i < 8; i++) { if (i) clock.now += 15_000; outcomes.push(...(await agent.tick()).map(r => r.outcome)); }
+  assert.deepEqual(outcomes, ["held", "waiting", "held", "waiting", "held", "waiting", "held", "waiting"]);
+  assert.equal(control.trades.length, 4, "once per 30 s interval, not once per tick");
+  // Each try: the mark and the sale's two re-quotes below the strategy cap. Nothing while it waits.
+  assert.deepEqual([control.statuses, control.quotes], [4, 12], "no status read or quote while it waits");
+  assert.ok(control.trades.every(i => i.inputMint === SOLANA_WRAPPED_SOL_MINT));
+  // Said once per repeat window, with no tenant identity.
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^\[warn\] Solana autonomous rebalance below the live minimum/);
+  assert.deepEqual(fieldsOf(lines[0]!), { solana: "warn", kind: "below-live-minimum", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }),
+    side: "sell", minimumUsdgRaw: "1000000", intervalSeconds: 30 });
+  assert.ok(!lines[0]!.includes(TENANT) && !lines[0]!.includes(OWNER));
+  clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(lines.length, 2, "said again after the repeat window");
+  // Once the strategy trades, the next refusal is said at once.
+  control.refuse = null; clock.now += 30_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
+  control.refuse = new SolanaTradingStoreError(SOLANA_LIVE_BELOW_MINIMUM); clock.now += 30_000;
+  await db.prepare("DELETE FROM solana_runtime_autonomous_attempts").run();
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(lines.length, 3);
+  // Any other refusal is still unavailable and not spaced.
+  control.refuse = new SolanaTradingStoreError("The Solana rolling daily limit would be exceeded."); clock.now += 30_000;
+  const before = control.trades.length;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  clock.now += 15_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  assert.equal(control.trades.length, before + 2);
 });
 
 test("expired attempts that count for more than half of the day's operations say a [warn]; within half, or covered by the allowance, nothing", async t => {
