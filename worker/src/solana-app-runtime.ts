@@ -102,21 +102,6 @@ export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independe
  */
 export const SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED = "The fee payer warning threshold setting is misconfigured; operators are alerted below four times the fee cap until it is fixed. Trading and exits continue.";
 /**
- * The status blocker while the vault holds less USDG or WSOL than its book
- * (recorded trades, deposits and in-app withdrawals). Tokens left it outside
- * Merrymen: an owner withdrawal made with the recovery tool or the owner's own
- * wallet, say. Trading and automated exits are held, never sized from a
- * balance that is not there (admission refuses a shortfall too). The owner can
- * still revoke, and withdraw what the vault holds up to the book
- * (prepareOwnerAction caps each withdrawal at both and books no inflow while a
- * balance is short). The agent says it to operators as an [alert]
- * (vault-below-book). Nothing here books an outflow: an operator reconciles the
- * book with the vault.
- */
-export const SOLANA_STATUS_BELOW_BOOK = "Your vault holds less than its recorded trades: tokens left it outside Merrymen (for example a withdrawal made with the recovery tool or your own wallet). "
-  + "Trading and automated exits are held, so nothing trades on a balance that is not there, until an operator reconciles the records with the vault. "
-  + "You can still revoke, and withdraw what the vault holds up to its recorded balances.";
-/**
  * The status blocker while the vault's balances were read from a bank older
  * than the book's own slot (a lagging provider): such a read cannot show a
  * shortfall, so it is never said as SOLANA_STATUS_BELOW_BOOK, and trading
@@ -156,6 +141,12 @@ function refundBlocker({ mint, problem }: SolanaOwnerRefundBlock): string {
     default: return `${waiting} is not a token account the vault can use. Check that account in your wallet. ${stopped}`;
   }
 }
+/**
+ * The status blocker while a vault balance is below its book, and what the owner
+ * can do about it: a withdrawal made outside Merrymen is recorded from its own
+ * transaction (recordExternalWithdrawals); anything else stays held.
+ */
+export const SOLANA_STATUS_BELOW_BOOK = "Vault balances are below recorded trades. If you withdrew from the vault outside Merrymen, with your owner key in another wallet or tool, record those withdrawals under Owner controls; until the records match the vault, trading and automated exits stay held.";
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -815,6 +806,30 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   return {
     /**
+     * The shared fee payer's level for the worker's periodic check (the agent's,
+     * every SOLANA_AGENT_FEE_PAYER_CHECK_MS), read and judged as status reads and
+     * judges it and said through the same [alert]s (one line per change of level,
+     * repeated every ten minutes while it is not ok): a payer that cannot fund
+     * exits pages the operator even while no status is read. `vault`: a
+     * registered vault whose USDG account sizes a buy, as status sizes it (every
+     * vault's is the same size); without one, the upper bound. Throws while live
+     * trading is not configured: there is nothing to check.
+     */
+    async feePayerCheck(input: { vault?: string } = {}): Promise<FeePayerLevel> {
+      config();
+      const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
+      const vaultCash = input.vault === undefined ? null : await deriveSolanaAta(address(input.vault), SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+      const low = feePayerLow();
+      const state = await rpc().read(async read => {
+        const [payerAccount, cashAccount] = await readAccounts(read, vaultCash === null ? [feePayer] : [feePayer, vaultCash]);
+        return feePayerState(read, payerAccount ?? null, cashAccount ?? null);
+      });
+      const level = feePayerLevel(state, low.lamports);
+      reportFeePayer(level, { feePayer, lamports: state.lamports.toString(), exitMinimumLamports: state.exitMinimum.toString(),
+        buyMinimumLamports: state.buyMinimum.toString(), lowLamports: low.shown === null ? null : low.shown.toString(), level });
+      return level;
+    },
+    /**
      * The account's paper and live state. Chain reads happen only for a live
      * binding or an account that already has live state (a session, a live book,
      * an owner transaction or a pending trade); a paper-only account costs no RPC.
@@ -1135,7 +1150,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * Owner recovery transactions, signed by the owner (also the fee payer):
      * - revoke, resume-buys;
      * - withdraw { mint, amountRaw }: USDG or WSOL to the owner's token account,
-     *   bounded by the reconciled book and by what the vault holds. A WSOL withdrawal first runs SyncNative
+     *   bounded by the reconciled book. A WSOL withdrawal first runs SyncNative
      *   when native SOL sits unsynced in the vault's WSOL account, and may take it too.
      *   It also carries what the WSOL was worth when prepared, when that can be read,
      *   so the high-water mark drops by it once the withdrawal lands;
@@ -1167,30 +1182,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         }
         if (book) {
           const observedAtMs = now();
-          // What the vault holds, finalized, as one provider reads it: it caps the withdrawal and says whether an inflow waits.
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner: only when nothing
-          // is short (as status books it), and only from finalized balances every provider reports. Providers that
-          // disagree (honest ones answer at different slots, and anyone can send dust) or cannot answer book nothing,
-          // and the withdrawal goes ahead on the book as it stands; status books the inflow on a later read.
-          if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) {
-            try {
-              const agreed = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
-              if (!shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
-            } catch { /* Not booked now; withdrawn from the book. */ }
-          }
+          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
+          if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
           book = (await s.liveBook())!;
-          // Never more than the book records (unbooked tokens are not offered), nor than the vault holds: below its
-          // book (tokens left it outside Merrymen), a withdrawal of the book's amount would only fail on chain.
-          const usdg = input.mint === SOLANA_USDG_MINT;
-          const recorded = usdg ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book), held = BigInt(usdg ? finalized.cashUsdg : finalized.wsolRaw);
-          if (amount > recorded + synced) fail("The withdrawal exceeds the reconciled vault balance.");
-          const most = (held < recorded ? held : recorded) + synced;
-          if (amount > most) {
-            const whole = usdg ? 1_000_000n : 1_000_000_000n, fraction = (most % whole).toString().padStart(usdg ? 6 : 9, "0").replace(/0+$/, "");
-            fail(`Your vault holds less ${usdg ? "USDG" : "wrapped SOL"} than its recorded balance: tokens left it outside Merrymen. At most `
-              + `${most / whole}${fraction ? `.${fraction}` : ""} ${usdg ? "USDG" : "wrapped SOL"} can be withdrawn here. Nothing was prepared.`);
-          }
+          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
+          if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
           // Capital out: what the withdrawn WSOL is worth lowers the high-water mark
           // when it lands, as a USDG withdrawal does, so withdrawing is never a
           // drawdown. Only the booked position can move it: quarantine leaves first, at no value.
@@ -1225,30 +1222,6 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
-    /**
-     * The shared fee payer's level for the worker's periodic check (the agent's,
-     * every SOLANA_AGENT_FEE_PAYER_CHECK_MS), read and judged as status reads and
-     * judges it and said through the same [alert]s (one line per change of level,
-     * repeated every ten minutes while it is not ok): a payer that cannot fund
-     * exits pages the operator even while no status is read. `vault`: a
-     * registered vault whose USDG account sizes a buy, as status sizes it (every
-     * vault's is the same size); without one, the upper bound. Throws while live
-     * trading is not configured: there is nothing to check.
-     */
-    async feePayerCheck(input: { vault?: string } = {}): Promise<FeePayerLevel> {
-      config();
-      const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
-      const vaultCash = input.vault === undefined ? null : await deriveSolanaAta(address(input.vault), SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
-      const low = feePayerLow();
-      const state = await rpc().read(async read => {
-        const [payerAccount, cashAccount] = await readAccounts(read, vaultCash === null ? [feePayer] : [feePayer, vaultCash]);
-        return feePayerState(read, payerAccount ?? null, cashAccount ?? null);
-      });
-      const level = feePayerLevel(state, low.lamports);
-      reportFeePayer(level, { feePayer, lamports: state.lamports.toString(), exitMinimumLamports: state.exitMinimum.toString(),
-        buyMinimumLamports: state.buyMinimum.toString(), lowLamports: low.shown === null ? null : low.shown.toString(), level });
-      return level;
-    },
     /**
      * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
      * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the

@@ -605,7 +605,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     const listed = await runSolanaResolveCommand(["pending"], deps(NOW + 5 * 60_000));
     assert.deepEqual(listed.split("\n"), [
       "Pending for over 3 minutes, oldest first (tenant, what, id, age, vault sequence):",
-      `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7`,
+      `  ${OTHER}\towner withdraw-sol transaction\towner-sig-1\tpending 6 min\tvault sequence 7\tnpm run solana:resolve -- owner show ${OTHER} owner-sig-1`,
       `  ${TENANT}\tlive trade\tstuck-1\tpending 5 min\tvault sequence 0\tnpm run solana:resolve -- show ${TENANT} stuck-1`,
     ]);
     for (const secret of ["b3duZXItYnl0ZXM=", f.pending.signedTransactionBase64, f.pending.messageBase64]) assert.ok(!listed.includes(secret), secret);

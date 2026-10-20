@@ -440,15 +440,13 @@ test("one raw WSOL sent to the vault no longer freezes exits or owner withdrawal
   } finally { f.raw.close(); }
 });
 
-test("below its book, the owner can still withdraw what the vault holds up to the book, even with a stranger's WSOL above it (audit G3-3, mixed state)", async () => {
+test("below its book with a stranger's WSOL above it, status says so and books nothing, with no two-provider booking read (audit G3-3, mixed state)", async () => {
   const f = await fixture();
   try {
     await f.live(); f.controls.initialized = true; await f.registered();
     const book = { hwmRaw: "100000000", cashRaw: "90000000", wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0",
       networkFeesLamports: "10000", slot: 900, updatedAtMs: 999_000 };
     await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify(book));
-    const booked = async () => (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
-    const withdraw = (mint: string, amountRaw: string) => f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint, amountRaw });
     // 20 USDG left with the recovery tool, then one raw WSOL from a stranger (anyone can send it).
     f.controls.cash = 70_000_000n; f.controls.wsol = 50_000_001n;
     // The second provider's finalized balance reads: asked only to book an inflow, which nothing short ever is.
@@ -458,21 +456,9 @@ test("below its book, the owner can still withdraw what the vault holds up to th
       return f.read(method, params);
     };
     const status = await f.app.status(f.scope);
-    assert.ok(status.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.match(SOLANA_STATUS_BELOW_BOOK, /withdraw what the vault holds up to its recorded balances/);
-    for (const amount of ["10000000", "70000000"]) assert.ok((await withdraw(SOLANA_USDG_MINT, amount)).transactionBase64, amount);
-    assert.ok((await withdraw(SOLANA_WRAPPED_SOL_MINT, "50000000")).transactionBase64);
-    // Never more than the vault holds, and the stranger's unit is not booked while USDG is short, so not offered.
-    await assert.rejects(withdraw(SOLANA_USDG_MINT, "70000001"),
-      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid" && /holds less USDG than its recorded balance.*At most 70 USDG can be withdrawn here\. Nothing was prepared\./.test(error.message));
-    await assert.rejects(withdraw(SOLANA_WRAPPED_SOL_MINT, "50000001"), /exceeds the reconciled vault balance/);
-    assert.deepEqual(await booked(), book, "nothing is booked while a balance is short");
+    assert.ok(status.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(status.live.canExit, false);
+    assert.deepEqual((await new SolanaTradingStore(f.db, f.scope).liveBook())!, book, "nothing is booked while a balance is short");
     assert.equal(bookingReads, 0, "no two-provider read to book an inflow while a balance is short");
-    // Purely below the book: the book's amount would only fail on chain, so it is not prepared.
-    f.controls.wsol = 49_999_999n;
-    await assert.rejects(withdraw(SOLANA_WRAPPED_SOL_MINT, "50000000"), /holds less wrapped SOL than its recorded balance.*At most 0\.049999999 wrapped SOL/);
-    assert.ok((await withdraw(SOLANA_WRAPPED_SOL_MINT, "49999999")).transactionBase64);
-    await assert.rejects(withdraw(SOLANA_USDG_MINT, "80000000"), /At most 70 USDG/);
-    assert.deepEqual(await booked(), book);
   } finally { f.raw.close(); }
 });
 
@@ -534,20 +520,6 @@ test("a deposit is booked only from finalized balances both providers report, at
     let status = await f.app.status(f.scope);
     assert.equal(status.live.ready, true, status.live.blockers.join(" | "));
     assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["90000000", "100000000", 900]);
-    // ... nor by a withdrawal prepare: it books nothing, and offers only the book. An amount above the book is refused...
-    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "95000000" }), /exceeds the reconciled vault balance/);
-    assert.equal((await booked()).cashRaw, "90000000");
-    // ... and an amount inside it still prepares while the providers disagree, whichever one shows more (honest
-    // providers answer finalized reads at different slots, and anyone can send dust to the vault).
-    const dust = (answer: { context: { slot: number }; value: unknown[] }) =>
-      ({ ...answer, value: [{ ...(answer.value[0] as object), data: [f.tokenAccount(SOLANA_USDG_MINT, 90_000_001n).toString("base64"), "base64"] }, answer.value[1]] });
-    for (const [which, change] of [["primary", phantom], ["fallback", dust], ["primary", dust]] as const) {
-      f.providers.primary = null; f.providers[which] = balanceRead(f, change);
-      const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "50000000" });
-      assert.ok(prepared.transactionBase64, which);
-      assert.deepEqual([(await booked()).cashRaw, (await booked()).hwmRaw, (await booked()).slot], ["90000000", "100000000", 900], which);
-      f.providers[which] = null;
-    }
     // A real deposit both providers see is booked.
     f.providers.primary = null; f.controls.cash = 100_000_000n;
     status = await f.app.status(f.scope);

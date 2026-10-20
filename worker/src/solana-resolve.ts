@@ -57,13 +57,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { CHAINS } from "../../packages/core/src/ids";
 import type { Db } from "./db";
+import { SOLANA_PENDING_STUCK_MS } from "./solana-agent";
 import { observationKey, observeSolanaSubmission, solanaAgreedSettlement, SolanaExecutionError, type SolanaLiveRecord, type SolanaLiveSettlement,
   type SolanaObservation } from "./solana-executor";
 import { createSolanaLiveRpc, type SolanaLiveRead } from "./solana-live-rpc";
 import { readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
 import { SolanaSettlementError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, SolanaTradingStore, SolanaTradingStoreError } from "./solana-trading-store";
-import { SOLANA_PENDING_STUCK_MS } from "./solana-agent";
 
 export class SolanaResolveError extends Error {
   constructor(message: string) { super(message); this.name = "SolanaResolveError"; }
@@ -81,8 +81,8 @@ export const SOLANA_RESOLVE_USAGE = [
   `--third-rpc also asks the provider whose HTTPS URL is in ${SOLANA_RESOLVE_THIRD_RPC_ENV} (set it in .env.solana.local or the environment, never on the command line).`,
   "--exclude sets aside one provider that reports a conflicting final outcome or cannot be read: its view is still shown and recorded, two other providers on their own",
   "hostnames must agree, and an expiry is still refused while any provider has seen the signature.",
-  "npm run solana:resolve -- pending lists every live trade and signed owner transaction pending over three minutes (the pending-stuck alert's): tenant, id, age and",
-  "vault sequence, from the database alone (no RPC).",
+  "npm run solana:resolve -- pending lists every live trade and signed owner transaction pending over three minutes (the pending-stuck alert's): tenant, id, age,",
+  "vault sequence and the show command for its evidence (owner show for an owner transaction), from the database alone (no RPC).",
 ].join("\n");
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_operator_resolutions (
@@ -354,7 +354,8 @@ export async function resolveSolanaPendingTrade(input: SolanaResolveInput): Prom
  * signed bytes, sealed seeds or settings). `id` is a trade's request id (what
  * show and book take) or an owner transaction's signature; `vaultSequence` is
  * the sequence a trade was signed against, or the one an owner transaction was
- * prepared at.
+ * prepared at. The CLI prints beside each the command that shows its evidence:
+ * show for a trade, owner show for an owner transaction.
  */
 export async function listSolanaStuckPending(db: Db, nowMs: number, postgres = false, olderThanMs = SOLANA_PENDING_STUCK_MS) {
   await ensureSolanaResolutionSchema(db, postgres);
@@ -448,7 +449,8 @@ export async function runSolanaResolveCommand(argv: readonly string[], deps: Sol
     const items = await listSolanaStuckPending(deps.db, (deps.now ?? Date.now)(), postgres);
     if (!items.length) return `Nothing has been pending for over ${SOLANA_PENDING_STUCK_MS / 60_000} minutes.`;
     return [`Pending for over ${SOLANA_PENDING_STUCK_MS / 60_000} minutes, oldest first (tenant, what, id, age, vault sequence):`, ...items.map(item => [`  ${item.tenant}`, item.what, item.id,
-      `pending ${age(item.ageMs)}`, `vault sequence ${item.vaultSequence ?? "unknown"}`, ...(item.kind === "trade" ? [`npm run solana:resolve -- show ${item.tenant} ${item.id}`] : [])].join("\t"))].join("\n");
+      `pending ${age(item.ageMs)}`, `vault sequence ${item.vaultSequence ?? "unknown"}`,
+      item.kind === "trade" ? `npm run solana:resolve -- show ${item.tenant} ${item.id}` : `npm run solana:resolve -- owner show ${item.tenant} ${item.id}`].join("\t"))].join("\n");
   }
   const booking = command === "book";
   if ((command !== "show" && !booking) || positional.length !== 2 || (booking ? !flags.has("operator") || !flags.has("reason") : flags.has("operator") || flags.has("reason"))) {
