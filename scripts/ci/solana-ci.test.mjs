@@ -23,7 +23,9 @@ import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { anchorProgramIds, base58Decode, declaredProgramId, programRecord, readToolchain } from "./solana-program-record.mjs";
+import {
+  anchorProgramIds, base58Decode, declaredProgramId, programRecord, provenance, readToolchain, releaseStatus, RELEASE_RULE,
+} from "./solana-program-record.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
 
@@ -136,6 +138,19 @@ describe("the CI jobs", () => {
     assert.doesNotMatch(test, /(RUSTFLAGS|CARGO_BUILD_TARGET_DIR|CARGO_PROFILE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+)=/);
     const top = /^env:\n((?: {2}.*\n)*)/m.exec(ci)?.[1] ?? "";
     assert.doesNotMatch(top, refused);
+  });
+
+  it("names the artifact for its commit and run, and as a release candidate only from a run on main", () => {
+    // The release rule says CI never runs on a tag push. Pushes run on main only.
+    const on = /^on:\n((?: {2}.*\n|\n)*)/m.exec(ci)?.[1] ?? "";
+    assert.match(on, /^ {2}push:\n {4}branches: \[main\]\n(?! {4})/m);
+    assert.doesNotMatch(on, /tags/);
+    const upload = /uses: actions\/upload-artifact@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
+    assert.match(upload, /^ {10}name: merrymen-vault-sbf-\$\{\{ steps\.record\.outputs\.release \}\}-\$\{\{ github\.sha \}\}-run\$\{\{ github\.run_id \}\}\.\$\{\{ github\.run_attempt \}\}$/m);
+    // The label comes from the record, and nothing but its two values reaches the name.
+    const record = steps(test).find(s => s.includes("id: record")) ?? "";
+    assert.match(record, /release=\$\(node -p 'require\(process\.argv\[1\]\)\.release\.label' "\$PWD\/contracts\/solana\/target\/deploy\/merrymen_vault\.build\.json"\)/);
+    assert.match(record, /case "\$release" in release-candidate\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"/);
   });
 
   it("uploads only the artifact and its record, never the throwaway keypair beside them", () => {
@@ -773,6 +788,48 @@ describe("solana-program-record.mjs", () => {
     for (const { id: other } of named) assert.equal(other, id);
   });
 
+  it("marks a release candidate only for a push or manual run on refs/heads/main of millw14/merrymen", () => {
+    const main = { repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" };
+    const candidates = [main, { ...main, event: "workflow_dispatch" }];
+    for (const p of candidates) assert.deepEqual(releaseStatus(p), { candidate: true, label: "release-candidate", rule: RELEASE_RULE }, JSON.stringify(p));
+    const others = [
+      { ...main, event: "pull_request", ref: "refs/pull/7/merge" },
+      { ...main, event: "pull_request", ref: "refs/heads/main" },
+      { ...main, repository: "someone/merrymen" },
+      { ...main, ref: "refs/heads/feature" },
+      { ...main, ref: "refs/heads/main-old" },
+      { ...main, event: "workflow_dispatch", ref: "refs/heads/release" },
+      // CI never runs on a tag push, and a manual run can be dispatched on a
+      // tag whose commit was never merged: neither is a release.
+      { ...main, ref: "refs/tags/vault-v1" },
+      { ...main, event: "workflow_dispatch", ref: "refs/tags/vault-v1" },
+      { ...main, ref: "refs/tags/" },
+      { ...main, event: "schedule" },
+      {},
+      null,
+    ];
+    for (const p of others) assert.equal(releaseStatus(p).label, "not-a-release", JSON.stringify(p));
+    assert.match(RELEASE_RULE, /^A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
+    assert.match(RELEASE_RULE, /CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate\./);
+    assert.doesNotMatch(RELEASE_RULE, /or a tag of/);
+  });
+
+  it("records the run: event, ref, commit, the pull request head, workflow and run", () => {
+    const event = join(fresh("event"), "event.json");
+    const head = "1".repeat(40);
+    writeFileSync(event, JSON.stringify({ pull_request: { head: { sha: head } } }));
+    const p = provenance({
+      GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge", GITHUB_SHA: "2".repeat(40),
+      GITHUB_EVENT_PATH: event, GITHUB_WORKFLOW_SHA: "3".repeat(40), GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2",
+    });
+    assert.deepEqual(p, {
+      repository: "millw14/merrymen", event: "pull_request", ref: "refs/pull/7/merge", commit: "2".repeat(40), pullRequestHead: head,
+      workflowSha: "3".repeat(40), runId: "123", runAttempt: "2",
+    });
+    assert.equal(provenance({ GITHUB_EVENT_NAME: "push", GITHUB_EVENT_PATH: event }).pullRequestHead, null);
+    assert.deepEqual(Object.values(provenance({})), [null, null, null, null, null, null, null, null]);
+  });
+
   it("as a command: writes the record, prints the SHA-256, and fails with exit 1 on a mismatch", () => {
     const root = fresh("program");
     mkdirSync(join(root, "programs/merrymen-vault/src"), { recursive: true });
@@ -794,6 +851,28 @@ describe("solana-program-record.mjs", () => {
       assert.equal(record.programId, TOKEN_PROGRAM);
       assert.equal(record.commit, "c0ffee");
     }
+    // A pull request run: its record and summary say it is not a release artifact.
+    const summary = join(root, "summary.md");
+    rmSync(out, { force: true });
+    const pr = run(process.execPath, [script, root, so, out], {
+      GITHUB_SHA: "c0ffee", GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge",
+      GITHUB_RUN_ID: "99", GITHUB_RUN_ATTEMPT: "1", GITHUB_STEP_SUMMARY: summary,
+    });
+    assert.equal(pr.status, 0, pr.stderr);
+    const prRecord = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual([prRecord.release.candidate, prRecord.release.label], [false, "not-a-release"]);
+    assert.deepEqual([prRecord.provenance.event, prRecord.provenance.runId], ["pull_request", "99"]);
+    const text = readFileSync(summary, "utf8");
+    assert.match(text, /- run: 99 attempt 1, pull_request on refs\/pull\/7\/merge of millw14\/merrymen/);
+    assert.match(text, /- release: \*\*not a release artifact\*\*\. A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
+    const mainRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main" });
+    assert.equal(mainRun.status, 0, mainRun.stderr);
+    assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "release-candidate");
+    // A manual run on a tag: the record says it is not a release.
+    const tagRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/tags/vault-v1" });
+    assert.equal(tagRun.status, 0, tagRun.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, { candidate: false, label: "not-a-release", rule: RELEASE_RULE });
+
     writeFileSync(so, elf(Buffer.alloc(32, 7)));
     const bad = run(process.execPath, [script, root, so, out]);
     assert.equal(bad.status, 1);

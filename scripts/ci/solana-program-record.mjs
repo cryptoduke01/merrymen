@@ -11,11 +11,17 @@
 //   another ID passes a hash check but fails every instruction with
 //   DeclaredProgramIdMismatch (0x1004) once deployed, and an immutable deploy
 //   cannot be fixed or refunded.
-// Then it writes the record (ID, size, SHA-256, toolchain, commit) to
-// <record.json>, adds it to the GitHub step summary when there is one, and
-// prints the SHA-256 on stdout.
+// Then it writes the record (ID, size, SHA-256, toolchain, the run that built
+// it, and whether that run can be a release) to <record.json>, adds it to the
+// GitHub step summary when there is one, and prints the SHA-256 on stdout.
+//
+// A release artifact comes only from a CI run on refs/heads/main of
+// millw14/merrymen: a push to main or a manual run on main (RELEASE_RULE).
+// CI never runs on a tag push, and a manual run on a tag or another branch is
+// not a candidate. Every other run's artifact, every pull request run's
+// included, is marked not-a-release, and so is its artifact name in ci.yml.
 import { createHash } from "node:crypto";
-import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,7 +90,51 @@ export function readToolchain(envText) {
   };
 }
 
-export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null }) {
+/** The repository whose main branch releases the vault. */
+export const RELEASE_REPOSITORY = "millw14/merrymen";
+/**
+ * Only refs/heads/main. ci.yml runs on a push to main, on pull requests and on
+ * a manual dispatch; it never runs on a tag push. A manual run can be
+ * dispatched on a tag or any branch, and nothing ties that ref's commit to
+ * main, so such a run is not a candidate either.
+ */
+export const RELEASE_REF = "refs/heads/main";
+export const RELEASE_RULE = `A release artifact comes only from a CI run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}: `
+  + "a push to main, or a manual (workflow_dispatch) run on main, whose app check passed, so solana · rebuild reproduced its hash. "
+  + "CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate. "
+  + "Every other artifact, every pull request run's included, is not a release artifact. "
+  + "Confirm the run on GitHub itself (event, branch, commit): this record and the artifact name are written by the run and prove nothing alone.";
+
+/** The run that built an artifact, from the GitHub Actions environment. */
+export function provenance(env) {
+  let pullRequestHead = null;
+  if (env.GITHUB_EVENT_NAME === "pull_request" && env.GITHUB_EVENT_PATH && existsSync(env.GITHUB_EVENT_PATH)) {
+    const head = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"))?.pull_request?.head?.sha;
+    if (typeof head === "string" && /^[0-9a-f]{40}$/.test(head)) pullRequestHead = head;
+  }
+  const value = name => env[name] || null;
+  return {
+    repository: value("GITHUB_REPOSITORY"),
+    event: value("GITHUB_EVENT_NAME"),
+    ref: value("GITHUB_REF"),
+    // The pushed commit, or a pull request's test merge commit.
+    commit: value("GITHUB_SHA"),
+    pullRequestHead,
+    workflowSha: value("GITHUB_WORKFLOW_SHA"),
+    runId: value("GITHUB_RUN_ID"),
+    runAttempt: value("GITHUB_RUN_ATTEMPT"),
+  };
+}
+
+/** Whether a run can produce a release artifact (RELEASE_RULE); ci.yml names the artifact with `label`. */
+export function releaseStatus(p) {
+  const candidate = p?.repository === RELEASE_REPOSITORY
+    && (p.event === "push" || p.event === "workflow_dispatch")
+    && p.ref === RELEASE_REF;
+  return { candidate, label: candidate ? "release-candidate" : "not-a-release", rule: RELEASE_RULE };
+}
+
+export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null, run = null }) {
   const programId = declaredProgramId(libRs);
   const key = base58Decode(programId);
   if (key.length !== 32) throw new Error(`declared program ID ${programId} is ${key.length} bytes, not 32`);
@@ -113,6 +163,8 @@ export function programRecord({ libRs, anchorToml, so, toolchain = null, commit 
     toolchain,
     // GITHUB_SHA: the pushed commit, or a pull request's test merge commit.
     commit,
+    provenance: run,
+    release: releaseStatus(run),
   };
 }
 
@@ -123,12 +175,14 @@ function main(argv) {
   }
   const [programRoot, soPath, outPath] = argv;
   const here = dirname(fileURLToPath(import.meta.url));
+  const run = provenance(process.env);
   const record = programRecord({
     libRs: readFileSync(join(programRoot, "programs/merrymen-vault/src/lib.rs"), "utf8"),
     anchorToml: readFileSync(join(programRoot, "Anchor.toml"), "utf8"),
     so: readFileSync(soPath),
     toolchain: readToolchain(readFileSync(join(here, "solana-toolchain.env"), "utf8")),
-    commit: process.env.GITHUB_SHA || null,
+    commit: run.commit,
+    run,
   });
   writeFileSync(outPath, `${JSON.stringify(record, null, 2)}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -140,7 +194,9 @@ function main(argv) {
       `- size: ${record.bytes} bytes`,
       `- SHA-256: \`${record.sha256}\``,
       `- toolchain: agave ${t.agave}, platform-tools ${t.platformTools} (rustc ${t.platformToolsRustc}), arch ${t.arch}`,
-      `- commit: ${record.commit ?? "unknown"}`,
+      `- commit: ${record.commit ?? "unknown"}${run.pullRequestHead ? ` (test merge of pull request head ${run.pullRequestHead})` : ""}`,
+      `- run: ${run.runId ?? "unknown"} attempt ${run.runAttempt ?? "?"}, ${run.event ?? "unknown event"} on ${run.ref ?? "unknown ref"} of ${run.repository ?? "unknown repository"}`,
+      `- release: ${record.release.candidate ? "**release candidate**" : "**not a release artifact**"}. ${RELEASE_RULE}`,
       "",
     ].join("\n"));
   }

@@ -310,19 +310,31 @@ jobs:
         if: needs.solana-paths.outputs.run == 'true'
         run: scripts/ci/solana-toolchain.sh check
 
+      # The .so must carry the 32 bytes of the program ID lib.rs declares and
+      # Anchor.toml configures (solana-program-record.mjs refuses it otherwise),
+      # and the record names the run that built it and whether that run can
+      # be a release.
       - name: Program ID and hash
         id: record
         if: needs.solana-paths.outputs.run == 'true'
         run: |
           sha=$(node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so contracts/solana/target/deploy/merrymen_vault.build.json)
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          release=$(node -p 'require(process.argv[1]).release.label' "$PWD/contracts/solana/target/deploy/merrymen_vault.build.json")
+          case "$release" in release-candidate|not-a-release) ;; *) echo "::error::the record has no release label"; exit 1 ;; esac
+          echo "release=$release" >> "$GITHUB_OUTPUT"
 
-      # A release takes its artifact from here, never from a laptop. Only named
-      # files: target/deploy also holds a throwaway program keypair.
+      # A release takes its artifact from here, never from a laptop, and only
+      # from a run on refs/heads/main: a push to main or a manual run on main.
+      # This workflow never runs on a tag push, and a manual run on a tag or
+      # another branch is not a release. The name says release-candidate only
+      # for a main run, not-a-release on every other run (every pull request
+      # run included), and always the commit and run that built it. Only
+      # named files: target/deploy also holds a throwaway program keypair.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: needs.solana-paths.outputs.run == 'true'
         with:
-          name: merrymen-vault-sbf
+          name: merrymen-vault-sbf-${{ steps.record.outputs.release }}-${{ github.sha }}-run${{ github.run_id }}.${{ github.run_attempt }}
           path: |
             contracts/solana/target/deploy/merrymen_vault.so
             contracts/solana/target/deploy/merrymen_vault.build.json
