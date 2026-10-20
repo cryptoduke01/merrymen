@@ -586,6 +586,14 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
     const previous = await s.setup();
+    // One owner transaction at a time, a revocation included (owner decision, 2026-10-20): the
+    // saved record is what its outcome is booked from, so it is never replaced while it may
+    // still land. A revoke waits for it to finalize or provably expire. When the record stays
+    // pending (providers disagree, its reads fail), the page says the server cannot settle it
+    // and, where it shows the recovery card, points to `merrymen solana-recover`, which revokes
+    // with the owner's own key (SolanaOwnerActions). Trading is held meanwhile (status blocker).
+    // The alternative, a second slot or a setup history so a revoke can be prepared beside
+    // it, is not built.
     if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {

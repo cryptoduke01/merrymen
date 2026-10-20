@@ -342,6 +342,23 @@ test("a revoke that did run is never booked failed, even with no receipt", async
   } finally { f.raw.close(); }
 });
 
+test("one owner transaction at a time, a revocation included: while one is pending a new revoke is refused and the saved record is kept", async () => {
+  // Owner decision (W round 1): no second slot for an emergency revoke. Replacing the pending record would
+  // lose the transaction its outcome is booked from; the page points a stuck owner to the recovery tool.
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    const before = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === "Refresh the pending owner transaction before preparing another.");
+    assert.deepEqual(await new SolanaTradingStore(f.db, f.scope).setup(), before, "the pending record is not replaced");
+    assert.deepEqual(f.sent, [signedTransactionBase64]);
+  } finally { f.raw.close(); }
+});
+
 test("a session registration dropped while a trade advanced the vault resolves on the epoch alone", async () => {
   const f = await fixture();
   try {
