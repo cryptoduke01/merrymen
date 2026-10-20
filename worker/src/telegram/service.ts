@@ -187,7 +187,7 @@ export interface TelegramServiceDeps {
   /** Build a bounded transfer intent and route it through processIntent. */
   submitTransfer: (to: `0x${string}`, usdg: number) => Promise<string>;
   /** Delete the grant (kill switch). */
-  kill: () => KillResult;
+  kill: () => KillResult | Promise<KillResult>;
   /** Mirror a /name change into the agents table (dashboard display). */
   onNameChange?: (name: string) => void;
   /**
@@ -1493,8 +1493,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         setPaused(paused);
         deps.note("warn", `Telegram: ${paused ? "paused" : "resumed"} by chat ${msg.chatId}`);
       },
-      kill: () => {
-        const r = deps.kill();
+      kill: async () => {
+        const r = await deps.kill();
         if (r.ok) deps.note("warn", `Telegram: KILL by chat ${msg.chatId}`);
         // Refused on purpose, and still worth a record of who asked.
         else if (r.archiveFailed) deps.note("warn", `Telegram: KILL by chat ${msg.chatId} kept the grant (${r.archiveFailed.why}) and paused instead`);

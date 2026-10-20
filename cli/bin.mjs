@@ -1103,15 +1103,37 @@ function selftest() {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
+/**
+ * The kill's Solana half: every local Solana strategy off (worker/src/solana-kill-cli.ts,
+ * stopLocalSolanaForKill), before the grant is touched, as the dashboard's and Telegram's
+ * self-hosted kills do. Nothing to run without a Solana accounts database. False, with the
+ * exit code set, when it could not be stopped: the kill is incomplete, never said done.
+ */
+function stopLocalSolana() {
+  if (!process.env.DATABASE_URL && !existsSync(path.join(HOME, "solana-accounts.sqlite"))) return true;
+  const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "solana-kill-cli.ts")], {
+    cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (child.status === 0) {
+    if (child.stdout.trim() === "stopped") ok("Solana strategy stopped");
+    return true;
+  }
+  bad("Kill incomplete: your Solana strategy could not be stopped and may still trade. Rerun: merrymen kill");
+  process.exitCode = 1;
+  return false;
+}
+
 async function kill() {
   if (!existsSync(GRANT)) {
     warn("no grant to call in — the band's already home");
+    stopLocalSolana();
     return;
   }
   const p = makePrompter();
   const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {
+    stopLocalSolana();
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
     const archive = archiveCurrentGrant();

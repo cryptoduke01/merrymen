@@ -785,11 +785,18 @@ absent, Solana was never used: nothing is created, no Solana lock is taken and
 the Robinhood kill reports done. A kill never runs Solana DDL and never waits on
 the binding store's schema step (which itself alters the table only when the
 catalog shows the column missing). If present, the strategy is saved disabled
-with a revision bump that also refuses any autonomous admission in flight. Both
-paths remove the RH grant first, so a Solana fault never keeps it stored; if the
+with a revision bump that also refuses any autonomous admission in flight.
+Hosted, both paths remove the RH grant first, so a Solana fault never keeps it
+stored, and the strategy is stopped even when that removal throws; if the
 Solana write fails the kill is not reported done (web 503 "Kill incomplete",
 retry safe; Telegram keeps the request pending and sends one ✅ once both are
-done). A self-hosted kill stops every strategy in the local accounts file. A kill
+done). Self-hosted, every kill (the web's, Telegram `/kill` in the worker and
+`merrymen kill`, through `worker/src/solana-kill-cli.ts`) stops every strategy
+in the local accounts file FIRST, whatever then happens to the RH grant: an
+archive it cannot write keeps grant.json and pauses trading (web 409, which
+says whether the Solana strategy stopped), and a kill with no grant still stops
+the strategy. A Solana stop that fails is said (web 503 or 409 `solana:
+"not-stopped"`, Telegram "Kill incomplete … /kill again", CLI exit 1). A kill
 does not revoke the on-chain session; the owner's revoke does.
 
 ## Operator runbooks

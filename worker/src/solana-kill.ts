@@ -18,6 +18,15 @@ export async function stopSolanaForKill(tenant: `0x${string}`, store: SolanaBind
   if (!process.env.DATABASE_URL && (isHostedMode() || !existsSync(solanaRuntimeDbFile()))) return "none";
   return await store.disableForKill(tenant) ? "stopped" : "none";
 }
+/**
+ * A self-hosted kill's Solana half (Telegram /kill, `merrymen kill`, run before
+ * the Robinhood grant is touched): "stopped" when a strategy was on, null when
+ * none was, "not-stopped" when it could not be stopped, so the kill is said to
+ * be incomplete instead of done.
+ */
+export async function selfHostedSolanaKill(store?: SolanaBindingStore): Promise<"stopped" | "not-stopped" | null> {
+  try { return await stopLocalSolanaForKill(store) === "stopped" ? "stopped" : null; } catch { return "not-stopped"; }
+}
 /** Self-hosted is one owner's install: its kill stops every local strategy. */
 export async function stopLocalSolanaForKill(store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
   if (isHostedMode()) throw new Error("A hosted kill names its tenant.");

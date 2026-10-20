@@ -346,7 +346,9 @@ describe("the child does not re-arm", () => {
     const sync = src.slice(src.indexOf("async function syncGrant()"), src.indexOf("if (!grant) {", src.indexOf("async function syncGrant()")));
     assert.match(sync, /const grant = loadArmableGrant\(\);/);
     assert.doesNotMatch(sync, /loadGrantFile\(\)/, "syncGrant must not read the raw file");
-    const kill = src.slice(src.indexOf("    kill: () => {"), src.indexOf("// ARCHIVE FIRST.", src.indexOf("    kill: () => {")));
+    // The kill dependency runs a self-hosted kill's Solana half first, then robinhoodKill (below it).
+    const kill = src.slice(src.indexOf("    kill: async () => {"), src.indexOf("// ARCHIVE FIRST.", src.indexOf("    kill: async () => {")));
+    assert.match(kill, /const result = robinhoodKill\(\);[\s\S]*function robinhoodKill\(\): KillResult \{/);
     // Through hostedKillFromChat, which the hold process calls as well, and
     // which is killHosted once there is a grant to kill.
     assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*hostedKillFromChat\(merrymenHome\(\), grantFilePath\(\)/);
