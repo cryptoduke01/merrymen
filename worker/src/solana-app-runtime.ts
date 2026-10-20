@@ -31,6 +31,7 @@ import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 import { solanaOwnerEpochOffset } from "./solana-trading-store";
+import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 
 /**
  * Codes:
@@ -126,6 +127,14 @@ function refundBlocker({ mint, problem }: SolanaOwnerRefundBlock): string {
     default: return `${waiting} is not a token account the vault can use. Check that account in your wallet. ${stopped}`;
   }
 }
+/**
+ * The status blocker while a vault balance is below its book, and what the owner
+ * can do about it: a withdrawal made outside Merrymen is recorded from its own
+ * transaction (recordExternalWithdrawals); anything else stays held.
+ */
+export const SOLANA_STATUS_BELOW_BOOK = "Vault balances are below recorded trades. If you withdrew from the vault outside Merrymen, with your owner key in another wallet or tool, record those withdrawals under Owner controls; until the records match the vault, trading and automated exits stay held.";
+/** A withdrawal prepare refused because the vault holds less of the asset than the book. */
+export const SOLANA_WITHDRAW_BELOW_BOOK = "Your vault holds less of this asset than Merrymen's records, so this withdrawal could fail on Solana. If you withdrew from the vault outside Merrymen, record those withdrawals under Owner controls first, or withdraw at most what the vault holds. Nothing was prepared.";
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -455,6 +464,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const book = await s.liveBook();
     if (book) return { cashUsdg: book.cashRaw, wsolRaw: book.wsolRaw, quarantinedWsolRaw: solanaQuarantinedWsol(book).toString() };
     return balances ? { cashUsdg: balances.cashUsdg, wsolRaw: "0", quarantinedWsolRaw: balances.wsolRaw } : null;
+  }
+  /**
+   * Finalized vault balances both providers agree on, at or after
+   * `minContextSlot`, at the lower of their two slots; null when they disagree.
+   * Only these are booked as inflows: one provider's answer must never raise
+   * the book above what the vault holds.
+   */
+  async function finalizedBalancesQuorum(vault: string, minContextSlot: number) {
+    const live = rpc();
+    const quorum = await readSolanaQuorum(live, read => readSolanaVaultBalances({ ...live, read: operation => operation(read) }, vault, minContextSlot, "finalized"),
+      view => JSON.stringify([view.cashUsdg, view.wsolRaw]));
+    return quorum.agreed ? { ...quorum.value, slot: Math.min(...quorum.values.map(view => view.slot)) } : null;
   }
   async function reconcile(s: SolanaTradingStore) {
     for (const pending of await s.pending()) {
@@ -835,11 +856,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // capital-in for USDG, zero-basis quarantine for WSOL. Neither blocks exits.
           if (book && !shortOfBook(book, balances) && aboveBook(book, balances) && !(await s.pending()).length) {
             const observedAtMs = now();
-            const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
             // Unbooked excess is never traded or valued, so failing to book it now (an
-            // owner transaction is pending, say) must not block exits; it retries next read.
-            try { if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" }); }
-            catch { /* Retried on the next status read. */ }
+            // owner transaction is pending, the providers disagree) must not block exits; it retries next read.
+            try {
+              const finalized = await finalizedBalancesQuorum(vault, book.slot);
+              if (finalized && !shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+            } catch { /* Retried on the next status read. */ }
           }
           if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
           else {
@@ -849,7 +871,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
-          if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
+          if (currentBook && shortOfBook(currentBook, balances)) blockers.push(SOLANA_STATUS_BELOW_BOOK);
           if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
           if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
           // A donation in the next swap's temporary input account goes back to the
@@ -1082,11 +1104,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (book) {
           const observedAtMs = now();
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
-          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner.
-          if (aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
+          // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner:
+          // only when nothing is short (as status books it), and only what both providers agree on.
+          if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) {
+            const agreed = await finalizedBalancesQuorum(vault, book.slot);
+            if (agreed && !shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
+          }
           book = (await s.liveBook())!;
-          const available = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book) + synced;
-          if (amount > available) fail("The withdrawal exceeds the reconciled vault balance.");
+          // Never more than the book records, nor than the vault holds: a vault below its book
+          // (a withdrawal made outside Merrymen) is held with a clear message, never offered.
+          const recorded = input.mint === SOLANA_USDG_MINT ? BigInt(book.cashRaw) : BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
+          const held = BigInt(input.mint === SOLANA_USDG_MINT ? finalized.cashUsdg : finalized.wsolRaw);
+          if (amount > recorded + synced) fail("The withdrawal exceeds the reconciled vault balance.");
+          if (amount > (held < recorded ? held : recorded) + synced) fail(SOLANA_WITHDRAW_BELOW_BOOK);
           // Capital out: what the withdrawn WSOL is worth lowers the high-water mark
           // when it lands, as a USDG withdrawal does, so withdrawing is never a
           // drawdown. Only the booked position can move it: quarantine leaves first, at no value.
@@ -1131,6 +1161,43 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     observeOwnerTransaction(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, epochOffset = 0) {
       if (!setup.signature || !setup.signedTransactionBase64) return fail("The owner transaction has not been submitted.");
       return observeOwner(read, owner, setup, setup.signature, epochOffset);
+    },
+    /**
+     * Records the owner's withdrawals made outside Merrymen (solana-recover, another
+     * wallet) by their transaction signatures, so a vault left below its book can
+     * trade and exit again (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN in
+     * solana-trading-store.ts). Each transaction is read on both providers and
+     * booked only when they derive the same withdrawal from it
+     * (readSolanaExternalWithdrawal); what the withdrawn position part of wrapped
+     * SOL was worth lowers the high-water mark, as an in-app withdrawal does.
+     * Nothing is signed or sent.
+     */
+    async recordExternalWithdrawals(scope: SolanaAccountScope, input: { signatures: unknown }) {
+      const signatures = input?.signatures;
+      if (!Array.isArray(signatures) || signatures.length < 1 || signatures.length > 8 || new Set(signatures).size !== signatures.length
+        || signatures.some(item => typeof item !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(item))) fail("Give the signatures of up to eight withdrawal transactions you made outside Merrymen.");
+      const s = await store(scope), cfg = config();
+      // The cheap refusals first: no book, or something still pending, reads nothing.
+      if (!(await s.liveBook())) fail("There is no live trading record to reconcile yet.", "permission");
+      const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "finalized" && item.status !== "failed";
+      if ((await s.pending()).length || unresolved(await s.setup()) || unresolved(await s.revokeSetup())) fail("Wait for the pending trade or owner transaction to resolve, then record these withdrawals.", "pending");
+      await verifyDeployment(cfg);
+      const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), live = rpc();
+      const withdrawals: Array<{ signature: string; slot: number; mint: string; amountRaw: string; valuation?: SolanaWithdrawValuation }> = [];
+      for (const signature of signatures as string[]) {
+        const quorum = await readSolanaQuorum(live, read => readSolanaExternalWithdrawal(read, signature, { programId: cfg.programId, vault, owner: scope.owner }))
+          .catch((error: unknown) => error instanceof SolanaExternalWithdrawalError ? fail(error.message) : Promise.reject(error));
+        if (!quorum.agreed) fail("The two providers do not agree on that transaction yet. Nothing was recorded. Try again shortly.", "pending");
+        for (const item of quorum.value.withdrawals) withdrawals.push({ signature, slot: quorum.value.slot, ...item });
+      }
+      if (!withdrawals.length) fail("Those transactions took nothing from your vault's token accounts. Nothing was recorded.");
+      for (const item of withdrawals) {
+        if (item.mint !== SOLANA_WRAPPED_SOL_MINT) continue;
+        const valuation = await wsolWithdrawValuation(item.amountRaw);
+        if (valuation) item.valuation = valuation;
+      }
+      try { return await s.reconcileExternalWithdrawals({ withdrawals }); }
+      catch (error) { if (error instanceof SolanaTradingStoreError) fail(error.message, "permission"); throw error; }
     },
     /**
      * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero

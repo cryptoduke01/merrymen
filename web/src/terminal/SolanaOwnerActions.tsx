@@ -314,6 +314,8 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   // Bytes cleared without a known outcome, linked so the owner can check Solana itself.
   const [cleared, setCleared] = useState<{ action: OwnerAction; signature: string } | null>(null);
   const [review, setReview] = useState<OwnerReview | null>(null), [lapsed, setLapsed] = useState<OwnerAction | null>(null);
+  // Signatures of withdrawals the owner made outside Merrymen, to record (recordOutside).
+  const [outside, setOutside] = useState("");
   const [, setReviewClock] = useState(0);
   // True while the owner's wallet is open on the reviewed bytes (signReview).
   const signingReview = useRef(false);
@@ -451,6 +453,21 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     setPending(saved); setResult(null); setCleared(null); setReview(null);
     await submit(saved);
   });
+  /**
+   * WITHDRAWALS MADE OUTSIDE MERRYMEN. Any wallet or tool holding the owner key
+   * (solana-recover, for one) withdraws without this server, which leaves the vault below its
+   * recorded balances: trading, exits and withdrawals of that asset are held
+   * until the records match. The server records each withdrawal from its own
+   * transaction, read on two providers; nothing is signed or sent here.
+   */
+  const recordOutside = () => begin(async () => {
+    const signatures = outside.split(/[\s,]+/).filter(Boolean);
+    const { recorded } = await api<{ recorded: { booked: Array<{ signature: string; mint: string; amountRaw: string }> } }>("owner", { stage: "record", action: "external-withdrawals", signatures });
+    setOutside("");
+    setNotice(`Recorded your withdrawal${recorded.booked.length === 1 ? "" : "s"} made outside Merrymen: ${recorded.booked.map((item) => item.mint === SOLANA_USDG_MINT
+      ? `${displaySolanaAmount(item.amountRaw, 6)} USDG` : `${displaySolanaAmount(item.amountRaw, 9)} wrapped SOL`).join(", ")}.`);
+    await refresh().catch(() => undefined);
+  });
   /** The server's pending record when this page does not hold its bytes (another device, a reload, a permission). */
   const check = () => {
     if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setNotice("");
@@ -494,6 +511,11 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
       <label>Native SOL to withdraw<input inputMode="decimal" value={solAmount} onChange={(e) => setSolAmount(e.target.value)} /></label>
       <button disabled={!!pending || anyServerPending} onClick={() => run("withdraw-sol")}>Withdraw native SOL</button>
     </fieldset>
+    <details><summary>Withdrew outside Merrymen?</summary>
+      <p>If you withdrew from your vault outside Merrymen, with your owner key in another wallet or tool, Merrymen&apos;s records still count those funds, and trading, exits and withdrawals of that asset stay held while the vault holds less. Paste those transactions&apos; signatures (up to eight) to record them. Each is read on Solana from two providers, and only an owner withdrawal from your own vault is recorded; nothing is signed or sent.</p>
+      <label>Withdrawal transaction signatures<textarea value={outside} onChange={(e) => setOutside(e.target.value)} /></label>
+      <button disabled={busy || !available || !outside.trim()} onClick={recordOutside}>Record these withdrawals</button>
+    </details>
     {review && <div className="solana-review" role="group" aria-label={`Review the prepared ${ACTION_NAMES[review.action]}`}>
       <p>Review before your wallet opens: the prepared {ACTION_NAMES[review.action]} {reviewedEffect(review.request)}, and nothing else.</p>
       <p>{review.fee ? `It carries a priority fee of ${review.fee} SOL (at most ${sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL), paid by your owner wallet with the network fee so it lands under congestion.`

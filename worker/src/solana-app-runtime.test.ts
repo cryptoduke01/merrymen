@@ -20,6 +20,10 @@ import { SolanaMarketError } from "./solana-market";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
+import { address as kitAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
+import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
+import { SOLANA_STATUS_BELOW_BOOK, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -524,6 +528,91 @@ test("an owner transaction's prior vault state is read no earlier than the slot 
     await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "resume-buys" }));
     await assert.rejects(f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), /could not be read/);
     assert.deepEqual(reads.at(-1), { method: "getAccountInfo", minContextSlot: 1005 });
+  } finally { f.raw.close(); }
+});
+
+/** An owner withdrawal signed outside Merrymen (solana-recover), and both providers' finalized receipt of it with the vault token account's balances. */
+async function outsideWithdrawal(f: Fixture, mint: string, amount: bigint, balance: [bigint, bigint]) {
+  const program = mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM, vaultToken = mint === SOLANA_USDG_MINT ? f.cashAta : f.wsolAta;
+  const instruction = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: f.vault, owner: f.owner, mint, tokenProgram: program, vaultToken,
+    ownerToken: await deriveSolanaAta(f.owner, mint, program), amount });
+  const unsigned = getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash({ blockhash: key(43) as unknown as Blockhash, lastValidBlockHeight: 5000n },
+    setTransactionMessageFeePayer(kitAddress(f.owner), appendTransactionMessageInstructions([instruction], createTransactionMessage({ version: 0 }))))));
+  const wire = await f.sign(unsigned), decoded = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
+  const signature = getBase58Decoder().decode(Object.values(decoded.signatures)[0]!);
+  const index = getCompiledTransactionMessageDecoder().decode(decoded.messageBytes).staticAccounts.map(String).indexOf(vaultToken);
+  const entry = (amountRaw: bigint) => [{ accountIndex: index, mint, owner: f.vault, programId: program, uiTokenAmount: { amount: amountRaw.toString(), decimals: 6 } }];
+  const receipt = { slot: 1000, version: 0, transaction: [wire, "base64"], meta: { err: null, fee: 5000, preTokenBalances: entry(balance[0]), postTokenBalances: entry(balance[1]), innerInstructions: [] } };
+  const read: SolanaLiveRead = async (method, params = []) => method === "getTransaction" && params[0] === signature ? receipt : f.read(method, params);
+  f.providers.primary = read; f.providers.fallback = read;
+  return signature;
+}
+
+test("after solana-recover took the vault's USDG outside Merrymen, status holds with a clear message, a withdrawal of what the vault no longer holds is refused before signing, and recording that withdrawal from its own transaction restores trading and exits", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // The owner's own key withdrew all 90 USDG; the book still records it.
+    f.controls.cash = 0n;
+    const held = await f.app.status(f.scope);
+    assert.ok(held.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK), held.live.blockers.join(" | ")); assert.equal(held.live.canExit, false);
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_WITHDRAW_BELOW_BOOK);
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing was prepared");
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 90_000_000n, [90_000_000n, 0n]);
+    // A malformed list is refused before any read.
+    for (const signatures of [[], ["short"], [signature, signature], Array(9).fill(signature)]) {
+      await assert.rejects(f.app.recordExternalWithdrawals(f.scope, { signatures }), (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid");
+    }
+    const recorded = await f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.deepEqual(recorded.booked, [{ signature, mint: SOLANA_USDG_MINT, amountRaw: "90000000" }]);
+    assert.equal(recorded.book.cashRaw, "0"); assert.equal(recorded.book.hwmRaw, "0");
+    const ready = await f.app.status(f.scope);
+    assert.ok(!ready.live.blockers.includes(SOLANA_STATUS_BELOW_BOOK)); assert.equal(ready.live.canExit, true, ready.live.blockers.join(" | "));
+    // Recorded once.
+    await assert.rejects(f.app.recordExternalWithdrawals(f.scope, { signatures: [signature] }), /already recorded/);
+    // A deposit after it is booked from both providers' agreeing read, as before.
+    f.controls.cash = 5_000_000n;
+    await f.app.status(f.scope);
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).liveBook())!.cashRaw, "5000000");
+    assert.equal(f.controls.sends, 0, "nothing is ever signed or sent by recording");
+  } finally { f.raw.close(); }
+});
+
+test("one asset above its book and the other below: a withdrawal prepare books no inflow, offers only what the vault holds, and never fails on the store's below-book refusal", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered();
+    await f.db.prepare("INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)").run(TENANT, f.owner, JSON.stringify({ hwmRaw: "100000000", cashRaw: "90000000",
+      wsolRaw: "50000000", costBasisUsdgRaw: "10000000", realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: 999_000 }));
+    f.controls.cash = 89_000_000n; f.controls.wsol = 50_000_007n;
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "50000000" });
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000000" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_WITHDRAW_BELOW_BOOK);
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "89000000" });
+    const book = (await new SolanaTradingStore(f.db, f.scope).liveBook())!;
+    assert.equal(book.quarantinedWsolRaw, undefined, "nothing is booked while an asset is short"); assert.equal(book.cashRaw, "90000000");
+  } finally { f.raw.close(); }
+});
+
+test("an inflow is booked only when both providers agree on the finalized balances: one provider's phantom deposit never raises the book", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // The primary reports 5 USDG more than the fallback.
+    f.controls.cash = 95_000_000n;
+    f.providers.fallback = async (method, params = []) => {
+      if (method !== "getMultipleAccounts") return f.read(method, params);
+      const saved = f.controls.cash; f.controls.cash = 90_000_000n;
+      try { return await f.read(method, params); } finally { f.controls.cash = saved; }
+    };
+    await f.app.status(f.scope);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "90000000"); assert.equal((await store.liveBook())!.hwmRaw, "90000000");
+    // Once both agree, it is a deposit.
+    f.providers.fallback = null;
+    await f.app.status(f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "95000000"); assert.equal((await store.liveBook())!.hwmRaw, "95000000");
   } finally { f.raw.close(); }
 });
 

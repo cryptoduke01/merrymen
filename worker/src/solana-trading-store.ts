@@ -34,6 +34,13 @@ export interface SolanaLiveBook {
    * high-water mark. The owner can withdraw it; withdrawals spend it first.
    */
   quarantinedWsolRaw?: string;
+  /**
+   * The slot of the last finalized balance snapshot the book was set from
+   * (inflows booked): every vault change at or before it is in the book. A
+   * withdrawal made outside Merrymen is recorded only after it (OWNER
+   * WITHDRAWALS MADE OUTSIDE MERRYMEN). Absent: the book's creation is that point.
+   */
+  balancesSlot?: number;
 }
 /** The WSOL the session may trade: the recorded position, never quarantined WSOL. */
 export function solanaQuarantinedWsol(book: Pick<SolanaLiveBook, "quarantinedWsolRaw">): bigint { return BigInt(book.quarantinedWsolRaw ?? "0"); }
@@ -548,8 +555,89 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         await flow(`quarantine:${owner}:${snapshot.slot}:${snapshot.wsolRaw}`, "quarantine", SOLANA_WRAPPED_SOL_MINT, donated);
         book.quarantinedWsolRaw = (solanaQuarantinedWsol(book) + donated).toString(); raw(book.quarantinedWsolRaw);
       }
-      book.slot = snapshot.slot; book.updatedAtMs = now;
+      book.slot = snapshot.slot; book.updatedAtMs = now; book.balancesSlot = snapshot.slot;
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+    });
+  }
+  /**
+   * OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-recover, another wallet).
+   *
+   * The documented emergency path withdraws with the owner's own key, outside
+   * the app, so the book kept the old balances: a vault below its book holds
+   * every trade, exit and in-app withdrawal of that asset. This books such
+   * withdrawals as capital out, each from a finalized, successful transaction
+   * the runtime read on both providers (recordExternalWithdrawals): a top-level
+   * withdraw by the vault program, signed by this owner, for this vault, and the
+   * vault token account's own net decrease in it (`amountRaw`).
+   *
+   * What keeps it from hiding a loss: only an owner-signed withdrawal is booked,
+   * never a balance difference, and only one the book cannot already reflect:
+   * its slot is after the book's last absolute balance (balancesSlot, or the
+   * book's creation), so it is still in the vault's balances and not in the
+   * book. Each is booked once (evidence external:<signature>:<mint>, and never a
+   * signature the app already booked as its own withdrawal). A shortfall any
+   * other way (a trade off the books) stays held: nothing here books it.
+   *
+   * USDG out lowers cash and the high-water mark by the amount (floor 0). WSOL
+   * out leaves quarantine first, then the position at its prorated basis; the
+   * high-water mark drops by what the position part is worth (`valuation`,
+   * checked fresh here) or not at all without one. No realized P&L. Refused
+   * while a trade or an owner transaction is pending.
+   */
+  async reconcileExternalWithdrawals(input: { withdrawals: ReadonlyArray<{ signature: string; slot: number; mint: string; amountRaw: string; valuation?: SolanaWithdrawValuation }> }):
+    Promise<{ booked: Array<{ signature: string; mint: string; amountRaw: string }>; book: SolanaLiveBook }> {
+    return this.db.tx(async tx => {
+      await this.bindingIn(tx, true);
+      const { tenant, owner } = this.scope, now = clock(this.now);
+      const withdrawals = input?.withdrawals;
+      if (!Array.isArray(withdrawals) || withdrawals.length < 1 || withdrawals.length > 16) refuse("Give between one and sixteen finalized withdrawals.");
+      if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE vault IN (SELECT vault FROM solana_runtime_submissions WHERE tenant=? AND owner=?) AND status='pending'").get(tenant, owner)) refuse("Resolve pending Solana trades before recording withdrawals made outside Merrymen.");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
+      if (ownerPending(main) || ownerPending(await this.revokeIn(tx))) refuse("Resolve the pending owner transaction before recording withdrawals made outside Merrymen.");
+      const book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
+      if (!book) refuse("There is no live trading record to reconcile yet.");
+      if (now < book.updatedAtMs) refuse("Solana portfolio evidence moved backwards.");
+      // Every vault change at or before this slot is already in the book.
+      let since = book.balancesSlot;
+      if (since === undefined) {
+        const first = await tx.prepare("SELECT submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? ORDER BY created_at_ms,request_id LIMIT 1").get(tenant, owner) as { submission_json: string } | undefined;
+        const created = first ? (JSON.parse(first.submission_json) as { risk?: { slot?: unknown } }).risk?.slot : undefined;
+        since = typeof created === "number" && Number.isSafeInteger(created) ? created : book.slot;
+      }
+      const booked: Array<{ signature: string; mint: string; amountRaw: string }> = [];
+      let latest = book.slot;
+      for (const item of [...withdrawals].sort((a, b) => a.slot - b.slot)) {
+        if (!item || typeof item.signature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(item.signature) || !Number.isSafeInteger(item.slot) || item.slot < 1
+          || (item.mint !== SOLANA_USDG_MINT && item.mint !== SOLANA_WRAPPED_SOL_MINT)) refuse("Invalid finalized withdrawal evidence.");
+        const amount = raw(item.amountRaw, false), evidence = `external:${item.signature}:${item.mint}`;
+        if (await tx.prepare("SELECT 1 FROM solana_runtime_cashflows WHERE evidence_id IN (?,?)").get(item.signature, evidence)) refuse("That withdrawal is already recorded. Nothing was recorded.");
+        if (item.slot <= since) refuse("That withdrawal is already reflected in the recorded balances. Nothing was recorded.");
+        if (item.mint === SOLANA_USDG_MINT) {
+          if (amount > raw(book.cashRaw)) refuse("That withdrawal is more than the recorded USDG. Nothing was recorded.");
+          book.cashRaw = (raw(book.cashRaw) - amount).toString();
+          const peak = raw(book.hwmRaw); book.hwmRaw = (peak > amount ? peak - amount : 0n).toString();
+        } else {
+          const held = raw(book.wsolRaw), aside = solanaQuarantinedWsol(book);
+          if (amount > held + aside) refuse("That withdrawal is more than the recorded wrapped SOL. Nothing was recorded.");
+          // Quarantined WSOL leaves first: zero basis, no effect on the position or the high-water mark.
+          const fromAside = amount < aside ? amount : aside, fromPosition = amount - fromAside;
+          if (aside > 0n) book.quarantinedWsolRaw = (aside - fromAside).toString();
+          if (fromPosition > 0n) {
+            const basis = fromPosition === held ? BigInt(book.costBasisUsdgRaw) : BigInt(book.costBasisUsdgRaw) * fromPosition / held;
+            book.wsolRaw = (held - fromPosition).toString(); book.costBasisUsdgRaw = (BigInt(book.costBasisUsdgRaw) - basis).toString();
+            const value = solanaWithdrawValueUsdg(item.valuation, item.amountRaw, now, this.pythGeneration);
+            if (value !== null) { const out = value * fromPosition / amount, peak = raw(book.hwmRaw); book.hwmRaw = (peak > out ? peak - out : 0n).toString(); }
+          }
+        }
+        const inserted = await tx.prepare("INSERT INTO solana_runtime_cashflows(evidence_id,tenant,owner,kind,mint,amount_raw,created_at_ms) VALUES(?,?,?,'withdraw-external',?,?,?) ON CONFLICT DO NOTHING")
+          .run(evidence, tenant, owner, item.mint, amount.toString(), now);
+        if (inserted.changes !== 1) refuse("That withdrawal is already recorded. Nothing was recorded.");
+        booked.push({ signature: item.signature, mint: item.mint, amountRaw: amount.toString() });
+        latest = Math.max(latest, item.slot);
+      }
+      book.slot = latest; book.updatedAtMs = now;
+      await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
+      return { booked, book };
     });
   }
   async session(): Promise<SolanaRegisteredSession | null> {

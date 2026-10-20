@@ -692,7 +692,59 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await f.store.finishSetup("revoke-beside", "finalized", 1004);
     await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed" }, sessionSeed, dek), /revocation was signed after this permission/);
   });
+  // OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN (solana-trading-store.ts).
+  const outsideSignature = (n: number) => base58Encode(new Uint8Array(64).fill(n));
+  test(`${dialect}: a withdrawal made outside Merrymen is booked once from its own evidence, only after the book's last balances, and never one the app booked`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    // An in-app withdrawal, booked by its signature.
+    await saveSignedSetup(f.store, { ...setup("withdraw"), priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1", mint: SOLANA_USDG_MINT, amountRaw: "400000" }, outsideSignature(2));
+    await f.store.finishSetup(outsideSignature(2), "finalized", 1002);
+    const before = (await f.store.liveBook())!;
+    assert.equal(before.cashRaw, "99000000");
+    const usdg = (signature: string, slot: number, amountRaw: string) => ({ signature, slot, mint: SOLANA_USDG_MINT, amountRaw });
+    // Never what the book already reflects: the app's own withdrawal, or anything at or before the book's creation.
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(2), 1003, "400000")] }), /already recorded/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1000, "1")] }), /already reflected/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "99000001")] }), /more than the recorded USDG/);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg("not-a-signature", 1003, "1")] }), /Invalid finalized withdrawal evidence/);
+    assert.deepEqual(await f.store.liveBook(), before, "a refusal books nothing");
+    // solana-recover took all the USDG: capital out, as an in-app withdrawal.
+    const { booked, book } = await f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "99000000")] });
+    assert.deepEqual(booked, [{ signature: outsideSignature(3), mint: SOLANA_USDG_MINT, amountRaw: "99000000" }]);
+    assert.equal(book.cashRaw, "0"); assert.equal(book.hwmRaw, (BigInt(before.hwmRaw) - 99_000_000n).toString()); assert.equal(book.slot, 1003);
+    assert.deepEqual(await f.store.liveBook(), book);
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [usdg(outsideSignature(3), 1003, "1")] }), /already recorded/);
+    // Stranger's WSOL is booked into quarantine by an absolute finalized read, which moves the book's balances point.
+    await f.store.reconcileExternalInflows({ cashUsdg: "0", wsolRaw: "1980005", slot: 1004, observedAtMs: NOW, commitment: "finalized" });
+    assert.equal((await f.store.liveBook())!.balancesSlot, 1004);
+    const wsol = (slot: number, amountRaw: string, valuation?: object) => ({ signature: outsideSignature(4), slot, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw, ...(valuation ? { valuation } : {}) }) as never;
+    await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1004, "1980005")] }), /already reflected/);
+    // All the WSOL out: quarantine first, then the position at its basis; the mark drops by what the position part was worth.
+    const valuation = withdrawValuation("1980005");
+    const value = (() => { const q = BigInt(valuation.quote.minOutAmount), r = BigInt(valuation.reference.referenceOut); return q < r ? q : r; })();
+    const peak = BigInt((await f.store.liveBook())!.hwmRaw);
+    const after = (await f.store.reconcileExternalWithdrawals({ withdrawals: [wsol(1005, "1980005", valuation)] })).book;
+    assert.equal(after.wsolRaw, "0"); assert.equal(after.quarantinedWsolRaw, "0"); assert.equal(after.costBasisUsdgRaw, "0"); assert.equal(after.realizedPnlUsdgRaw, book.realizedPnlUsdgRaw);
+    const out = value * 1_980_000n / 1_980_005n;
+    assert.equal(after.hwmRaw, (peak > out ? peak - out : 0n).toString());
+    const flows = await f.db.prepare("SELECT evidence_id,kind,mint,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw-external' ORDER BY evidence_id").all() as Array<Record<string, string>>;
+    assert.deepEqual(flows.map(r => [r.evidence_id, r.mint, r.amount_raw]), [[`external:${outsideSignature(3)}:${SOLANA_USDG_MINT}`, SOLANA_USDG_MINT, "99000000"],
+      [`external:${outsideSignature(4)}:${SOLANA_WRAPPED_SOL_MINT}`, SOLANA_WRAPPED_SOL_MINT, "1980005"]].sort((a, b) => a[0]!.localeCompare(b[0]!)));
+  });
 }
+
+test("withdrawals made outside Merrymen are refused while a trade or an owner transaction is pending, and without a book", async t => {
+  const outside = { signature: base58Encode(new Uint8Array(64).fill(5)), slot: 1003, mint: SOLANA_USDG_MINT, amountRaw: "1" };
+  const empty = await fixture(t);
+  await assert.rejects(empty.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /no live trading record/);
+  const f = await fixture(t), s = submission(); await f.store.recordSigned(s);
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /pending Solana trades/);
+  await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+  await saveSignedSetup(f.store, setup("revoke"), "revoke-pending");
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [outside] }), /pending owner transaction/);
+  await assert.rejects(f.store.reconcileExternalWithdrawals({ withdrawals: [] }), /between one and sixteen/);
+});
 
 
 

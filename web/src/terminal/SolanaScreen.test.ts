@@ -750,6 +750,35 @@ test("a revocation saved beside a pending withdrawal is found in the server's re
   assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:revoke", "submit", "submit", "submit"]);
 });
 
+test("withdrawals made outside Merrymen are recorded by their signatures, read by the server, and nothing is signed", async () => {
+  state.runtime.live.programId = PROGRAM;
+  const first = base58Encode(new Uint8Array(64).fill(3)), second = base58Encode(new Uint8Array(64).fill(4));
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "record") return json({ recorded: { booked: [{ signature: first, mint: SOLANA_USDG_MINT, amountRaw: "90000000" },
+      { signature: second, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1500000000" }], book: {} } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.equal(button("Record these withdrawals").disabled, true, "nothing to record yet");
+  const box = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Withdrawal transaction signatures"))!.querySelector("textarea")!;
+  const setter = Object.getOwnPropertyDescriptor(ui.dom.window.HTMLTextAreaElement.prototype, "value")!.set!;
+  await act(async () => { setter.call(box, ` ${first}\n${second}, `); box.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true })); });
+  await press("Record these withdrawals");
+  assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body), [{ stage: "record", action: "external-withdrawals", signatures: [first, second] }]);
+  assert.match(ui.container.textContent!, /Recorded your withdrawals made outside Merrymen: 90 USDG, 1\.5 wrapped SOL\./);
+  assert.equal(signCount, 0); assert.equal(box.value, "");
+  // A refusal is shown as the server words it, and the signatures stay to correct.
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "record") return refusal("That withdrawal is already recorded. Nothing was recorded.");
+    throw new Error("Unexpected fixture route");
+  };
+  await act(async () => { setter.call(box, first); box.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true })); });
+  await press("Record these withdrawals");
+  assert.match(ui.container.textContent!, /That withdrawal is already recorded\. Nothing was recorded\./); assert.equal(box.value, first);
+});
+
 test("a refused retry keeps the signed bytes when the server's record cannot be read", async () => {
   state.runtime.live.programId = PROGRAM;
   let submits = 0, statusUp = true;

@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   return solanaResponse(async () => {
     const { scope } = await solanaContext(req);
-    const body = await solanaRequestBody(req, ["stage", "action", "mint", "amountRaw", "signedTransactionBase64"]);
+    const body = await solanaRequestBody(req, ["stage", "action", "mint", "amountRaw", "signedTransactionBase64", "signatures"]);
     const app = getSolanaAppRuntime();
     // The request is validated first, then paced, then run: a malformed one costs
     // nothing, and a paced one reaches no runtime (owner/throttle.ts).
@@ -28,6 +28,10 @@ export async function POST(req: Request) {
     } else if (body.stage === "submit" && typeof body.signedTransactionBase64 === "string") {
       const signedTransactionBase64 = body.signedTransactionBase64;
       bucket = "submit"; run = async () => ({ result: await app.submitOwnerAction(scope, { signedTransactionBase64 }) });
+    } else if (body.stage === "record" && body.action === "external-withdrawals" && Array.isArray(body.signatures) && body.mint === undefined && body.amountRaw === undefined) {
+      // Withdrawals the owner made outside Merrymen, by their signatures: read on both providers, nothing signed or sent.
+      const signatures: unknown[] = body.signatures;
+      bucket = "prepare"; run = async () => ({ recorded: await app.recordExternalWithdrawals(scope, { signatures }) });
     } else throw new SolanaWebError(400, "Invalid Solana owner action.");
     const wait = takeSolanaOwnerToken(scope.tenant, bucket);
     if (wait !== null) throw new SolanaWebError(429, solanaOwnerPacedMessage(bucket, wait));
