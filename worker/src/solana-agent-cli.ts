@@ -96,7 +96,8 @@ export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: Sol
     if (finished || parentLost) return;
     parentLost = true;
     stop("the merrymen solana-agent command that started this worker is gone", ` Exiting in at most ${Math.round((options.parentGraceMs ?? SOLANA_WORKER_PARENT_GRACE_MS) / 1000)} s.`);
-    options.setTimer(() => force(1), options.parentGraceMs ?? SOLANA_WORKER_PARENT_GRACE_MS).unref?.();
+    // A run that finished in the meantime has nothing in flight: it ends with its own exit code.
+    options.setTimer(() => finished ? exitFinished() : force(1), options.parentGraceMs ?? SOLANA_WORKER_PARENT_GRACE_MS).unref?.();
   };
   if (host.connected) {
     host.on("message", (message: unknown) => {

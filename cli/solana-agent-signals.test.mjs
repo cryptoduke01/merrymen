@@ -354,6 +354,19 @@ test("worker stop: losing the parent stops gracefully, then forces after the gra
   assert.deepEqual(events.exits, [1]);
 });
 
+test("worker stop: the lost-parent timer of a run that has since finished ends it with the run's own code, not forced", () => {
+  for (const code of [0, 3]) {
+    const { host, events, handle } = stopHarness({ finishedExitCode: () => code });
+    host.emit("disconnect");
+    assert.equal(events.timers.length, 1);
+    // The tick finished after the parent died, but some handle keeps the process alive.
+    handle.finished();
+    events.timers[0].callback();
+    assert.deepEqual(events.exits, [code]);
+    assert.doesNotMatch(events.writes.join(""), /forced stop/);
+  }
+});
+
 test("worker stop: a finished worker closes its channel, and that close is not a lost parent", () => {
   const { host, events, handle } = stopHarness();
   handle.finished();
