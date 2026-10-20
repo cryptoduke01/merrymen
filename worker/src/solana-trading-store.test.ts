@@ -11,7 +11,8 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, solanaOwnerEpochOffset, solanaPendingOwnerScopes } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, solanaOwnerEpochOffset, solanaPendingOwnerScopes,
+  solanaPendingOwnerTransactions } from "./solana-trading-store";
 import { SOLANA_SYSTEM_PROGRAM } from "../../packages/core/src/solana-live";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
@@ -819,10 +820,13 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope], "an unsigned revocation is nothing to recover, and the account is listed once");
     await f.store.saveSetup(signedRevoke("withdraw-pending"));
     assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    assert.deepEqual((await solanaPendingOwnerTransactions(f.db)).map(item => [item.slot, item.signature, item.kind, item.preparedAtMs, item.priorSequence]),
+      [["main", "withdraw-pending", "withdraw", NOW, "1"], ["revoke", "revoke-beside", "revoke", NOW, "1"]], "both slots, for the operator's stuck alert and list");
     // The withdrawal resolves; the revocation beside it is still pending: the account is still recovered.
     await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "1"));
     assert.equal((await f.store.setup())!.status, "failed");
     assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    assert.deepEqual((await solanaPendingOwnerTransactions(f.db)).map(item => [item.tenant, item.owner, item.slot, item.signature]), [[TENANT, OWNER, "revoke", "revoke-beside"]]);
     await f.store.finishSetup("revoke-beside", "finalized", 1003);
     assert.deepEqual(await solanaPendingOwnerScopes(f.db), []);
   });
