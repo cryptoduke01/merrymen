@@ -100,14 +100,16 @@ export async function checkPreparedOwnerTransaction(prepared: PreparedOwnerTrans
  * Not a refusal: a sign-in or rate-limit answer (401, 403, 408, 429) or Solana
  * being switched off (404) says nothing about the bytes.
  *
- * The server checks all of that before it saves or broadcasts, so a refusal
- * of the FIRST submission proves these bytes were never saved and dropping
- * them can never lose or duplicate a transaction. A later submission is a
- * retry of bytes the server may already have saved and broadcast, and the
- * server answers a retry from its record of them (ownerStatus, finishSetup):
- * a 4xx there can follow a broadcast that later finalizes. So a refused
- * retry never says "not accepted": only the server's record decides
- * (outcomeAfterRefusal).
+ * A refusal of the FIRST submission that says this request saved nothing
+ * (notSaved, savedNothing) proves these bytes were never saved, so dropping
+ * them can never lose or duplicate a transaction. Any other refusal is
+ * decided by the server's record of the bytes (outcomeAfterRefusal), not
+ * assumed: a route that refuses without saying so may have saved them. A
+ * later submission is a retry of bytes the server may already have saved and
+ * broadcast, and the server answers a retry from its record of them
+ * (ownerStatus, finishSetup): a 4xx there, notSaved included, can follow a
+ * broadcast that later finalizes. So a refused retry never says "not
+ * accepted": only the server's record decides.
  */
 export function refusedByServer(error: unknown): error is RequestError {
   return error instanceof RequestError && error.status >= 400 && error.status < 500 && ![401, 403, 404, 408, 429].includes(error.status);
@@ -136,6 +138,18 @@ export class SolanaRequestError extends RequestError {
     this.notSaved = fields.notSaved === true;
     this.freshMinOutAmount = typeof fields.freshMinOutAmount === "string" && FRESH_MINIMUM.test(fields.freshMinOutAmount) ? fields.freshMinOutAmount : null;
   }
+}
+
+/**
+ * notSaved: THIS refused request saved and sent nothing (solanaResponse).
+ * Only for the first submission of signed bytes does that prove the bytes
+ * were never saved, so they can be dropped. On a retry it says nothing about
+ * the earlier submission, which the server may have saved and broadcast: the
+ * server's record still decides (outcomeAfterRefusal), and no message says
+ * the bytes were not sent from it. It only words the prompt to prepare again.
+ */
+export function savedNothing(error: unknown): boolean {
+  return refusedByServer(error) && error instanceof SolanaRequestError && error.notSaved;
 }
 
 /** The server's saved owner transaction, as the status route reports it. */
@@ -291,21 +305,27 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
       try { ({ result: next } = await api<{ result: ActionResult }>("owner", { stage: "submit", signedTransactionBase64: saved.signedTransactionBase64 })); }
       catch (e) {
         if (!refusedByServer(e)) { setPending({ ...saved, sent: true }); throw e; }
-        if (!saved.sent) {
-          // The first submission of these bytes: the server refused them before saving anything.
+        if (!saved.sent && savedNothing(e)) {
+          // The first submission of these bytes, and the server says this request saved nothing: they were never saved.
           setPending(null); void refresh().catch(() => undefined);
           throw new Error(`${e.message} This signed ${name} was not accepted and has been discarded. Start it again to review and sign a new one.`);
         }
+        // A retry, or a refusal that does not say it saved nothing: the server's record decides.
         const outcome = await outcomeAfterRefusal(readRecord, saved.signature);
-        if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed ${name} may already be on Solana, so it was kept. This does not mean it failed. Check it again shortly.`);
+        if (outcome === "unknown") {
+          setPending({ ...saved, sent: true });
+          throw new Error(`${e.message} ${saved.sent ? `An earlier submission of this signed ${name} may already be on Solana` : `The server could not say whether it saved this signed ${name}`}, so it was kept. This does not mean it failed. Check it again shortly.`);
+        }
         if (outcome === "pending") {
+          setPending({ ...saved, sent: true });
           if (saved.signature) setResult({ signature: saved.signature, status: "pending" });
           throw new Error(`${e.message} The server holds this signed ${name} and still records it as awaiting confirmation, so it was kept. It may already have completed on Solana. Check it again shortly.`);
         }
         if (outcome === "unheld") {
           setPending(null); setResult(null);
+          if (!saved.sent) throw new Error(`${e.message} The server holds no record of this signed ${name}, so it has been discarded. Start it again to review and sign a new one.`);
           if (saved.signature) setCleared({ action: saved.action, signature: saved.signature });
-          throw new Error(`${e.message} The server holds no record of this signed ${name}, so it was cleared and cannot be resent. If an earlier submission reached Solana, its result shows on Solana and in your vault balances. Check before starting another.`);
+          throw new Error(`${e.message} The server holds no record of this signed ${name}, so it was cleared and cannot be resent. If an earlier submission reached Solana, its result shows on Solana and in your vault balances. ${savedNothing(e) ? "Check there before starting it again to review and sign a new one." : "Check before starting another."}`);
         }
         // The server's record settles it: reading it already refreshed the screen.
         next = { signature: saved.signature!, status: outcome }; recorded = true;

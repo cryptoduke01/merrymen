@@ -10,7 +10,7 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { RequestError, UNREACHABLE } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
+import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
@@ -396,25 +396,33 @@ function ConnectedSolana() {
     let pending = signedRegistration;
     // Submitting the saved bytes again is idempotent: the server reports the
     // outcome of the transaction it saved. A refusal of the first submission
-    // proves the server never saved them, so they and their seed are dropped.
-    // A refused retry is decided by the server's record, never assumed to be
-    // "not accepted": the bytes may already be broadcast (refusedByServer).
+    // that says this request saved nothing (savedNothing) proves the server
+    // never saved them, so they and their seed are dropped. Any other refusal,
+    // and every refused retry, is decided by the server's record, never
+    // assumed to be "not accepted": the bytes may already be broadcast.
     let submitted: { signature: string; status: string };
     try {
       ({ registration: submitted } = await api<{ registration: { signature: string; status: string } }>("setup", { stage: "submit", signedTransactionBase64: pending.signedTransactionBase64 }));
     } catch (e) {
       if (!refusedByServer(e)) { setRegistration({ ...pending, sent: true }); throw e; }
-      if (!pending.sent) {
+      if (!pending.sent && savedNothing(e)) {
         setRegistration(null);
         throw new Error(`${e.message} The signed permission was not accepted, so it has been discarded and nothing was activated. Register again to review and sign a new permission.`);
       }
       const outcome = await outcomeAfterRefusal(readRecord, pending.signature);
-      if (outcome === "unknown") throw new Error(`${e.message} An earlier submission of this signed permission may already be on Solana, so it and its session key were kept. Finish permission registration again shortly.`);
-      if (outcome === "pending") throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
+      if (outcome === "unknown") {
+        setRegistration({ ...pending, sent: true });
+        throw new Error(`${e.message} ${pending.sent ? "An earlier submission of this signed permission may already be on Solana" : "The server could not say whether it saved this signed permission"}, so it and its session key were kept. Finish permission registration again shortly.`);
+      }
+      if (outcome === "pending") {
+        setRegistration({ ...pending, sent: true });
+        throw new Error(`${e.message} The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept. Finish permission registration again shortly.`);
+      }
       if (outcome === "unheld") {
         // Resubmitting can never be checked or sent again; whether an earlier
         // submission landed is the server's status to show, not this page's guess.
         setRegistration(null);
+        if (!pending.sent) throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key have been discarded. Register again to review and sign a new permission.`);
         throw new Error(`${e.message} The server holds no record of this signed permission, so it and its session key were cleared from this page. Refresh to check whether a permission is active, then register again if needed.`);
       }
       submitted = { signature: pending.signature!, status: outcome };

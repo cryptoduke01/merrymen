@@ -429,6 +429,10 @@ test("a prepared permission that encodes anything but the shown limits never rea
 });
 
 const refusal = (error: string, status = 409) => json({ error, ownerFacing: true }, status);
+/** A refusal the server marks as having saved and sent nothing for this request (solanaResponse's notSaved). */
+const unsaved = (error: string, status = 409) => json({ error, ownerFacing: true, notSaved: true }, status);
+/** Signed wire bytes the server records by their owner signature (signatureOf), and that signature. */
+const WIRE = Uint8Array.from([1, ...new Uint8Array(64).fill(7), 9, 9, 9]), WIRE_SIGNATURE = base58Encode(new Uint8Array(64).fill(7));
 test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
@@ -436,7 +440,7 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       const prepared = calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare");
-      if (prepared.at(-1)!.body!.action === "withdraw") return refusal("The prepared owner transaction expired before submission.");
+      if (prepared.at(-1)!.body!.action === "withdraw") return unsaved("The prepared owner transaction expired before submission.");
       return json({ result: { signature: "revoke-proof", status: "finalized" } });
     }
     throw new Error("Unexpected fixture route");
@@ -657,6 +661,76 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
   assert.equal(button("Withdraw to my wallet").disabled, true);
 });
 
+test("a first owner submission refused without notSaved is decided by the server's record, never assumed unsaved", async () => {
+  state.runtime.live.programId = PROGRAM;
+  signedBytes = () => WIRE;
+  let submits = 0, record: "pending" | "unheld" | "unreadable" = "pending", statusUp = true;
+  respond = async (path, body) => {
+    if (path === "status") return statusUp ? json(state) : json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") {
+      submits++;
+      if (record === "pending" && submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      if (record === "pending") return json({ result: { signature: WIRE_SIGNATURE, status: "finalized" } });
+      if (record === "unreadable" && submits === 1) { statusUp = false; return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      if (record === "unreadable") return unsaved("Another owner transaction is already saved.");
+      return refusal("This request conflicts with an owner transaction that was just recorded.");
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  // The server holds these bytes as pending: they are kept, and checking them again settles them.
+  await render(); await press("Withdraw to my wallet");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /just recorded\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  await press("Check existing owner transaction");
+  assert.match(ui.container.textContent!, /Owner transaction: finalized/);
+  assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit"]);
+  // The server's record cannot be read: kept, and the next refusal is a retry.
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unreadable"; statusUp = true;
+  await render(); await press("Withdraw to my wallet");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /The server could not say whether it saved this signed withdrawal, so it was kept\. This does not mean it failed/);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  // It may have been saved, so the next submission is a retry: a notSaved answer to it no longer drops bytes the server holds.
+  ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); statusUp = true;
+  await press("Check existing owner transaction");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
+  assert.match(ui.container.textContent!, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  // The server holds no record of them: discarded, and the owner starts again.
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unheld"; statusUp = true;
+  await render(); await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /just recorded\. The server holds no record of this signed withdrawal, so it has been discarded\. Start it again to review and sign a new one\./);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
+  assert.equal(button("Withdraw to my wallet").disabled, false);
+});
+test("a refused retry marked notSaved still keeps bytes the server's record holds, and never says they were not sent", async () => {
+  state.runtime.live.programId = PROGRAM;
+  signedBytes = () => WIRE;
+  let submits = 0;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") {
+      // The first submission was saved and broadcast, but its answer was lost.
+      if (++submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "withdraw"); throw new Error("Lost response"); }
+      // This request saved nothing: it says nothing about the first one.
+      return unsaved("Another owner transaction is already saved.");
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Withdraw to my wallet"); await press("Check existing owner transaction");
+  const text = ui.container.textContent!;
+  assert.doesNotMatch(text, /not accepted|discarded|cleared|nothing was sent/i);
+  assert.match(text, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
+  assert.equal(button("Check existing owner transaction").disabled, false);
+  assert.equal(button("Withdraw to my wallet").disabled, true);
+  // Once the server's record is someone else's, the bytes are cleared, still without "not sent", and the owner is told to check before starting again.
+  ownerTransaction("another-sig", "finalized", "revoke");
+  await press("Check existing owner transaction");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|nothing was sent/i);
+  assert.match(ui.container.textContent!, /The server holds no record of this signed withdrawal, so it was cleared and cannot be resent\. If an earlier submission reached Solana, its result shows on Solana and in your vault balances\. Check there before starting it again to review and sign a new one\./);
+  assert.equal(signCount, 1);
+});
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
   state.runtime.live.programId = PROGRAM;
   const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal("Your sign-in does not match this Solana account.", 403), refusal("Request timed out.", 408)];
@@ -711,6 +785,36 @@ test("a 4xx on a re-check of an accepted permission keeps its bytes and session 
   assert.equal(base58Encode(ed25519.getPublicKey(seed)), sessionPublicKey);
 });
 
+test("a permission submit refused without notSaved, or a notSaved retry, keeps a permission the server holds and its session key", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM;
+  const saved = liveLimits(); state.binding.limits = saved;
+  signedBytes = () => WIRE;
+  let sessionPublicKey = "", submits = 0;
+  let activation: Record<string, unknown> | undefined;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "setup" && body?.stage === "prepare") { sessionPublicKey = String(body.sessionPublicKey); return json({ setup: await permissionTransaction(sessionPublicKey, saved) }); }
+    if (path === "setup" && body?.stage === "submit") {
+      submits++;
+      // The server saved these bytes, then refused without saying it saved nothing.
+      if (submits === 1) { ownerTransaction(WIRE_SIGNATURE, "pending", "session"); return refusal("This request conflicts with an owner transaction that was just recorded."); }
+      // A retry refused as notSaved: this request saved nothing, the first one did.
+      if (submits === 2) return unsaved("Another owner transaction is already saved.");
+      return json({ registration: { signature: WIRE_SIGNATURE, status: "finalized" } });
+    }
+    if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await register();
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|nothing was activated/);
+  assert.match(ui.container.textContent!, /The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept/);
+  await press("Finish permission registration");
+  assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|nothing was activated/);
+  assert.match(ui.container.textContent!, /already saved\. The server holds this signed permission and still records it as awaiting final confirmation, so its session key was kept/);
+  await press("Finish permission registration");
+  assert.equal(signCount, 1);
+  assert.equal(base58Encode(ed25519.getPublicKey(Buffer.from(String(activation!.sessionSecretKey), "base64"))), sessionPublicKey);
+});
 test("a refused permission retry the server holds no record of is cleared without claiming it was never sent", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   const saved = liveLimits(); state.binding.limits = saved;
@@ -771,7 +875,7 @@ test("a refused permission submit discards the signed bytes and the next click p
     if (path === "status") return json(state);
     if (path === "setup" && body?.stage === "prepare") { sessions.push(String(body.sessionPublicKey)); return json({ setup: await permissionTransaction(sessions.at(-1)!, saved) }); }
     if (path === "setup" && body?.stage === "submit") {
-      if (sessions.length === 1) return refusal("The prepared owner transaction expired before submission.");
+      if (sessions.length === 1) return unsaved("The prepared owner transaction expired before submission.");
       return json({ registration: { signature: "fixture-chain-signature", status: "finalized" } });
     }
     if (path === "setup" && body?.stage === "activate") { activation = body; return json({ live: { registered: true } }); }
