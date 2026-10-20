@@ -311,14 +311,16 @@ describe("every way this worker moves money runs inside processIntentLocked", ()
     assert.ok(savedBytes > 0 && finished > savedBytes && asked > finished && canLand > asked && resend > canLand,
       "ownerStatus: saved bytes, finished outcomes return, both providers asked, then resend only unseen bytes that can land");
     assert.equal((status.match(/\.send\(/g) ?? []).length, 1);
-    // ownerStatus is handed only setups just read back from the store.
+    // ownerStatus is handed only setups just read back from the store: the main slot
+    // (s.setup()) or the revocation beside it (s.revokeSetup()), chosen by a condition at most.
     const calls = [...app.matchAll(/ownerStatus\(s, (\w+)\)/g)];
     assert.ok(calls.length >= 3, "status, activateLive and submitOwner each ask");
+    const storeRead = /\bsetup = (?:[\w ="]+ \? )?await s\.(?:setup|revokeSetup)\(\)(?: : await s\.(?:setup|revokeSetup)\(\))?[;,]/g;
     for (const call of calls) {
       assert.equal(call[1], "setup");
-      const read = app.lastIndexOf("setup = await s.setup()", call.index);
-      assert.ok(read > 0, `ownerStatus at offset ${call.index} is not handed a stored setup`);
-      assert.doesNotMatch(app.slice(read + "setup = await s.setup()".length, call.index), /\bsetup\s*=(?!=)/, "nor one changed after reading it");
+      const reads = [...app.slice(0, call.index).matchAll(storeRead)], read = reads.at(-1);
+      assert.ok(read, `ownerStatus at offset ${call.index} is not handed a stored setup`);
+      assert.doesNotMatch(app.slice(read.index! + read[0].length, call.index), /\bsetup\s*=(?!=)/, "nor one changed after reading it");
     }
   });
 

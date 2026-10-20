@@ -69,6 +69,63 @@ export interface SolanaPreparedSetup {
   finalizedSlot?: number;
   expiryProof?: SolanaOwnerExpiryProof;
   priorSequence?: string; priorSessionEpoch?: string; priorVaultExisted?: boolean;
+  /**
+   * Revoke slot only (REVOKE BESIDE A PENDING OWNER TRANSACTION, below): the
+   * signature of the pending main-slot owner transaction this revocation was
+   * prepared beside. Never set on a main-slot record.
+   */
+  beside?: string;
+}
+/**
+ * REVOKE BESIDE A PENDING OWNER TRANSACTION (owner decision 2026-10-20, option A).
+ *
+ * The main slot (solana_runtime_setups) holds one owner transaction per account:
+ * a permission registration, a withdrawal, a native SOL withdrawal, a
+ * resume-buys or a revocation. Its record is what its outcome is booked from,
+ * so it is never replaced while it may still land. A revocation used to wait
+ * for it, so a pending record that never resolved (providers that keep
+ * disagreeing, an expiry that cannot be proven) blocked the emergency revoke.
+ *
+ * Now a revocation can always be prepared and submitted while a NON-revoke
+ * main-slot transaction is pending: it goes in its own slot
+ * (solana_runtime_owner_revokes), marked `beside` that transaction's
+ * signature, and the main record stays exactly as it was. Each record is
+ * observed, rebroadcast and finished by its own signature (finishSetup finds
+ * it in either slot) and booked once: a revocation books nothing but its
+ * status, and a withdrawal's capital out is keyed by its signature.
+ *
+ * Still refused: a second pending revocation (in either slot), and any other
+ * owner transaction while one is pending in either slot. Trades stay refused
+ * while either is pending. A main-slot prepare clears a revoke-slot record
+ * that is not pending (it belonged beside the record being replaced); a
+ * pending one blocks that prepare.
+ *
+ * Proofs stay independent: a revocation moves only the session epoch, and a
+ * withdrawal or resume-buys never does, so neither can wedge the other's
+ * expiry proof. A permission registration moves the epoch too: while a
+ * revocation prepared beside it at the same prior epoch is finalized, "never
+ * ran" for either one means the epoch moved exactly once
+ * (solanaOwnerEpochOffset); while the other is unresolved, its move is not
+ * counted and the proof waits. A registration with a signed revocation beside
+ * it is never activated: the owner's later word was to revoke.
+ */
+/**
+ * How many times `partner`, the record in the other slot, moved the session
+ * epoch that `setup`'s "never ran" proof starts from: 1 when the two are linked
+ * (one was prepared beside the other), both move the epoch (a registration or
+ * a revocation), they read the same prior epoch, and the partner is finalized
+ * (it ran). Otherwise 0: an unresolved partner's move is never assumed.
+ */
+export function solanaOwnerEpochOffset(setup: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "priorSessionEpoch">,
+  partner: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> | null | undefined): number {
+  if (!partner?.signature || partner.status !== "finalized" || setup.priorSessionEpoch === undefined || partner.priorSessionEpoch !== setup.priorSessionEpoch) return 0;
+  const linked = setup.beside !== undefined ? setup.beside === partner.signature : !!setup.signature && partner.beside === setup.signature;
+  const epochKind = (kind: SolanaPreparedSetup["kind"]) => (kind ?? "session") === "session" || kind === "revoke";
+  return linked && epochKind(setup.kind) && epochKind(partner.kind) ? 1 : 0;
+}
+/** A signed owner transaction whose outcome is not yet recorded. */
+function ownerPending(setup: SolanaPreparedSetup | null | undefined): boolean {
+  return !!setup?.signature && setup.status !== "finalized" && setup.status !== "failed";
 }
 /**
  * An executable WSOL→USDG exit quote for the withdrawal amount and the
@@ -112,15 +169,20 @@ const DAY = 86_400_000;
  *   session trades while one is prepared or pending, so nothing else can advance it;
  * - resume-buys changes neither; a wrong "failed" only leaves the off-chain
  *   breaker paused, which is the conservative direction.
+ * `epochOffset`: the epoch moves the linked record in the other slot is known
+ * to have made (solanaOwnerEpochOffset), 0 or 1; only epoch kinds use it.
  */
 export function solanaOwnerExpiryProven(setup: Pick<SolanaPreparedSetup, "kind" | "priorVaultExisted" | "priorSequence" | "priorSessionEpoch">,
-  vaultSequence: string | null, sessionEpoch: string | null): boolean {
+  vaultSequence: string | null, sessionEpoch: string | null, epochOffset = 0): boolean {
   if (setup.priorVaultExisted === undefined || setup.priorSequence === undefined || setup.priorSessionEpoch === undefined) return false;
   if (setup.priorVaultExisted && (vaultSequence === null || sessionEpoch === null)) return false;
   if ((vaultSequence === null) !== (sessionEpoch === null)) return false;
+  if (epochOffset !== 0 && epochOffset !== 1) return false;
+  let expectedEpoch = setup.priorSessionEpoch;
+  if (epochOffset) { try { expectedEpoch = (BigInt(setup.priorSessionEpoch) + 1n).toString(); } catch { return false; } }
   switch (setup.kind ?? "session") {
-    case "revoke": return setup.priorVaultExisted && sessionEpoch === setup.priorSessionEpoch;
-    case "session": return (sessionEpoch ?? "0") === setup.priorSessionEpoch;
+    case "revoke": return setup.priorVaultExisted && sessionEpoch === expectedEpoch;
+    case "session": return (sessionEpoch ?? "0") === expectedEpoch;
     case "withdraw": case "withdraw-sol": return setup.priorVaultExisted && vaultSequence === setup.priorSequence;
     case "resume-buys": return setup.priorVaultExisted;
     default: return false;
@@ -144,6 +206,9 @@ CREATE TABLE IF NOT EXISTS solana_runtime_sessions (
  PRIMARY KEY(tenant,owner)
 );
 CREATE TABLE IF NOT EXISTS solana_runtime_setups (
+ tenant TEXT NOT NULL, owner TEXT NOT NULL, setup_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
+);
+CREATE TABLE IF NOT EXISTS solana_runtime_owner_revokes (
  tenant TEXT NOT NULL, owner TEXT NOT NULL, setup_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
 );
 CREATE TABLE IF NOT EXISTS solana_runtime_live_books (
@@ -501,6 +566,10 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           setup.signature !== session.registrationSignature || setup.programId !== session.programId ||
           setup.vault !== session.vault || setup.session !== session.session) refuse("Register only the exact finalized owner-approved session.");
       if (await tx.prepare("SELECT 1 FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND status='pending'").get(this.scope.tenant, this.scope.owner)) refuse("Resolve the pending Solana trade before replacing its session.");
+      // A revocation the owner signed beside this registration, landed or not yet resolved, was the later word.
+      const revoke = await this.revokeIn(tx);
+      if (revoke?.signature && revoke.beside === setup.signature && revoke.status !== "failed") refuse("A revocation was signed after this permission. Prepare a new permission.");
+      await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
       await tx.prepare(`INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET record_json=excluded.record_json,sealed_seed=excluded.sealed_seed`)
         .run(this.scope.tenant, this.scope.owner, JSON.stringify(session), sealSecret(this.seedPrefix(session) + seed, dek));
@@ -537,7 +606,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       const strategyCap = await this.autonomousIn(tx, binding);
       if (binding.requestedMode !== "live" || !binding.limits) refuse("Live Solana trading has not been enabled for this account.");
       const ownerSetup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(tenant, owner), "setup_json");
-      if (ownerSetup?.signature && ownerSetup.status !== "finalized" && ownerSetup.status !== "failed") refuse("Resolve the pending owner transaction before trading.");
+      if (ownerPending(ownerSetup) || ownerPending(await this.revokeIn(tx))) refuse("Resolve the pending owner transaction before trading.");
       const now = clock(this.now), limits = validateSolanaAccountLimits(binding.limits, now);
       // A prepared withdrawal's expiry is proven by an unchanged sequence, so no
       // trade may advance it between preparing and signing either.
@@ -697,10 +766,41 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     await this.binding();
     return rowJson(await this.db.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
   }
+  /** The revoke slot: a revocation prepared beside a pending main-slot owner transaction (REVOKE BESIDE...). */
+  async revokeSetup(): Promise<SolanaPreparedSetup | null> {
+    await this.binding();
+    return this.revokeIn(this.db);
+  }
+  private async revokeIn(db: Db): Promise<SolanaPreparedSetup | null> {
+    return rowJson(await db.prepare("SELECT setup_json FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+  }
   async saveSetup(setup: SolanaPreparedSetup): Promise<boolean> {
     return this.db.tx(async tx => {
       const binding = await this.bindingIn(tx, true);
-      const previous = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const revoke = await this.revokeIn(tx);
+      // REVOKE BESIDE A PENDING OWNER TRANSACTION: the revoke slot.
+      if (setup.beside !== undefined) {
+        if (setup.kind !== "revoke") refuse("Only a revocation can be prepared beside a pending owner transaction.");
+        if (setup.signature) {
+          if (revoke?.signature) {
+            if (revoke.signature === setup.signature && revoke.signedTransactionBase64 === setup.signedTransactionBase64) return false;
+            refuse("Resolve the previously submitted Solana setup before creating another.");
+          }
+          if (!revoke || revoke.messageBase64 !== setup.messageBase64 || revoke.preparedAtMs !== setup.preparedAtMs || revoke.beside !== setup.beside) refuse("The prepared owner transaction changed. Review and sign again.");
+          if (clock(this.now) >= revoke.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+        } else {
+          // Only beside the main record it names, while that is a pending non-revoke, and never beside another pending revocation.
+          if (!ownerPending(main) || main!.signature !== setup.beside || main!.kind === "revoke") refuse("Prepare the revocation again: the pending owner transaction it was prepared beside changed.");
+          if (ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
+        }
+        await tx.prepare(`INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)
+          ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
+        return true;
+      }
+      // A pending revocation in the revoke slot holds every other owner transaction, another revocation included.
+      if (!setup.signature && ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
+      const previous = main;
       if (previous?.signature && previous.status !== "finalized" && previous.status !== "failed") {
         if (previous.signature === setup.signature && previous.signedTransactionBase64 === setup.signedTransactionBase64) return false;
         refuse("Resolve the previously submitted Solana setup before creating another.");
@@ -730,13 +830,20 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       }
       await tx.prepare(`INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)
         ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
+      // A new main-slot prepare replaces the record a revoke-slot revocation was prepared beside: one
+      // not pending (unsigned or resolved) goes with it, so it can never be signed beside the new one.
+      if (!setup.signature && revoke && !ownerPending(revoke)) await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
       return true;
     });
   }
   async finishSetup(signature: string, status: "finalized" | "failed", finalizedSlot?: number, expiryProof?: SolanaOwnerExpiryProof): Promise<void> {
     await this.db.tx(async tx => {
       await this.bindingIn(tx, true);
-      const setup = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const main = rowJson<SolanaPreparedSetup>(await tx.prepare("SELECT setup_json FROM solana_runtime_setups WHERE tenant=? AND owner=?").get(this.scope.tenant, this.scope.owner), "setup_json");
+      const revoke = await this.revokeIn(tx);
+      // Each record is finished by its own signature, in whichever slot it is; its partner is the other slot's.
+      const inRevokeSlot = !!revoke?.signature && revoke.signature === signature && main?.signature !== signature;
+      const setup = inRevokeSlot ? revoke : main, partner = inRevokeSlot ? main : revoke;
       if (!setup || setup.signature !== signature) refuse("Owner confirmation does not match the saved transaction.");
       if (setup.status === "finalized" || setup.status === "failed") {
         if (setup.status !== status) refuse("Finalized owner transaction outcomes cannot be changed.");
@@ -746,7 +853,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (expiryProof) {
         if (status !== "failed" || expiryProof.reason !== "blockhash-expired" || raw(expiryProof.blockHeight) <= raw(setup.lastValidBlockHeight) ||
             !Number.isSafeInteger(expiryProof.slot) || expiryProof.slot < 1 || finalizedSlot !== expiryProof.slot ||
-            !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch)) refuse("Invalid owner transaction expiry evidence.");
+            !solanaOwnerExpiryProven(setup, expiryProof.vaultSequence, expiryProof.sessionEpoch, solanaOwnerEpochOffset(setup, partner))) refuse("Invalid owner transaction expiry evidence.");
         setup.expiryProof = structuredClone(expiryProof);
       }
       if (status === "finalized" && setup.kind === "resume-buys") {
@@ -826,7 +933,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       }
       setup.status = status;
       if (status === "finalized" && Number.isSafeInteger(finalizedSlot) && finalizedSlot! > 0) setup.finalizedSlot = finalizedSlot;
-      await tx.prepare("UPDATE solana_runtime_setups SET setup_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
+      await tx.prepare(`UPDATE ${inRevokeSlot ? "solana_runtime_owner_revokes" : "solana_runtime_setups"} SET setup_json=? WHERE tenant=? AND owner=?`).run(JSON.stringify(setup), this.scope.tenant, this.scope.owner);
     });
   }
 }

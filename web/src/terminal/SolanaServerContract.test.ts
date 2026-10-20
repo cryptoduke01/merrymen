@@ -10,8 +10,9 @@
  * - the owner transactions prepareOwnerAction really builds (revoke, resume,
  *   native SOL and token withdrawals, a SyncNative first or not, a priority
  *   fee or none) pass the page's check, checkPreparedOwnerTransaction;
- * - which owner transactions the server prepares while another is pending,
- *   the rule SolanaOwnerActions shows the owner (and ownerPrepare models in
+ * - which owner transactions the server prepares while another is pending (a
+ *   revocation beside a pending non-revoke one, nothing else), the rule
+ *   SolanaOwnerActions shows the owner (and ownerPrepare models in
  *   SolanaScreen.test.ts).
  */
 import test from "node:test";
@@ -304,7 +305,7 @@ test("the server's bytes from an under-reported simulation reach the wallet only
   } finally { f.raw.close(); }
 });
 
-test("while a submitted owner transaction is unresolved the server prepares no other, a revocation included; one only prepared is replaced", async () => {
+test("while a submitted owner transaction is unresolved the server prepares only a revocation, beside it, and nothing at all while a revocation is pending; one only prepared is replaced", async () => {
   const f = await fixture();
   try {
     f.controls.initialized = true;
@@ -314,25 +315,36 @@ test("while a submitted owner transaction is unresolved the server prepares no o
     assert.equal((await asPage(() => f.app.prepareOwnerAction(f.scope, { action: "revoke" }))).status, 200);
     const late = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64: unsentSigned }));
     assert.equal(late.refusal, true, late.error); assert.equal(f.controls.sends, 0, "refused before anything is saved or sent");
-    // Submitted (saved and broadcast) and unresolved: nothing else is prepared, a revocation included.
+    // Submitted (saved and broadcast) and unresolved: nothing else is prepared but a revocation, beside it.
     const withdrawal = await f.app.prepareOwnerAction(f.scope, { action: "withdraw-sol", amountRaw: "1000000" });
     const signed = await f.sign(withdrawal.transactionBase64);
     const submitted = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64: signed }));
     assert.equal(submitted.status, 200); assert.equal(f.controls.sends, 1);
-    for (const input of [{ action: "revoke" }, { action: "resume-buys" }, { action: "withdraw-sol", amountRaw: "1000000" }] as const) {
-      const answer = await asPage(() => f.app.prepareOwnerAction(f.scope, input));
-      assert.equal(answer.status, 409, input.action);
-      assert.equal(answer.error, "Refresh the pending owner transaction before preparing another.", input.action);
-      assert.equal(answer.refusal, true, input.action);
-    }
-    // The status names it, which is what the page holds every owner action back on.
+    const refused = async (inputs: ReadonlyArray<Parameters<typeof f.app.prepareOwnerAction>[1]>) => {
+      for (const input of inputs) {
+        const answer = await asPage(() => f.app.prepareOwnerAction(f.scope, input));
+        assert.equal(answer.status, 409, input.action);
+        assert.equal(answer.error, "Refresh the pending owner transaction before preparing another.", input.action);
+        assert.equal(answer.refusal, true, input.action);
+      }
+    };
+    await refused([{ action: "resume-buys" }, { action: "withdraw-sol", amountRaw: "1000000" }]);
+    const revocation = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const revocationSigned = await f.sign(revocation.transactionBase64);
+    const revoked = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revocationSigned }));
+    assert.equal(revoked.status, 200); assert.equal(f.controls.sends, 2);
+    // While that revocation is pending nothing is prepared, another revocation included.
+    await refused([{ action: "revoke" }, { action: "resume-buys" }, { action: "withdraw-sol", amountRaw: "1000000" }]);
+    // The status names both, which is what the page holds owner actions back on.
     const status = await f.app.status(f.scope);
     assert.equal(status.live.ownerTransaction?.status, "pending"); assert.equal(status.live.ownerTransaction?.kind, "withdraw-sol");
-    // Its blockhash provably expired (finalized height past it, vault unchanged): it is failed, and a revocation prepares again.
+    assert.equal(status.live.ownerTransaction?.revoke?.status, "pending");
+    // Their blockhashes provably expired (finalized height past them, vault unchanged): both are failed, and a revocation prepares again.
     f.controls.height = 5100;
     const retry = await asPage(() => f.app.submitOwnerAction(f.scope, { signedTransactionBase64: signed }));
     assert.equal(retry.status, 200);
-    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "failed");
+    const settled = (await f.app.status(f.scope)).live.ownerTransaction;
+    assert.equal(settled?.status, "failed"); assert.equal(settled?.revoke?.status, "failed");
     assert.equal((await asPage(() => f.app.prepareOwnerAction(f.scope, { action: "revoke" }))).status, 200);
   } finally { f.raw.close(); }
 });

@@ -30,6 +30,7 @@ import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
+import { solanaOwnerEpochOffset } from "./solana-trading-store";
 
 /**
  * Codes:
@@ -485,7 +486,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * one URL and pair a current height with a stale slot, whose vault snapshot
    * predates a transaction that did run.
    */
-  async function ownerExpiry(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, seen: boolean): Promise<OwnerView> {
+  async function ownerExpiry(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, seen: boolean, epochOffset = 0): Promise<OwnerView> {
     const info = await read("getEpochInfo", [{ commitment: "finalized" }]);
     if (!object(info)) fail("Invalid owner expiry evidence.");
     const proofSlot = integer(info.absoluteSlot), blockHeight = integer(info.blockHeight);
@@ -506,17 +507,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // Only state this kind of transaction must have changed proves it never ran.
     // Trades advance the sequence independently, so a revoke or session is
     // proven by its epoch alone, never wedged by a trade that landed meanwhile.
-    if (!solanaOwnerExpiryProven(setup, sequence, epoch)) return pending;
+    // A linked record in the other slot that ran moved the epoch once (solanaOwnerEpochOffset).
+    if (!solanaOwnerExpiryProven(setup, sequence, epoch, epochOffset)) return pending;
     return { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: String(blockHeight), vaultSequence: sequence, sessionEpoch: epoch, slot: integer(snapshot.context.slot) } };
   }
   /** One provider's view of a submitted owner transaction. */
-  async function observeOwner(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, signature: string): Promise<OwnerView> {
+  async function observeOwner(read: SolanaLiveRead, s: SolanaTradingStore, setup: SolanaPreparedSetup, signature: string, epochOffset = 0): Promise<OwnerView> {
     const statuses = await read("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]);
     if (!object(statuses) || !Array.isArray(statuses.value) || statuses.value.length !== 1) fail("Invalid owner transaction confirmation.");
     const state = statuses.value[0];
     if (state !== null && !object(state)) fail("Invalid owner transaction confirmation.");
     const tx = await read("getTransaction", [signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
-    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, s, setup, state !== null);
+    if (!object(state) || state.confirmationStatus !== "finalized") return tx !== null ? { outcome: "pending", seen: true, canLand: false } : ownerExpiry(read, s, setup, state !== null, epochOffset);
     if (tx === null) return { outcome: "pending", seen: true, canLand: false };
     if (!object(tx) || tx.version !== 0 || !object(tx.meta) || !Object.hasOwn(tx.meta, "err") || !Object.hasOwn(state, "err")
       || !isSolanaTransactionError(tx.meta.err) || !isSolanaTransactionError(state.err)
@@ -553,7 +555,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if ((error instanceof SolanaAppRuntimeError && error.code === "invalid") || error instanceof SolanaTradingStoreError) throw new SolanaAppRuntimeError("outcome-unknown", error.message);
       throw error;
     };
-    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature), ownerViewKey).catch(unknown);
+    // The record in the other slot (REVOKE BESIDE A PENDING OWNER TRANSACTION): a linked registration or
+    // revocation of it that finalized moved the epoch this record's expiry proof starts from.
+    const partner = await (setup.beside !== undefined ? s.setup() : s.revokeSetup()).catch(unknown);
+    const epochOffset = solanaOwnerEpochOffset(setup, partner);
+    const quorum = await readSolanaQuorum(live, read => observeOwner(read, s, setup, signature, epochOffset), ownerViewKey).catch(unknown);
     if (quorum.agreed && quorum.value.outcome !== "pending") {
       const view = quorum.value;
       if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof).catch(unknown); return { signature, status: "failed" }; }
@@ -628,16 +634,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
-    const previous = await s.setup();
-    // One owner transaction at a time, a revocation included (owner decision, 2026-10-20): the
-    // saved record is what its outcome is booked from, so it is never replaced while it may
-    // still land. A revoke waits for it to finalize or provably expire. When the record stays
-    // pending (providers disagree, its reads fail), the page says the server cannot settle it
-    // and, where it shows the recovery card, points to `merrymen solana-recover`, which revokes
-    // with the owner's own key (SolanaOwnerActions). Trading is held meanwhile (status blocker).
-    // The alternative, a second slot or a setup history so a revoke can be prepared beside
-    // it, is not built.
-    if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
+    const previous = await s.setup(), revoking = await s.revokeSetup();
+    // The saved record is what its outcome is booked from, so it is never replaced while it
+    // may still land. A revocation can always be prepared beside a pending NON-revoke owner
+    // transaction (owner decision 2026-10-20, option A): it goes in the revoke slot, marked
+    // `beside` it, and the pending record stays as it is (REVOKE BESIDE A PENDING OWNER
+    // TRANSACTION in solana-trading-store.ts). Anything else waits while either slot holds a
+    // pending transaction: another withdrawal, resume-buys or permission, and a second
+    // revocation. Trading is held meanwhile (status blocker).
+    const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "failed" && item.status !== "finalized";
+    const beside = details.kind === "revoke" && unresolved(previous) && (previous!.kind ?? "session") !== "revoke" && !unresolved(revoking) ? previous!.signature : undefined;
+    if ((unresolved(previous) || unresolved(revoking)) && beside === undefined) fail("Refresh the pending owner transaction before preparing another.", "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
@@ -658,7 +665,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const transactionBase64 = getBase64EncodedWireTransaction(tx); encoded(transactionBase64);
     const preparedAtMs = now();
     const setup: SolanaPreparedSetup = { ...details, transactionBase64, messageBase64: Buffer.from(tx.messageBytes).toString("base64"),
-      blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight.toString(), preparedAtMs, expiresAtMs: preparedAtMs + 60_000 };
+      blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight.toString(), preparedAtMs, expiresAtMs: preparedAtMs + 60_000,
+      ...(beside !== undefined ? { beside } : {}) };
     await s.saveSetup(setup);
     return { transactionBase64, blockhash: setup.blockhash, lastValidBlockHeight: setup.lastValidBlockHeight,
       programId: setup.programId, vault: setup.vault, session: setup.session, expiresAtMs: setup.expiresAtMs,
@@ -685,14 +693,20 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     } catch { return undefined; }
   }
   async function submitOwner(scope: SolanaAccountScope, input: { signedTransactionBase64: string }, kind: "session" | "owner") {
-    const s = await store(scope), setup = await s.setup();
+    const s = await store(scope), revoking = kind === "owner" ? await s.revokeSetup() : null;
     // Until saveSetup succeeds this request records and sends nothing: every refusal
     // is "not-saved". Bytes an earlier request saved and sent, whose setup a later
     // prepare replaced, are refused this way too (see SolanaAppRuntimeError).
     const notSaved: (message: string) => never = message => fail(message, "not-saved");
-    if (!setup || (kind === "session" ? (setup.kind ?? "session") !== "session" : setup.kind === "session" || !setup.kind)) notSaved("Prepare this owner transaction before signing it.");
+    const fits = (item: SolanaPreparedSetup | null): item is SolanaPreparedSetup => !!item && (kind === "session" ? (item.kind ?? "session") === "session" : item.kind !== "session" && !!item.kind);
+    if (!fits(await s.setup()) && !fits(revoking)) notSaved("Prepare this owner transaction before signing it.");
     let transaction: ReturnType<ReturnType<typeof getTransactionDecoder>["decode"]>;
     try { transaction = getTransactionDecoder().decode(encoded(input.signedTransactionBase64)); } catch { return notSaved("Invalid encoded Solana transaction."); }
+    // A revocation prepared beside a pending owner transaction is in the revoke slot: these are its
+    // bytes when they are its reviewed message. Anything else is checked against the main slot.
+    const revokeSlot = fits(revoking) && Buffer.from(transaction.messageBytes).toString("base64") === revoking.messageBase64;
+    const setup = revokeSlot ? await s.revokeSetup() : await s.setup();
+    if (!fits(setup)) return notSaved("Prepare this owner transaction before signing it.");
     const signatureBytes = transaction.signatures[address(scope.owner)];
     if (Object.keys(transaction.signatures).length !== 1 || !signatureBytes ||
       Buffer.from(transaction.messageBytes).toString("base64") !== setup.messageBase64 ||
@@ -729,10 +743,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         || !!(await s.setup()) || (await s.pending()).length > 0);
       if (liveReads) {
         try { await reconcile(s); } catch { blockers.push("Pending trade confirmation is unavailable; its reservation remains held."); }
-        const setup = await s.setup();
-        if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
-          try { await ownerStatus(s, setup); } catch { blockers.push("Owner transaction confirmation is unavailable."); }
+        // Both slots: the main owner transaction, then a revocation prepared beside it.
+        let unreadable = false;
+        for (const slot of ["main", "revoke"] as const) {
+          const setup = slot === "main" ? await s.setup() : await s.revokeSetup();
+          if (setup?.signature && setup.status !== "finalized" && setup.status !== "failed") {
+            try { await ownerStatus(s, setup); } catch { unreadable = true; }
+          }
         }
+        if (unreadable) blockers.push("Owner transaction confirmation is unavailable.");
       }
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
@@ -842,8 +861,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
-      const ownerTransaction = await s.setup();
-      if (ownerTransaction?.signature && ownerTransaction.status === "pending") blockers.push("An owner transaction is awaiting final confirmation.");
+      const ownerTransaction = await s.setup(), revocation = await s.revokeSetup();
+      if ((ownerTransaction?.signature && ownerTransaction.status === "pending") || (revocation?.signature && revocation.status === "pending")) blockers.push("An owner transaction is awaiting final confirmation.");
       const heartbeat = await s.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
       const lastSeenAtMs = heartbeat ? Number(heartbeat.last_seen_at_ms) : null;
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
@@ -851,7 +870,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, recoverable, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
-          ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind } : null } };
+          // `revoke`: a revocation signed beside it (the revoke slot), with its own signature and outcome.
+          ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind,
+            ...(revocation?.signature ? { revoke: { signature: revocation.signature, status: revocation.status, kind: "revoke" as const } } : {}) } : null } };
     },
     async setupPaper(scope: SolanaAccountScope, input: { initialCashRaw: string; limits: SolanaPaperLimits }) {
       const s = await store(scope), binding = await s.binding();

@@ -604,6 +604,96 @@ test("each owner transaction kind is proven expired only by state it must change
   await f.store.finishSetup("first-session", "failed", 1002, proof(null, null));
 });
 
+// REVOKE BESIDE A PENDING OWNER TRANSACTION (solana-trading-store.ts): the revoke slot, on both dialects.
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  const prior = { priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1" };
+  const expiry = (vaultSequence: string, sessionEpoch: string) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence, sessionEpoch, slot: 1002 });
+  const revokeBeside = (beside: string) => ({ ...setup("revoke"), ...prior, beside, messageBase64: "cmV2b2tl", transactionBase64: "cmV2b2tl" });
+  const signedRevoke = (beside: string, signature = "revoke-beside") => ({ ...revokeBeside(beside), signature, signedTransactionBase64: "c2lnbmVkLXJldm9rZQ==", status: "pending" as const });
+  const withdrawals = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.db.prepare("SELECT evidence_id,kind,amount_raw FROM solana_runtime_cashflows WHERE kind='withdraw'").all() as
+    Array<{ evidence_id: string; kind: string; amount_raw: string }>).map(row => ({ evidence_id: row.evidence_id, kind: row.kind, amount_raw: row.amount_raw }));
+  test(`${dialect}: a revocation is saved beside a pending withdrawal in its own slot, and each is finished once by its own signature`, options, async t => {
+    const f = await fixture(t, dialect), s = submission();
+    await f.store.recordSigned(s); await f.store.settle(OWNER, s.intent.requestId, s.signature, settlement(s));
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, "withdraw-pending");
+    const main = await f.store.setup();
+    // Nothing else goes in the main slot, and only a revocation beside the pending record it names.
+    await assert.rejects(f.store.saveSetup(setup("resume-buys")), /Resolve the previously submitted/);
+    await assert.rejects(f.store.saveSetup({ ...setup("resume-buys"), beside: "withdraw-pending" }), /Only a revocation/);
+    await assert.rejects(f.store.saveSetup(revokeBeside("another-transaction")), /prepared beside changed/);
+    assert.equal(await f.store.saveSetup(revokeBeside("withdraw-pending")), true);
+    await assert.rejects(f.store.saveSetup({ ...signedRevoke("withdraw-pending"), preparedAtMs: NOW + 1 }), /changed/, "only the reviewed revocation is signed");
+    assert.equal(await f.store.saveSetup(signedRevoke("withdraw-pending")), true);
+    assert.equal(await f.store.saveSetup(signedRevoke("withdraw-pending")), false, "the same signed bytes again are already saved");
+    await assert.rejects(f.store.saveSetup({ ...revokeBeside("withdraw-pending"), preparedAtMs: NOW + 1 }), /Resolve the previously submitted/, "never a second pending revocation beside it");
+    await assert.rejects(f.store.saveSetup({ ...setup("revoke"), ...prior }), /Resolve the previously submitted/, "nor one in the main slot");
+    assert.deepEqual(await f.store.setup(), main, "the pending withdrawal's record is kept as it was");
+    // The revocation is finished by its own signature while the withdrawal stays pending: trading stays refused.
+    await f.store.finishSetup("revoke-beside", "finalized", 1003); await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    await assert.rejects(f.store.finishSetup("revoke-beside", "failed"), /cannot be changed/);
+    assert.equal((await f.store.revokeSetup())!.status, "finalized"); assert.deepEqual(await f.store.setup(), main);
+    await assert.rejects(f.store.recordSigned(submission("during", "1")), /pending owner transaction/);
+    // The withdrawal lands: its capital out is booked once, by its signature, whatever is retried.
+    const cash = BigInt((await f.store.liveBook())!.cashRaw);
+    await f.store.finishSetup("withdraw-pending", "finalized", 1004); await f.store.finishSetup("withdraw-pending", "finalized", 1004);
+    assert.equal((await f.store.liveBook())!.cashRaw, (cash - 1_000_000n).toString());
+    assert.deepEqual(await withdrawals(f), [{ evidence_id: "withdraw-pending", kind: "withdraw", amount_raw: "1000000" }]);
+    await assert.rejects(f.store.finishSetup("unknown-signature", "finalized", 1004), /does not match/);
+    // A new main-slot prepare clears the resolved revocation that belonged beside the old record.
+    assert.equal(await f.store.saveSetup(setup("resume-buys")), true);
+    assert.equal(await f.store.revokeSetup(), null);
+  });
+  test(`${dialect}: a pending revocation in its own slot holds trades and every other owner transaction until it is finished`, options, async t => {
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-dropped");
+    await f.store.saveSetup(revokeBeside("withdraw-dropped")); await f.store.saveSetup(signedRevoke("withdraw-dropped"));
+    // The withdrawal provably never ran (its sequence unchanged): the pending revocation still holds everything else.
+    await f.store.finishSetup("withdraw-dropped", "failed", 1002, expiry("1", "1"));
+    for (const next of [setup("resume-buys"), { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, { ...setup("revoke"), ...prior }]) {
+      await assert.rejects(f.store.saveSetup(next), /Resolve the previously submitted/, next.kind);
+    }
+    await assert.rejects(f.store.recordSigned(submission()), /pending owner transaction/);
+    // The revocation is proven by its epoch alone, then the owner may act again.
+    await assert.rejects(f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "2")), /expiry evidence/);
+    await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("2", "1"));
+    assert.equal(await f.store.saveSetup(setup("resume-buys")), true);
+    assert.equal(await f.store.recordSigned(submission()), true);
+  });
+  test(`${dialect}: a registration and a revocation beside it each prove "never ran" by counting the other's landing once, and the registration is never activated after it`, options, async t => {
+    for (const lands of ["revoke", "session", "neither"] as const) {
+      const f = await fixture(t, dialect), registration = "registration-pending";
+      await saveSignedSetup(f.store, { ...setup("session"), ...prior }, registration);
+      await f.store.saveSetup(revokeBeside(registration)); await f.store.saveSetup(signedRevoke(registration));
+      if (lands === "revoke") {
+        // Before the revocation is known to have run, the moved epoch proves nothing about the registration.
+        await assert.rejects(f.store.finishSetup(registration, "failed", 1002, expiry("1", "2")), /expiry evidence/);
+        await f.store.finishSetup("revoke-beside", "finalized", 1003);
+        await assert.rejects(f.store.finishSetup(registration, "failed", 1002, expiry("1", "1")), /expiry evidence/, "the epoch moved once: an unchanged one is no proof now");
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "2"));
+      } else if (lands === "session") {
+        await f.store.finishSetup(registration, "finalized", 1003);
+        await assert.rejects(f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1")), /expiry evidence/);
+        await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "2"));
+        // The revocation never ran, so the registration may be activated.
+        await f.store.registerSession({ ...f.registered, registrationSignature: registration }, sessionSeed, dek);
+        assert.equal(await f.store.revokeSetup(), null, "activation clears the resolved revocation with the registration");
+      } else {
+        await f.store.finishSetup(registration, "failed", 1002, expiry("1", "1"));
+        await f.store.finishSetup("revoke-beside", "failed", 1002, expiry("1", "1"));
+      }
+    }
+    // Both landed (registration first): the owner's later word was to revoke, so the registration is never activated.
+    const f = await fixture(t, dialect);
+    await saveSignedSetup(f.store, { ...setup("session"), ...prior }, "registration-landed");
+    await f.store.saveSetup(revokeBeside("registration-landed")); await f.store.saveSetup(signedRevoke("registration-landed"));
+    await f.store.finishSetup("registration-landed", "finalized", 1003);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed" }, sessionSeed, dek), /revocation was signed after this permission/);
+    await f.store.finishSetup("revoke-beside", "finalized", 1004);
+    await assert.rejects(f.store.registerSession({ ...f.registered, registrationSignature: "registration-landed" }, sessionSeed, dek), /revocation was signed after this permission/);
+  });
+}
+
 
 
 test("an unbooked excess never blocks admission, a shortfall does, and no sale reaches quarantined SOL", async t => {
