@@ -50,7 +50,9 @@
 // Test step, refuses it ("same source, different artifact"), so the job fails
 // before report and the upload, and hands over no new manifest. The reviewed
 // source did not change, so the toolchain or the build environment did; the
-// owner investigates that rather than committing a new manifest.
+// owner investigates that rather than committing a new manifest. The job's
+// first step (solana-program-record.mjs --runner-image) has already named the
+// runner image in the log and step summary, since no build record exists.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";

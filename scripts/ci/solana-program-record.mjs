@@ -3,6 +3,12 @@
 // records what was built.
 //
 //   node scripts/ci/solana-program-record.mjs <contracts/solana dir> <program .so> <record.json>
+//   node scripts/ci/solana-program-record.mjs --runner-image
+//
+// --runner-image only names the runner image (runnerImageSection) on stdout
+// and in the step summary. ci.yml runs it first in solana · test and solana ·
+// rebuild, so a run that fails before any record is written still names the
+// image it ran on. It never fails on what it finds.
 //
 // Refuses (exit 1) unless:
 // - lib.rs declares exactly one program ID, a 32-byte base58 key;
@@ -200,6 +206,18 @@ export function runnerImageLine(image) {
   return `- runner image: ${named}, not digest-pinned. ${RUNNER_IMAGE_NOTE}`;
 }
 
+/**
+ * The step summary's runner image section, written by ci.yml's first vault
+ * step (--runner-image) before anything is built. When a committed manifest
+ * has this build's source digest but another artifact, build.sh fails the
+ * Test step ("same source, different artifact") before the build record or
+ * its summary exist: the toolchain or the image changed, and this section is
+ * then the run's only record of the image.
+ */
+export function runnerImageSection(env) {
+  return ["### Runner image", "", runnerImageLine(runnerImage(env)), ""].join("\n");
+}
+
 /** Why releaseStatus decided as it did, by the run and the Linux manifest outcome. */
 const RELEASE_REASONS = {
   matches: "a run on main whose pinned Linux build matched the committed manifest",
@@ -300,8 +318,14 @@ export function programRecord({ libRs, anchorToml, so, localTestId = null, toolc
 }
 
 function main(argv) {
+  if (argv.length === 1 && argv[0] === "--runner-image") {
+    const section = runnerImageSection(process.env);
+    process.stdout.write(`${runnerImageLine(runnerImage(process.env))}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, section);
+    return;
+  }
   if (argv.length !== 3) {
-    console.error("usage: solana-program-record.mjs <contracts/solana dir> <program .so> <record.json>");
+    console.error("usage: solana-program-record.mjs <contracts/solana dir> <program .so> <record.json> | --runner-image");
     process.exit(2);
   }
   const [programRoot, soPath, outPath] = argv;

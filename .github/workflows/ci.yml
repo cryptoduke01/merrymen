@@ -243,9 +243,10 @@ jobs:
     needs: [solana-paths]
     # The release artifact comes from this job, so the image is a fixed
     # release rather than ubuntu-latest. A hosted runner has no digest to pin:
-    # the build record and step summary name its ImageOS and ImageVersion
-    # (solana-program-record.mjs runnerImage), so a manifest mismatch after an
-    # image update can be traced to it.
+    # the Runner image step, before anything is built, and the build record
+    # name its ImageOS and ImageVersion (solana-program-record.mjs
+    # runnerImage), so a manifest mismatch after an image update can be
+    # traced to it, even in a run that fails in the Test step.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -270,6 +271,14 @@ jobs:
         if: needs.solana-paths.outputs.run == 'true'
         with:
           node-version: 22
+
+      # Before anything is built: build.sh fails the Test step on a committed
+      # manifest with this source digest but another artifact ("same source,
+      # different artifact"), before the build record exists, and an image
+      # update is one cause. This puts the image in the log and step summary.
+      - name: Runner image
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-program-record.mjs --runner-image
 
       # The scripts below, and the shape of these jobs, have tests of their own.
       # app · tests runs them on every pull request too (they are in npm test);
@@ -433,6 +442,12 @@ jobs:
         if: needs.solana-paths.outputs.run == 'true'
         with:
           node-version: 22
+
+      # As in solana · test: named before anything is built, so a failed
+      # rebuild still says which image it ran on.
+      - name: Runner image
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-program-record.mjs --runner-image
 
       - name: Install the verified toolchain
         if: needs.solana-paths.outputs.run == 'true'

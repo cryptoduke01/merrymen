@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import {
   anchorProgramIds, base58Decode, CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, declaresLocalTestId, LOCAL_TEST_SOURCE,
   localTestProgramId, programRecord, provenance, readLocalTestProgramId, readToolchain, releaseLine, releaseStatus, RELEASE_RULE,
-  RUNNER_IMAGE_NOTE, runnerImage, runnerImageLine,
+  RUNNER_IMAGE_NOTE, runnerImage, runnerImageLine, runnerImageSection,
 } from "./solana-program-record.mjs";
 import { releaseArtifactName, releaseRecord, releaseSource } from "./solana-release.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
@@ -128,6 +128,8 @@ describe("the CI jobs", () => {
     assert.ok(test, "ci.yml has no solana-test job");
     const order = [
       "uses: actions/checkout@",
+      // Before anything is built, so a run that fails in the Test step names its image.
+      "run: node scripts/ci/solana-program-record.mjs --runner-image\n",
       "run: node --test scripts/ci/solana-ci.test.mjs",
       "run: scripts/ci/solana-toolchain.sh install ",
       "uses: actions/cache@",
@@ -249,6 +251,27 @@ describe("the CI jobs", () => {
     assert.match(test, /^ {4}runs-on: ubuntu-24\.04$/m);
   });
 
+  it("both vault jobs name the runner image before anything is built, so a run that fails in the Test step still records it", () => {
+    // build.sh fails test.sh on a committed manifest with this source digest
+    // but another artifact, before the build record and its summary exist; an
+    // image update is one cause, so the image must already be named by then.
+    const step = [
+      "      - name: Runner image",
+      "        if: needs.solana-paths.outputs.run == 'true'",
+      "        run: node scripts/ci/solana-program-record.mjs --runner-image",
+    ].join("\n");
+    for (const [id, builds] of [["solana-test", "contracts/solana/test.sh 2>&1"], ["solana-rebuild", "so=$(scripts/ci/solana-rebuild.sh "]]) {
+      const all = steps(job(id));
+      const at = all.indexOf(step);
+      assert.ok(at >= 0, `${id} has no Runner image step`);
+      assert.equal(all.filter(st => st.includes("--runner-image")).length, 1, id);
+      // Right after checkout and setup-node: nothing before it can fail on the toolchain.
+      assert.deepEqual(all.slice(1, at).map(st => /uses: (actions\/[a-z-]+)@/.exec(st)?.[1] ?? st), ["actions/checkout", "actions/setup-node"], id);
+      assert.ok(at < all.findIndex(st => st.includes(builds)), `${id}: the image must be named before the build`);
+      assert.ok(at < all.findIndex(st => st.includes("solana-toolchain.sh install ")), `${id}: the image must be named before the toolchain install`);
+    }
+  });
+
   it("caches crates and the host test build, never the SBF build or its output", () => {
     const cache = /uses: actions\/cache@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
     const paths = [...cache.matchAll(/^ {12}(\S+)$/gm)].map(m => m[1]);
@@ -259,11 +282,12 @@ describe("the CI jobs", () => {
 
   it("solana · rebuild builds again from tracked source elsewhere and reports its hash", () => {
     assert.ok(rebuild, "ci.yml has no solana-rebuild job");
+    const image = rebuild.indexOf("run: node scripts/ci/solana-program-record.mjs --runner-image\n");
     const install = rebuild.indexOf("run: scripts/ci/solana-toolchain.sh install ");
     const build = rebuild.indexOf("so=$(scripts/ci/solana-rebuild.sh ");
-    const record = rebuild.indexOf("node scripts/ci/solana-program-record.mjs ");
+    const record = rebuild.indexOf("sha=$(node scripts/ci/solana-program-record.mjs ");
     const check = rebuild.indexOf("run: scripts/ci/solana-toolchain.sh check");
-    assert.ok(install >= 0 && install < build && build < record && record < check);
+    assert.ok(image >= 0 && image < install && install < build && build < record && record < check);
     assert.match(rebuild, /^ {4}outputs:\n {6}sha256: \$\{\{ steps\.record\.outputs\.sha256 \}\}$/m);
     assert.doesNotMatch(rebuild, /actions\/cache@/, "the rebuild must not reuse anything cached");
   });
@@ -1248,6 +1272,29 @@ describe("solana-program-record.mjs", () => {
     assert.equal(programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so }).runnerImage, null);
     // Both vault builds run on that named image release, never on a floating label.
     for (const id of ["solana-test", "solana-rebuild"]) assert.match(job(id), /^ {4}runs-on: ubuntu-24\.04$/m, id);
+  });
+
+  it("--runner-image names the image on stdout and in the step summary, and never fails on what it finds", () => {
+    const dir = fresh("runner-image");
+    const summary = join(dir, "summary.md");
+    const image = { ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" };
+    const named = run(process.execPath, [script, "--runner-image"], { ...image, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(named.status, 0, named.stderr);
+    assert.equal(named.stdout, `${runnerImageLine(runnerImage(image))}\n`);
+    assert.equal(readFileSync(summary, "utf8"), runnerImageSection(image));
+    assert.equal(runnerImageSection(image), `### Runner image\n\n${runnerImageLine(runnerImage(image))}\n`);
+    // Appends: the job's later summaries (the build record's) follow it.
+    const again = run(process.execPath, [script, "--runner-image"], { ImageOS: "", ImageVersion: "", GITHUB_STEP_SUMMARY: summary });
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(readFileSync(summary, "utf8"), runnerImageSection(image) + runnerImageSection({}));
+    assert.match(again.stdout, /^- runner image: unknown \(no ImageOS or ImageVersion: not a GitHub-hosted runner\), not digest-pinned\./);
+    // Without a step summary (a local run), stdout only.
+    const local = run(process.execPath, [script, "--runner-image"], { ...image, GITHUB_STEP_SUMMARY: "" });
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(local.stdout, named.stdout);
+    for (const args of [["--runner-image", "extra"], ["--runner-images"]]) {
+      assert.equal(run(process.execPath, [script, ...args], image).status, 2, args.join(" "));
+    }
   });
 
   it("records the run: event, ref, commit, the pull request head, workflow and run", () => {
