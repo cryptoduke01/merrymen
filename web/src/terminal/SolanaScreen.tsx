@@ -74,6 +74,14 @@ export const SOLANA_WRITE_OFF_SLIPPAGE_BPS = 100;
  * still shows that exact lot. The status has no dust marker to offer it from
  * (a cross-track request asks for one); the server refuses anything that is
  * not dust (409, shown verbatim) either way.
+ *
+ * The check is stricter than the write-off: a paper preview is refused once
+ * the book's limits (the saved ones) have expired, and while the mints'
+ * safety reads are unavailable, though the write-off itself needs neither.
+ * OWNER DECISION (the conservative option): the offer still needs the
+ * market's zero-output answer to a check, so with expired limits the page
+ * says to save new limits first. The alternative offers the write-off from a
+ * status dust marker, once the status carries one.
  */
 type DustLot = { mint: string; amountRaw: string; confirming: boolean };
 const RAW = /^(0|[1-9][0-9]*)$/;
@@ -635,6 +643,9 @@ function ConnectedSolana() {
                   <button type="button" className="solana-secondary" disabled={busy} onClick={() => setDust(null)}>Keep it</button></div>
                 : <p>No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold. <button type="button" disabled={busy} onClick={() => setDust({ ...offered, confirming: true })}>Write off…</button></p>)}</div>;
           })}
+          {/* The check is a paper preview, which the server refuses once the book's limits (the saved ones) have expired; its write-off does not need them. */}
+          {status.runtime.paper.positions.length > 0 && binding.limits && binding.limits.expiresAtMs <= Date.now()
+            && <p role="status">Your saved limits expired at {permissionExpiry(binding.limits.expiresAtMs)}. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.</p>}
           <p>Network fees and account rent are excluded from paper results.</p>
           {!!status.runtime.paper.trades?.length && <details><summary>Recent simulated trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.side === "buy" ? "Buy" : "Sell"} · {trade.requestId} · simulated</li>)}</ul></details>}
           </> : <><label>Starting simulated USDG<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>

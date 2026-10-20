@@ -1392,6 +1392,24 @@ test("a booked write-off says so and shows the lot gone, even when the status re
     assert.equal(hasButton("Write off…"), false, label); assert.equal(hasButton("Write off at zero"), false, label);
   }
 });
+test("with expired saved limits the paper card says a lot can be checked for write-off only after saving new ones", async () => {
+  const expired = Date.UTC(2025, 0, 2, 9, 30, 0);
+  state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
+  const NOTE = "Your saved limits expired at 2025-01-02 09:30:00 UTC. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.";
+  const notes = () => [...ui.container.querySelectorAll('[role="status"]')].map((item) => item.textContent).filter((text) => /expired|write-off/.test(text ?? ""));
+  // Current limits: no note.
+  await render();
+  assert.deepEqual(notes(), []);
+  // Expired: said once, next to the lots, and the check stays available (the server decides).
+  state.binding.limits = { ...limits, expiresAtMs: expired }; state.runtime.limits = state.binding.limits;
+  await ui.click("Refresh account");
+  assert.deepEqual(notes(), [NOTE]);
+  assert.equal(hasButton("Check for write-off"), true);
+  // No lot held: nothing to check, so no note.
+  state.runtime.paper = { ...paper, positions: [] } as never;
+  await ui.click("Refresh account");
+  assert.deepEqual(notes(), []);
+});
 test("a lot a route still buys is never offered for write-off", async () => {
   state.runtime.paper = { ...paper, positions: [{ mint: BONK, decimals: 5, amountRaw: "1200", costBasisUsdgRaw: "2" }] } as never;
   respond = async (path, body) => {
