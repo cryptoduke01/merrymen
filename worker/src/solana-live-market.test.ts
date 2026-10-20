@@ -5,7 +5,7 @@ import { getBase58Decoder } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SolanaPaperValidationError } from "../../packages/core/src/solana";
-import { createSolanaLiveMarket, JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, validateJupiterCpi } from "./solana-live-market";
+import { createSolanaLiveMarket, JUPITER_SWAP_PROGRAM, SOLANA_JUPITER_MAX_ACCOUNTS, SolanaLiveMarketError, validateJupiterCpi } from "./solana-live-market";
 const key = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
 function fixture() {
   const request = { requestId: "route-1", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
@@ -46,6 +46,10 @@ test("quote and CPI use exact coherent v1 response, fixed origins, hard slippage
   assert.ok(!Object.hasOwn(built, "transaction")); assert.ok(!Object.hasOwn(built, "otherInstructions"));
   assert.deepEqual(seen.map(item => item.url.origin + item.url.pathname), ["https://api.jup.ag/swap/v1/quote", "https://api.jup.ag/swap/v1/swap-instructions"]);
   assert.equal(seen[0]!.url.searchParams.get("instructionVersion"), "V1");
+  // Routes sized under the vault's account bounds (55 distinct, 64 route accounts): 40, never Jupiter's default.
+  assert.equal(SOLANA_JUPITER_MAX_ACCOUNTS, 40);
+  assert.equal(seen[0]!.url.searchParams.get("maxAccounts"), "40");
+  assert.equal(seen[0]!.url.searchParams.get("onlyDirectRoutes"), null);
   const body = JSON.parse(seen[1]!.init.body as string);
   assert.deepEqual(body.quoteResponse, JSON.parse(JSON.stringify(f.rawQuote)));
   assert.equal(body.userPublicKey, f.request.swapAuthority); assert.equal(body.destinationTokenAccount, f.request.destinationTokenAccount);

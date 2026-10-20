@@ -61,9 +61,12 @@ const PROGRAMS = {
 };
 // worker/src/solana-live-market.ts's quote for one USDG -> WSOL buy of 1 USDG, plus
 // onlyDirectRoutes, and its swap-instructions body without the quote and accounts.
+// maxAccounts (SOLANA_JUPITER_MAX_ACCOUNTS) was added after the committed route.json
+// was recorded; that direct route names 21 distinct accounts, so it would not have
+// changed it. The next refresh asks with it.
 export const QUOTE = {
   inputMint: USDG, outputMint: WSOL, amount: "1000000", slippageBps: "50", swapMode: "ExactIn",
-  restrictIntermediateTokens: "true", platformFeeBps: "0", instructionVersion: "V1", onlyDirectRoutes: "true",
+  restrictIntermediateTokens: "true", platformFeeBps: "0", instructionVersion: "V1", maxAccounts: "40", onlyDirectRoutes: "true",
 };
 export const BUILD = {
   wrapAndUnwrapSol: false, useSharedAccounts: true, dynamicSlippage: false,

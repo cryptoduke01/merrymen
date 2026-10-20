@@ -29,6 +29,21 @@ const OTHER_ROUTE_DISCRIMINATORS = [
 ].map(bytes => Buffer.from(bytes));
 /** The largest route the vault takes. */
 const MAX_ROUTE_DATA_BYTES = 900, MAX_ROUTE_ACCOUNTS = 64, MAX_ROUTE_STEPS = 64, MAX_LOOKUP_TABLES = 8;
+/**
+ * Jupiter's maxAccounts on every live quote, below the bounds the vault's own
+ * transaction leaves a route. contracts/solana/runtime-tests/tests/jupiter_fork.rs
+ * measures them: a route can name at most 55 distinct accounts (the 64-account
+ * lock limit less the vault's and a refund account), and the vault takes at most
+ * MAX_ROUTE_ACCOUNTS (64) route accounts counting repeats (check_route_accounts).
+ * Its Whirlpool route names 29 route accounts, only 21 of them distinct (about
+ * 1.4 to 1), so 40 keeps such a route under both bounds whether Jupiter's rough
+ * estimate counts distinct or repeated accounts, with margin. Without it,
+ * Jupiter's default (64) can answer a route the vault or validateJupiterCpi
+ * refuses: that fails closed, but an exit on that route can fail again and again.
+ * validateJupiterCpi still refuses more than MAX_ROUTE_ACCOUNTS whatever Jupiter
+ * answers. refresh.mjs's QUOTE mirrors it.
+ */
+export const SOLANA_JUPITER_MAX_ACCOUNTS = 40;
 export interface JupiterCpiAccount { address: string; isSigner: boolean; isWritable: boolean }
 export interface JupiterCpiRoute {
   quote: SolanaQuote;
@@ -157,7 +172,7 @@ export function createSolanaLiveMarket(options: {
       }, options.timeoutMs);
       const params = new URLSearchParams({ inputMint: intent.inputMint, outputMint: intent.outputMint,
         amount: intent.amountRaw, slippageBps: String(intent.slippageBps), swapMode: "ExactIn",
-        restrictIntermediateTokens: "true", platformFeeBps: "0", instructionVersion: "V1" });
+        restrictIntermediateTokens: "true", platformFeeBps: "0", instructionVersion: "V1", maxAccounts: String(SOLANA_JUPITER_MAX_ACCOUNTS) });
       const quotedAtMs = now();
       const raw = await json(`https://api.jup.ag/swap/v1/quote?${params}`);
       if (!object(raw) || raw.swapMode !== "ExactIn" || typeof raw.outAmount !== "string") return fail("provider");
