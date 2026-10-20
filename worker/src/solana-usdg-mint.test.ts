@@ -4,10 +4,13 @@
  * mint's bytes as one read-only getAccountInfo returned them, and variants of
  * those bytes, each with the verdict the compiled vault gives (custody.rs
  * runs a buy and an exit against every one). Here the worker's readMint reads
- * the same bytes, as Agave's jsonParsed encoding presents them. A USDG mint
- * the vault refuses fails every swap on chain, buys and exits alike, so the
- * worker must refuse it before anything is signed, and must accept the mint
- * the vault accepts.
+ * the same bytes as Agave's jsonParsed encoding presents them:
+ * usdg-mainnet-mint.jsonparsed.json is Agave 2.3.13's own account decoder
+ * output for each variant (contracts/solana/scripts/usdg-jsonparsed.mjs, made
+ * offline), and this file's own decoding of the bytes must equal it. A USDG
+ * mint the vault refuses fails every swap on chain, buys and exits alike, so
+ * the worker must refuse it before anything is signed, and must accept the
+ * mint the vault accepts.
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -24,7 +27,21 @@ const fixture = JSON.parse(readFileSync(new URL("../../contracts/solana/runtime-
   address: string; owner: string; slot: number; lamports: number; dataBase64: string; dataSha256: string;
   decoded: { extensions: string[] }; variants: Variant[];
 };
+/** Agave's account decoder on the same bytes: the jsonParsed form an RPC node returns for each variant. */
+const agave = JSON.parse(readFileSync(new URL("../../contracts/solana/runtime-tests/fixtures/usdg-mainnet-mint.jsonparsed.json", import.meta.url), "utf8")) as {
+  source: string; ledgerTool: string; variants: { name: string; sha256: string; address: string }[];
+  ledgerToolOutput: { accounts: { pubkey: string; account: Record<string, unknown> & { data: unknown } }[] };
+};
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** The account Agave's decoder printed for a variant, as getAccountInfo's value. */
+function agaveAccount(variant: Variant) {
+  const placed = agave.variants.filter((v) => v.name === variant.name && v.sha256 === variant.sha256);
+  assert.equal(placed.length, 1, `${variant.name}: not decoded by Agave once`);
+  const printed = agave.ledgerToolOutput.accounts.filter((a) => a.pubkey === placed[0]!.address);
+  assert.equal(printed.length, 1, `${variant.name}: not printed once`);
+  return printed[0]!.account;
+}
 
 /** The read bytes changed by a variant's ops, in order, exactly as custody.rs applies them. */
 function variantBytes(variant: Variant): Buffer {
@@ -42,7 +59,9 @@ function variantBytes(variant: Variant): Buffer {
  * A Token-2022 mint account in Agave's jsonParsed form (account-decoder's
  * UiMint and UiExtension, camelCase, tagged "extension" with "state"), for the
  * extension types the fixture uses. Anything else is unparseableExtension, as
- * Agave reports a type it cannot decode.
+ * Agave reports a type it cannot decode. An independent decoding of the bytes:
+ * the test below holds it equal to Agave's own output, so the committed
+ * decoder output is shown to be of these bytes.
  */
 function jsonParsedMint(data: Buffer, slot: number) {
   const key = (at: number) => base58Encode(new Uint8Array(data.subarray(at, at + 32)));
@@ -92,12 +111,13 @@ function jsonParsedMint(data: Buffer, slot: number) {
       supply: data.readBigUInt64LE(36).toString(), extensions } } } } };
 }
 
-/** What the worker does with these bytes: trade both ways, refuse buys only, or refuse the mint (every swap). */
-async function workerVerdict(data: Buffer): Promise<"accepts" | "refuses buys only" | "refuses"> {
+type Verdict = "accepts" | "refuses buys only" | "refuses";
+/** What the worker does with a getAccountInfo value: trade both ways, refuse buys only, or refuse the mint (every swap). */
+async function workerVerdict(account: unknown): Promise<Verdict> {
   const slot = fixture.slot;
   const fetcher: typeof fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { id: number; method: string };
-    const result = body.method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH : body.method === "getSlot" ? slot : jsonParsedMint(data, slot);
+    const result = body.method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH : body.method === "getSlot" ? slot : { context: { slot }, value: account };
     return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
   };
   const market = createSolanaMarket({ env: { MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example.test/" }, fetch: fetcher, now: () => 1_800_000_000_000 });
@@ -142,12 +162,24 @@ describe("the mainnet USDG mint, as the worker and the vault see it", () => {
     assert.ok(fixture.variants.some((v) => v.vault === "refuses"));
     for (const name of WORKER_GAPS) assert.ok(fixture.variants.some((v) => v.name === name && v.vault === "refuses"), name);
   });
+  it("is decoded by Agave's own jsonParsed decoder, and this file decodes every variant exactly as Agave does", () => {
+    assert.equal(agave.source, "usdg-mainnet-mint.json");
+    assert.match(agave.ledgerTool, /^agave-ledger-tool 2\.3\.13 /);
+    assert.deepEqual(agave.variants.map((v) => [v.name, v.sha256]), fixture.variants.map((v) => [v.name, v.sha256]));
+    assert.equal(agave.ledgerToolOutput.accounts.length, fixture.variants.length);
+    for (const variant of fixture.variants) {
+      const bytes = variantBytes(variant), account = agaveAccount(variant);
+      const { rentEpoch, ...decoded } = account;
+      assert.equal(typeof rentEpoch, "number", variant.name);
+      assert.deepEqual(decoded, jsonParsedMint(bytes, fixture.slot).value, variant.name);
+    }
+  });
   for (const variant of fixture.variants) {
     const gap = WORKER_GAPS.has(variant.name);
     it(`${variant.name}: the vault ${variant.vault === "accepts" ? "trades it both ways, and so does the worker" : "refuses every swap, and so must the worker, before signing"}`,
       gap ? { todo: "cross-track: worker/src/solana-market.ts must refuse this USDG mint for every swap (see WORKER_GAPS)" } : {},
       async () => {
-        assert.equal(await workerVerdict(variantBytes(variant)), variant.vault);
+        assert.equal(await workerVerdict(agaveAccount(variant)), variant.vault);
       });
   }
 });
