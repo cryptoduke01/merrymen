@@ -242,7 +242,10 @@ jobs:
     name: solana · test
     needs: [solana-paths]
     # The release artifact comes from this job, so the image is a fixed
-    # release rather than ubuntu-latest. A hosted runner has no digest to pin.
+    # release rather than ubuntu-latest. A hosted runner has no digest to pin:
+    # the build record and step summary name its ImageOS and ImageVersion
+    # (solana-program-record.mjs runnerImage), so a manifest mismatch after an
+    # image update can be traced to it.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:

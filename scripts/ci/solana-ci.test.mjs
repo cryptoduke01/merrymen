@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import {
   anchorProgramIds, base58Decode, CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, declaresLocalTestId, LOCAL_TEST_SOURCE,
   localTestProgramId, programRecord, provenance, readLocalTestProgramId, readToolchain, releaseLine, releaseStatus, RELEASE_RULE,
+  RUNNER_IMAGE_NOTE, runnerImage, runnerImageLine,
 } from "./solana-program-record.mjs";
 import { releaseArtifactName, releaseRecord, releaseSource } from "./solana-release.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
@@ -1230,6 +1231,25 @@ describe("solana-program-record.mjs", () => {
     assert.match(releaseLine(releaseStatus(main, "matches", program)), /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(/);
   });
 
+  it("records the runner image by name and version, and says it is not digest-pinned", () => {
+    const image = { ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" };
+    assert.deepEqual(runnerImage(image), { os: "ubuntu24", version: "20251012.1.0", digestPinned: false, note: RUNNER_IMAGE_NOTE });
+    for (const env of [{}, null, { ImageOS: "", ImageVersion: "" }, { ImageOS: "ubuntu 24", ImageVersion: "1\n2" }, { ImageOS: "-x", ImageVersion: "x".repeat(65) }]) {
+      const r = runnerImage(env);
+      assert.deepEqual([r.os, r.version, r.digestPinned], [null, null, false], JSON.stringify(env));
+    }
+    assert.match(RUNNER_IMAGE_NOTE, /^GitHub-hosted runner image, named by release \(ubuntu-24\.04\) but not digest-pinned: GitHub updates it in place\./);
+    assert.match(RUNNER_IMAGE_NOTE, /never commit a new manifest just to make the comparison pass\.$/);
+    assert.equal(runnerImageLine(runnerImage(image)), `- runner image: \`ubuntu24\` version \`20251012.1.0\`, not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
+    assert.equal(runnerImageLine(runnerImage({})), `- runner image: unknown (no ImageOS or ImageVersion: not a GitHub-hosted runner), not digest-pinned. ${RUNNER_IMAGE_NOTE}`);
+    const so = elf(TOKEN_BYTES);
+    const r = programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so, image: runnerImage(image) });
+    assert.deepEqual(r.runnerImage, runnerImage(image));
+    assert.equal(programRecord({ libRs: libRs(TOKEN_PROGRAM), anchorToml: anchorToml(TOKEN_PROGRAM), so }).runnerImage, null);
+    // Both vault builds run on that named image release, never on a floating label.
+    for (const id of ["solana-test", "solana-rebuild"]) assert.match(job(id), /^ {4}runs-on: ubuntu-24\.04$/m, id);
+  });
+
   it("records the run: event, ref, commit, the pull request head, workflow and run", () => {
     const event = join(fresh("event"), "event.json");
     const head = "1".repeat(40);
@@ -1274,21 +1294,28 @@ describe("solana-program-record.mjs", () => {
     rmSync(out, { force: true });
     const pr = run(process.execPath, [script, root, so, out], {
       GITHUB_SHA: "c0ffee", GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge",
-      GITHUB_RUN_ID: "99", GITHUB_RUN_ATTEMPT: "1", GITHUB_STEP_SUMMARY: summary,
+      GITHUB_RUN_ID: "99", GITHUB_RUN_ATTEMPT: "1", GITHUB_STEP_SUMMARY: summary, ImageOS: "ubuntu24", ImageVersion: "20251012.1.0",
     });
     assert.equal(pr.status, 0, pr.stderr);
     const prRecord = JSON.parse(readFileSync(out, "utf8"));
     assert.deepEqual([prRecord.release.candidate, prRecord.release.label], [false, "not-a-release"]);
     assert.deepEqual([prRecord.provenance.event, prRecord.provenance.runId], ["pull_request", "99"]);
+    assert.deepEqual(prRecord.runnerImage, { os: "ubuntu24", version: "20251012.1.0", digestPinned: false, note: RUNNER_IMAGE_NOTE });
     const text = readFileSync(summary, "utf8");
     assert.match(text, /- run: 99 attempt 1, pull_request on refs\/pull\/7\/merge of millw14\/merrymen/);
     assert.ok(text.includes(`- not the local test program ID \`${LOCAL}\`\n`), text);
+    assert.ok(text.includes(`${runnerImageLine(runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" }))}\n`), text);
     assert.match(text, /- release: \*\*not a release artifact\*\* \(not a push or manual run on refs\/heads\/main of millw14\/merrymen\)\. A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main/);
     // A run on main: still not a release here. Only the Linux manifest
     // comparison (solana-linux-manifest.mjs report) can make it one.
     const mainSummary = join(root, "main-summary.md");
-    const mainRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: mainSummary });
+    const mainRun = run(process.execPath, [script, root, so, out], {
+      GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_STEP_SUMMARY: mainSummary, ImageOS: "", ImageVersion: "",
+    });
     assert.equal(mainRun.status, 0, mainRun.stderr);
+    // Off a GitHub-hosted runner there is no image to name, and the record says so.
+    assert.deepEqual([JSON.parse(readFileSync(out, "utf8")).runnerImage.os, JSON.parse(readFileSync(out, "utf8")).runnerImage.version], [null, null]);
+    assert.match(readFileSync(mainSummary, "utf8"), /^- runner image: unknown \(no ImageOS or ImageVersion: not a GitHub-hosted runner\), not digest-pinned\./m);
     assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release,
       releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, null, { programId: TOKEN_PROGRAM, localTestId: LOCAL }));
     assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "not-a-release");
@@ -1668,6 +1695,15 @@ describe("solana-linux-manifest.mjs", () => {
     assert.deepEqual([differs.record.release.candidate, differs.record.release.label], [false, "not-a-release"]);
     assert.match(differs.summary, /^- release: \*\*not a release artifact\*\* \(its pinned Linux build differs from the committed manifest\)/m);
     assert.equal(run(process.execPath, [script, "compare", dir]).status, 1);
+    // The warning names the runner image the record holds: it is not digest-pinned and may be what changed.
+    build(other);
+    const withImage = JSON.parse(readFileSync(recordPath, "utf8"));
+    withImage.runnerImage = runnerImage({ ImageOS: "ubuntu24", ImageVersion: "20251012.1.0" });
+    writeFileSync(recordPath, JSON.stringify(withImage));
+    const imaged = report(mainRun);
+    assert.equal(imaged.status, 0, imaged.stderr);
+    assert.match(imaged.stderr, /\(its pinned Linux build differs from the committed manifest\)\. This run's runner image: ubuntu24 20251012\.1\.0 \(not digest-pinned\); if the program source and toolchain pins did not change, the image may have: investigate before committing anything\. The job's last step fails on this\.$/m);
+    assert.deepEqual(imaged.record.runnerImage, withImage.runnerImage, "report keeps the record's image");
 
     // A main run that deleted the committed manifest: not-a-release too.
     gitIn("rm", "-q", "-f", "contracts/solana/build-manifests/Linux-x86_64.json");

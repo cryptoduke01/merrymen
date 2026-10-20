@@ -222,7 +222,11 @@ function report(dir, recorded, recordPath) {
   record.release = release;
   writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
   const line = outcomeLine(result);
-  const named = `The artifact is uploaded as ${release.label} (${release.reason}).`;
+  const named = `The artifact is uploaded as ${release.label} (${release.reason}).`
+    + (result.status === "differs" && record.runnerImage
+      ? ` This run's runner image: ${record.runnerImage.os ?? "unknown"} ${record.runnerImage.version ?? "unknown"} (not digest-pinned); `
+        + "if the program source and toolchain pins did not change, the image may have: investigate before committing anything."
+      : "");
   // stdout is the label alone; Actions reads workflow commands on stderr too.
   if (result.status === "matches") console.error(`${line} ${named}`);
   else if (result.status === "uncommitted") console.error(`::notice title=Linux build manifest::${line} ${named}`);

@@ -172,6 +172,31 @@ export function provenance(env) {
   };
 }
 
+/**
+ * Why a GitHub-hosted image is recorded rather than pinned. Exported for the
+ * tests and the step summary.
+ */
+export const RUNNER_IMAGE_NOTE = "GitHub-hosted runner image, named by release (ubuntu-24.04) but not digest-pinned: GitHub updates it in place. "
+  + "If the pinned Linux build stops matching the committed manifest while the program source and scripts/ci/solana-toolchain.env did not change, "
+  + "compare this image version with the one recorded by the run that produced the committed manifest and investigate the toolchain and image; "
+  + "never commit a new manifest just to make the comparison pass.";
+
+/**
+ * The runner image that built an artifact: ImageOS and ImageVersion, which
+ * GitHub sets on its hosted runners (null elsewhere, or when malformed).
+ * ci.yml runs the vault jobs on ubuntu-24.04, a named image release with no
+ * digest to pin, so the record names the exact image version instead.
+ */
+export function runnerImage(env) {
+  const value = name => (typeof env?.[name] === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(env[name]) ? env[name] : null);
+  return { os: value("ImageOS"), version: value("ImageVersion"), digestPinned: false, note: RUNNER_IMAGE_NOTE };
+}
+/** The step summary's runner image line. */
+export function runnerImageLine(image) {
+  const named = image?.os || image?.version ? `\`${image.os ?? "unknown"}\` version \`${image.version ?? "unknown"}\`` : "unknown (no ImageOS or ImageVersion: not a GitHub-hosted runner)";
+  return `- runner image: ${named}, not digest-pinned. ${RUNNER_IMAGE_NOTE}`;
+}
+
 /** Why releaseStatus decided as it did, by the run and the Linux manifest outcome. */
 const RELEASE_REASONS = {
   matches: "a run on main whose pinned Linux build matched the committed manifest",
@@ -229,7 +254,7 @@ export function releaseLine(release) {
   return `- release: ${verdict} (${release.reason}). ${release.rule}`;
 }
 
-export function programRecord({ libRs, anchorToml, so, localTestId = null, toolchain = null, commit = null, run = null }) {
+export function programRecord({ libRs, anchorToml, so, localTestId = null, toolchain = null, commit = null, run = null, image = null }) {
   const programId = declaredProgramId(libRs);
   const key = base58Decode(programId);
   if (key.length !== 32) throw new Error(`declared program ID ${programId} is ${key.length} bytes, not 32`);
@@ -262,6 +287,8 @@ export function programRecord({ libRs, anchorToml, so, localTestId = null, toolc
     // (max-len - bytes) zero bytes.
     regionNote: "ProgramData region SHA-256 equals sha256 only for max-len == bytes",
     toolchain,
+    // The runner image (ImageOS, ImageVersion): named, not digest-pinned.
+    runnerImage: image,
     // GITHUB_SHA: the pushed commit, or a pull request's test merge commit.
     commit,
     provenance: run,
@@ -285,6 +312,7 @@ function main(argv) {
     toolchain: readToolchain(readFileSync(join(here, "solana-toolchain.env"), "utf8")),
     commit: run.commit,
     run,
+    image: runnerImage(process.env),
   });
   writeFileSync(outPath, `${JSON.stringify(record, null, 2)}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -299,6 +327,7 @@ function main(argv) {
       `- size: ${record.bytes} bytes`,
       `- SHA-256: \`${record.sha256}\``,
       `- toolchain: agave ${t.agave}, platform-tools ${t.platformTools} (rustc ${t.platformToolsRustc}), arch ${t.arch}`,
+      runnerImageLine(record.runnerImage),
       `- commit: ${record.commit ?? "unknown"}${run.pullRequestHead ? ` (test merge of pull request head ${run.pullRequestHead})` : ""}`,
       `- run: ${run.runId ?? "unknown"} attempt ${run.runAttempt ?? "?"}, ${run.event ?? "unknown event"} on ${run.ref ?? "unknown ref"} of ${run.repository ?? "unknown repository"}`,
       releaseLine(record.release),
