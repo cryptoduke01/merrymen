@@ -310,8 +310,11 @@ export interface OnchainIdScan {
    * linkOrSecret), the coin name drawn on a P&L card (worker/src/pnl-card.ts),
    * event text redacted for the Telegram chat model (worker/src/telegram/reads.ts
    * redactAddresses), room prompts (worker/src/groupchat/voice.ts scrubIds) and
-   * the soul's memory, notes and journal (worker/src/soul.ts); the last three
-   * through redactSolanaIds, which replaces the longest value first.
+   * the soul's memory, notes and journal (worker/src/soul.ts). Telegram event
+   * text, room prompts and the soul's journal (scrubProse) go through
+   * redactSolanaIds, which replaces the longest value first, before any 0x rule;
+   * the soul's memory and notes (sanitizeMemory, sanitizeNote) refuse the whole
+   * text, as every other caller here refuses.
    * Off by default: the name checks that also call this detector keep reading
    * a run inside a longer word as no id. Brain's Python mirror implements both
    * scans, and services/brain/tests/data/onchain_ids.json pins both to it.
