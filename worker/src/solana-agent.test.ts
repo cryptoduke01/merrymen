@@ -40,15 +40,14 @@ test("a rebalance sell never asks for more WSOL than the signed per-trade SOL li
   // Buys are bounded by the USDG limits as before.
   assert.equal(planSolanaRebalance({ ...input, limits: capped })!.amountRaw, "5000000");
 });
-test("a live rebalance worth under the 1 USDG live minimum is in band, except a sale of the whole position; paper has no minimum", () => {
+test("a live rebalance buy worth under the 1 USDG live minimum is in band; paper has no minimum, and sells are left to admission", () => {
   const small = { ...input, strategy: { ...strategy, tradeUsdgRaw: "999999" } };
   assert.equal(planSolanaRebalance({ ...small, mode: "live" }), null);
   assert.equal(planSolanaRebalance(small)!.amountRaw, "999999");
   assert.equal(planSolanaRebalance({ ...input, mode: "live", strategy: { ...strategy, tradeUsdgRaw: "1000000" } })!.amountRaw, "1000000");
-  // A partial sale worth $0.50 of a $100 position is in band live; selling the whole of a $0.90 position is not.
-  assert.equal(planSolanaRebalance({ ...input, mode: "live", strategy: { ...strategy, tradeUsdgRaw: "500000" }, cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "100000000" }), null);
-  const whole = planSolanaRebalance({ ...input, mode: "live", strategy: { ...strategy, targetSolBps: 0 }, cashRaw: "0", wsolRaw: "4500000", solValueUsdgRaw: "900000" })!;
-  assert.equal(whole.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(whole.amountRaw, "4500000");
+  // The mark can be a dust quote, so a sale is planned and admission values it at the independent reference.
+  const sell = planSolanaRebalance({ ...input, mode: "live", strategy: { ...strategy, tradeUsdgRaw: "500000" }, cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "100000000" })!;
+  assert.equal(sell.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(sell.amountRaw, "5000000");
 });
 test("request identity names the settings revision and the attempt, never the clock", () => {
   assert.equal(planSolanaRebalance(input)!.requestId, "rebalance-3-0");
