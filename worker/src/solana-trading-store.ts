@@ -392,6 +392,24 @@ export async function ensureSolanaTradingSchema(db: Db, postgres = false): Promi
   return promise;
 }
 
+/**
+ * Every account with a submitted owner transaction awaiting its outcome, in either slot: the main record, or a
+ * revocation saved beside it (REVOKE BESIDE A PENDING OWNER TRANSACTION), which often outlives the record it was
+ * prepared beside. Receipt recovery (the worker's tick) reads status for each, which rebroadcasts the saved bytes
+ * while they can land and settles both slots, with the page closed. Each account once, main slot first.
+ */
+export async function solanaPendingOwnerScopes(db: Db): Promise<SolanaAccountScope[]> {
+  const rows = [...await db.prepare("SELECT tenant,owner,setup_json FROM solana_runtime_setups").all(),
+    ...await db.prepare("SELECT tenant,owner,setup_json FROM solana_runtime_owner_revokes").all()] as Array<SolanaAccountScope & { setup_json: string }>;
+  const scopes = new Map<string, SolanaAccountScope>();
+  for (const row of rows) {
+    let setup: SolanaPreparedSetup | null = null;
+    try { setup = JSON.parse(row.setup_json) as SolanaPreparedSetup; } catch { continue; }
+    // Saved signed bytes are "pending" until finished (exactly what the worker recovered before the revoke slot).
+    if (setup?.status === "pending") scopes.set(JSON.stringify([row.tenant, row.owner]), { tenant: row.tenant, owner: row.owner });
+  }
+  return [...scopes.values()];
+}
 /** The scope comes from an authenticated wallet binding, never request owner fields. */
 export class SolanaTradingStore implements SolanaLiveJournal {
   constructor(readonly db: Db, readonly scope: SolanaAccountScope, private readonly now: () => number = Date.now,

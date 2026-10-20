@@ -11,7 +11,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { ensureSolanaTradingSchema, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, SolanaTradingStore,
   type SolanaPreparedSetup } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, solanaPendingOwnerScopes } from "./solana-trading-store";
 import type { SolanaLiveSettlement, SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaPaperService } from "./solana-paper-service";
 import { SolanaMarketError } from "./solana-market";
@@ -748,6 +748,22 @@ for (const dialect of ["sqlite", "postgres"] as const) {
         assert.equal((await f.store.session())!.registrationSignature, registration);
       }
     }
+  });
+  test(`${dialect}: receipt recovery finds every account with a pending owner transaction in either slot, a revocation that outlived the record beside it included`, options, async t => {
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [], "the fixture's registration is finished and activated");
+    await saveSignedSetup(f.store, { ...setup("withdraw"), ...prior, mint: SOLANA_USDG_MINT, amountRaw: "1" }, "withdraw-pending");
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    await f.store.saveSetup(revokeBeside("withdraw-pending"));
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope], "an unsigned revocation is nothing to recover, and the account is listed once");
+    await f.store.saveSetup(signedRevoke("withdraw-pending"));
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    // The withdrawal resolves; the revocation beside it is still pending: the account is still recovered.
+    await f.store.finishSetup("withdraw-pending", "failed", 1002, expiry("1", "1"));
+    assert.equal((await f.store.setup())!.status, "failed");
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), [scope]);
+    await f.store.finishSetup("revoke-beside", "finalized", 1003);
+    assert.deepEqual(await solanaPendingOwnerScopes(f.db), []);
   });
   test(`${dialect}: a registration whose landing did not move the session epoch exactly once is never activated, whatever the records say`, options, async t => {
     const f = await fixture(t, dialect);
