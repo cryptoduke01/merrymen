@@ -80,14 +80,21 @@ RUN /bin/sh -n /app/scripts/container-start.sh
 # definition — an app id and a boolean — and nothing secret may ever be added
 # to this list: an ARG is baked into the image layer and readable by anyone who
 # can pull it. Every secret stays a runtime variable (see the CMD below).
+#
+# NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT is a boolean, and off by
+# default: the Solana owner-key backup card (web/src/terminal/SolanaRecovery.tsx)
+# shows only when it is exactly "1". Turn it on only after wallet export is
+# enabled for the Privy app in its dashboard.
 ARG NEXT_PUBLIC_PRIVY_APP_ID=""
 ARG NEXT_PUBLIC_TRENCHER_FACTORY=""
 ARG NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH=""
 ARG NEXT_PUBLIC_MERRYMEN_PRIVY_BETA=""
+ARG NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT=""
 ENV NEXT_PUBLIC_PRIVY_APP_ID=$NEXT_PUBLIC_PRIVY_APP_ID
 ENV NEXT_PUBLIC_TRENCHER_FACTORY=$NEXT_PUBLIC_TRENCHER_FACTORY
 ENV NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH=$NEXT_PUBLIC_TRENCHER_FACTORY_CODE_HASH
 ENV NEXT_PUBLIC_MERRYMEN_PRIVY_BETA=$NEXT_PUBLIC_MERRYMEN_PRIVY_BETA
+ENV NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT=$NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT
 
 # Build the dashboard (the web service serves it; the orchestrator ignores it).
 RUN npm run build
