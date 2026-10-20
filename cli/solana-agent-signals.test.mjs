@@ -426,6 +426,14 @@ test("worker stop: the command's message for the same press does not count twice
   assert.equal(events.writes.length, 1);
   host.emit("message", { type: SOLANA_WORKER_STOP_MESSAGE, force: true, signal: "SIGINT" });
   assert.deepEqual(events.exits, [130]);
+  // The forced exit code is the one the command's own signal would give: 128 + its number.
+  for (const [signal, code] of [["SIGTERM", 143], ["SIGHUP", 129], ["SIGINT", 130], ["SIGKILL", 130], [undefined, 130], [15, 130], ["toString", 130]]) {
+    const forced = stopHarness();
+    forced.host.emit("message", { type: SOLANA_WORKER_STOP_MESSAGE, force: false, signal });
+    forced.later();
+    forced.host.emit("message", { type: SOLANA_WORKER_STOP_MESSAGE, force: true, signal });
+    assert.deepEqual(forced.events.exits, [code], `forced by ${String(signal)}`);
+  }
   // A stop the command alone received (a pid-based kill) is graceful.
   const solo = stopHarness();
   solo.host.emit("message", { type: SOLANA_WORKER_STOP_MESSAGE, force: false, signal: "SIGTERM" });

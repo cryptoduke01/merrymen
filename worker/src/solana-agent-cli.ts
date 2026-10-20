@@ -5,6 +5,17 @@ import { runSolanaAgent } from "./solana-agent";
 import { EX_CONFIG, hostedSolanaRefusals } from "./deploy-guard-checks";
 
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+type StopSignal = (typeof STOP_SIGNALS)[number];
+/**
+ * A forced stop's exit code: 128 plus the number of the signal that forced it,
+ * as if that signal had ended the process, so a supervisor that sent SIGTERM
+ * twice logs 143 whether the worker got the signal itself or the command's
+ * message about it. Anything that is not a stop signal counts as SIGINT (130).
+ */
+function forcedExitCode(signal: unknown): number {
+  const known = (STOP_SIGNALS as readonly unknown[]).includes(signal) ? signal as StopSignal : "SIGINT";
+  return 128 + constants.signals[known];
+}
 /** IPC message from `merrymen solana-agent`: one per stop request (press) the command itself received. */
 export const SOLANA_WORKER_STOP_MESSAGE = "merrymen-solana-worker-stop";
 /** After the parent command is gone, how long the current tick may still run before the worker exits anyway. */
@@ -113,7 +124,7 @@ export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: Sol
       const at = now();
       if (presses > 0 && at - lastPressAt < repeatMs) return;
       presses++; lastPressAt = at;
-      if (presses >= 2) force(128 + (constants.signals[signal] ?? 0));
+      if (presses >= 2) force(forcedExitCode(signal));
       else stop(`${signal} received`);
     });
   }
@@ -128,7 +139,8 @@ export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: Sol
     host.on("message", (message: unknown) => {
       if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== SOLANA_WORKER_STOP_MESSAGE) return;
       if (finished) return exitFinished();
-      if ((message as { force?: unknown }).force === true) force(130);
+      // The command names the signal it received for this press.
+      if ((message as { force?: unknown }).force === true) force(forcedExitCode((message as { signal?: unknown }).signal));
       else stop("stop requested by merrymen solana-agent");
     });
     host.on("disconnect", lostParent);
