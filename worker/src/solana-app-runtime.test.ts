@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction,
   getCompiledTransactionMessageDecoder, getTransactionDecoder, signTransaction } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
+import { SolanaPaperValidationError } from "../../packages/core/src/solana";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaSwapAuthority, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { sealSecret } from "./store-crypto";
@@ -1187,5 +1188,20 @@ test("owner bytes refused before anything is saved are 'not-saved'; trouble with
     await rejectsWith(f.app.activateLive(f.scope, { signature: getBase58Decoder().decode(Buffer.from(signedTransactionBase64, "base64").subarray(1, 65)), sessionSecretKey: f.sessionSeed.toString("base64") }),
       "pending", /does not match the vault state/, "activation");
     assert.equal(f.controls.sends, 1, "nothing is sent again for a finalized-looking receipt");
+  } finally { f.raw.close(); }
+});
+
+test("a permission is prepared only from limits within the account bounds, paper-shaped ones included, before any chain read", async () => {
+  const f = await fixture();
+  try {
+    await f.live();
+    const { perTradeWsol: _perTrade, dailyWsol: _daily, ...paperShaped } = limits;
+    for (const wide of [{ ...paperShaped, maxOpsPerDay: 500 }, { ...limits, maxOpsPerDay: 97 }, { ...paperShaped, expiresAtMs: f.clock.now + 169 * 3_600_000 }]) {
+      f.calls.length = 0;
+      await assert.rejects(f.app.prepareLive(f.scope, { limits: wide, sessionPublicKey: f.session }),
+        (error: unknown) => error instanceof SolanaPaperValidationError && /between 1 and 96|168 hours/.test(error.message), JSON.stringify(wide));
+      assert.deepEqual(f.calls, [], "refused before any RPC read");
+    }
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
   } finally { f.raw.close(); }
 });

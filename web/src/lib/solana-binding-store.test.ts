@@ -74,6 +74,20 @@ test("invalid or expired limits cannot change the saved mode", async (t) => {
   assert.equal((await store.get(TENANT))!.requestedMode, "paper");
   assert.equal((await store.get(TENANT))!.revision, 0);
 });
+test("paper limits without SOL sell caps get the account bounds at save: 96 operations a day and a 168-hour permission", async (t) => {
+  const store = fixture(t);
+  await store.bind(TENANT, "did:privy:alice", OWNER);
+  // Paper books, paper trades and the strategy refuse anything wider, so saving it would only fail later.
+  const hours = (n: number) => NOW + n * 3_600_000;
+  for (const wide of [{ ...limits, maxOpsPerDay: 97 }, { ...limits, maxOpsPerDay: 1000 }, { ...limits, expiresAtMs: hours(169) }, { ...limits, expiresAtMs: hours(24 * 365) }]) {
+    for (const mode of ["paper", "live"] as const) {
+      await assert.rejects(store.settings(TENANT, OWNER, 0, mode, wide), (e: unknown) => e instanceof SolanaBindingError && e.code === "invalid", JSON.stringify(wide));
+    }
+  }
+  assert.equal((await store.get(TENANT))!.revision, 0);
+  const widest = { ...limits, maxOpsPerDay: 96, expiresAtMs: hours(168) };
+  assert.deepEqual((await store.settings(TENANT, OWNER, 0, "paper", widest)).limits, widest);
+});
 
 const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
 test("strategy changes share the consent revision fence and switching mode disables autonomy", async (t) => {

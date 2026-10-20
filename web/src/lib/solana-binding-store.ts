@@ -1,6 +1,6 @@
 /** Chain-scoped wallet bindings. Existing RH tenant identities remain unchanged. */
 import { CHAINS } from "../../../packages/core/src/ids";
-import { parseSolanaRawAmount, solanaPaperAgentId, validateSolanaPaperLimits, type SolanaPaperLimits } from "../../../packages/core/src/solana";
+import { parseSolanaRawAmount, solanaPaperAgentId, validateSolanaAccountLimits, type SolanaPaperLimits } from "../../../packages/core/src/solana";
 import type { Db } from "../../../worker/src/db";
 import { getSolanaRuntimeDb } from "../../../worker/src/solana-runtime-db";
 
@@ -115,7 +115,9 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
     if (!Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER || !["paper", "live"].includes(mode)) throw new SolanaBindingError("invalid");
     const nowMs = this.now();
     let policy: SolanaPaperLimits;
-    try { policy = validateSolanaPaperLimits(limits, nowMs); } catch { throw new SolanaBindingError("invalid"); }
+    // The account bounds (96 operations a day, a 168-hour permission) for paper limits
+    // too: paper books, paper trades and the strategy refuse anything wider later.
+    try { policy = validateSolanaAccountLimits(limits, nowMs); } catch { throw new SolanaBindingError("invalid"); }
     const db = await this.database();
     const saved = await db.prepare(`UPDATE solana_wallet_bindings SET strategy_json = CASE WHEN requested_mode <> ? THEN NULL ELSE strategy_json END,
       requested_mode = ?, limits_json = ?,

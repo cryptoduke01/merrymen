@@ -507,9 +507,10 @@ test("limits beyond the vault's 96 daily operations or a 168-hour permission are
     await assert.rejects(f.store.saveSetup({ ...setup("session"), limits: stored }), /between 1 and 96|168 hours/);
   }
   assert.equal((await f.store.pending()).length, 0);
-  // A paper account without SOL sell caps is bounded too, at book creation and at every trade.
+  // A paper account without SOL sell caps is bounded too: at save, and at book creation and every trade for limits stored before that.
   const g = await fixture(t), paperLimits = { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg, maxOpsPerDay: 1000, maxDrawdownBps: 2000, expiresAtMs: NOW + 3_600_000 };
-  await g.binding.settings(TENANT, OWNER, 1, "paper", paperLimits);
+  await assert.rejects(g.binding.settings(TENANT, OWNER, 1, "paper", paperLimits), /Invalid Solana account settings/);
+  await g.db.prepare("UPDATE solana_wallet_bindings SET requested_mode='paper', limits_json=? WHERE tenant=?").run(JSON.stringify(paperLimits), TENANT);
   await assert.rejects(g.store.createPaper(CASH.toString(), paperLimits), /between 1 and 96/);
 });
 

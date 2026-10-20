@@ -7,7 +7,7 @@ import {
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaPaperLimits, validateSolanaQuote,
+import { parseSolanaRawAmount, parseSolanaSwapIntent, requireSolanaLiveSellLimits, validateSolanaAccountLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
@@ -726,7 +726,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }));
     },
     async prepareLive(scope: SolanaAccountScope, input: { limits: SolanaPaperLimits; sessionPublicKey: string }) {
-      const s = await store(scope), binding = await s.binding(), limits = validateSolanaPaperLimits(input.limits, now()), cfg = config();
+      const s = await store(scope), binding = await s.binding(), limits = validateSolanaAccountLimits(input.limits, now()), cfg = config();
       dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey), session = address(input.sessionPublicKey);
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner);
       if (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(limits)) fail("Save the reviewed live trading limits first.", "permission");

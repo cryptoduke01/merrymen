@@ -78,6 +78,18 @@ test("live mode requires explicit separate consent and registration requires sav
   assert.equal((await post("setup", { stage: "prepare", sessionPublicKey: owner })).status, 200);
   assert.deepEqual(calls.pop(), { method: "prepareLive", args: [scope, { limits: live, sessionPublicKey: owner }] });
 });
+test("settings refuse paper limits beyond the account bounds with a 400 before saving anything", async () => {
+  // Paper limits carry no SOL sell caps, and used to be checked only for shape here.
+  for (const wide of [{ ...limits, maxOpsPerDay: 97 }, { ...limits, expiresAtMs: Date.now() + 169 * 3_600_000 }]) {
+    const response = await post("settings", { mode: "paper", limits: wide, revision: 2 });
+    assert.equal(response.status, 400, JSON.stringify(wide));
+    assert.match((await response.json() as { error: string }).error, /between 1 and 96|168 hours/);
+  }
+  assert.deepEqual(calls, []);
+  const widest = { ...limits, maxOpsPerDay: 96 };
+  assert.equal((await post("settings", { mode: "paper", limits: widest, revision: 2 })).status, 200);
+  assert.deepEqual(calls.pop(), { method: "settings", args: [tenant, owner, 2, "paper", widest] });
+});
 test("strategy endpoint rejects excessive size and persists explicit enablement under the current revision", async () => {
   const strategy = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
   assert.equal((await post("strategy", { strategy: { ...strategy, tradeUsdgRaw: "10000001" }, revision: 2 })).status, 400);
