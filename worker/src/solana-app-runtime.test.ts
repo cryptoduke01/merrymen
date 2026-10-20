@@ -6,13 +6,13 @@ import { createKeyPairFromPrivateKeyBytes, getAddressFromPublicKey, getBase58Dec
   getCompiledTransactionMessageDecoder, getTransactionDecoder, signTransaction } from "@solana/kit";
 import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
-  SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
+  SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaSwapAuthority, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS } from "./solana-app-runtime";
-import { withSolanaReadDeadline } from "./solana-rpc";
+import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
@@ -68,7 +68,9 @@ async function fixture(options: { declared?: string } = {}) {
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
   // Every RPC read, in order: what a status or owner action costs.
   const calls: Array<{ method: string; key: unknown }> = [];
-  const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state(), PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + controls.vaultNativeLamports) : null)
+  // Accounts a test places at other addresses (a swap's temporary input account, say).
+  const extra = new Map<string, unknown>();
+  const accountFor = (k: unknown) => typeof k === "string" && extra.has(k) ? extra.get(k) : k === vault ? (controls.initialized ? account(state(), PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE) + controls.vaultNativeLamports) : null)
     : k === cashAta ? account(tokenAccount(SOLANA_USDG_MINT, controls.cash), TOKEN_2022_PROGRAM, false, rentExempt(170))
     : k === wsolAta ? account(tokenAccount(SOLANA_WRAPPED_SOL_MINT, controls.wsol), SOLANA_CLASSIC_TOKEN_PROGRAM, false, rentExempt(165) + Number(controls.wsol) + controls.unsyncedWsolLamports)
     : k === feePayer ? (controls.feePayerLamports ? account(Buffer.alloc(0), SYSTEM, false, controls.feePayerLamports) : null)
@@ -136,7 +138,7 @@ async function fixture(options: { declared?: string } = {}) {
       sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} ${record.sessionEpoch}\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
   };
   return { raw, db, clock, scope, owner, session, sessionSeed, controls, bindings, app, runtime, sign, live, trade, env, rpc, market, registered, programData, dataAddress, calls, feePayer, vault, cashAta, wsolAta, ownerCashAta, ownerWsolAta,
-    read, providers, sent, state, response };
+    read, providers, sent, state, response, extra, tokenAccount };
 }
 
 test("authenticated paper execution is durable and never calls transaction submission", async () => {
@@ -1032,4 +1034,60 @@ test("a slow priority-fee read leaves the owner transaction without a fee instea
       assert.equal(prepared.priorityFeeLamports, "0");
     } finally { g.raw.close(); }
   } finally { f.raw.close(); }
+});
+
+test("status names the RPC configuration an operator must fix: no independent fallback, or no second provider", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    // The live transport is built from the environment, and it refuses one provider before any request.
+    const unpaired = f.runtime({ rpc: undefined, env: { ...f.env, MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example" } });
+    const missing = await unpaired.status(f.scope);
+    assert.equal(missing.live.ready, false); assert.equal(missing.live.canExit, false);
+    assert.ok(missing.live.blockers.includes(new SolanaRpcError("invalid-fallback").message), missing.live.blockers.join(" | "));
+    assert.doesNotMatch(missing.live.blockers.join(" "), /could not be verified/);
+    // A transport that cannot ask two providers cannot verify the deployment.
+    const { readEach: _readEach, ...single } = f.rpc;
+    const lone = await f.runtime({ rpc: single }).status(f.scope);
+    assert.ok(lone.live.blockers.includes(new SolanaRpcError("no-quorum").message), lone.live.blockers.join(" | "));
+    // Any other provider failure stays generic: its text is never shown.
+    const failing = await f.runtime({ rpc: { ...f.rpc, read: async () => { throw new SolanaRpcError("timeout"); } } }).status(f.scope);
+    assert.match(failing.live.blockers.join(" "), /could not be verified/);
+    assert.ok(!failing.live.blockers.includes(new SolanaRpcError("timeout").message));
+  } finally { f.raw.close(); }
+});
+
+test("status tells the owner to reopen a token account a waiting donation needs, and only then (executor owner-refund)", async () => {
+  const cases = [
+    // [donated mint, owner token accounts, owner account state, blocked, exits open]
+    { mint: SOLANA_USDG_MINT, ownerAtas: false, blocked: true, canExit: true },
+    { mint: SOLANA_WRAPPED_SOL_MINT, ownerAtas: false, blocked: true, canExit: false },
+    { mint: SOLANA_WRAPPED_SOL_MINT, ownerAtas: true, delegate: true, blocked: true, canExit: false },
+    { mint: SOLANA_USDG_MINT, ownerAtas: true, blocked: false, canExit: true },
+    { mint: null, ownerAtas: false, blocked: false, canExit: true },
+  ] as const;
+  for (const item of cases) {
+    const f = await fixture();
+    try {
+      await readyLive(f); f.controls.sequence = 4n; f.controls.ownerAtas = item.ownerAtas;
+      if (item.mint) {
+        const program = item.mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM;
+        const authority = await deriveSolanaSwapAuthority(PROGRAM, f.vault, 4n);
+        f.extra.set(await deriveSolanaAta(authority, item.mint, program), account(f.tokenAccount(item.mint, 7n, authority), program));
+        // A temporary account at an earlier sequence is stranded, never a blocker.
+        const stale = await deriveSolanaSwapAuthority(PROGRAM, f.vault, 3n);
+        f.extra.set(await deriveSolanaAta(stale, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), account(f.tokenAccount(SOLANA_USDG_MINT, 9n, stale), TOKEN_2022_PROGRAM));
+      }
+      if ("delegate" in item) {
+        const data = f.tokenAccount(SOLANA_WRAPPED_SOL_MINT, 0n, f.owner); data.writeUInt32LE(1, 72);
+        f.extra.set(f.ownerWsolAta, account(data, SOLANA_CLASSIC_TOKEN_PROGRAM));
+      }
+      const status = await f.app.status(f.scope), text = status.live.blockers.join(" | ");
+      const label = JSON.stringify(item);
+      assert.equal(/next swap account/.test(text), item.blocked, `${label}: ${text}`);
+      assert.equal(status.live.ready, !item.blocked, label); assert.equal(status.live.canExit, item.canExit, label);
+      if (item.blocked) assert.match(text, new RegExp(`Reopen your ${item.mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL"} token account`), label);
+      assert.notEqual(status.live.balances, null, "the vault is still shown");
+    } finally { f.raw.close(); }
+  }
 });

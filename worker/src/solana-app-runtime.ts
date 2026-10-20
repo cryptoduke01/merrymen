@@ -16,7 +16,7 @@ import {
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
-import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
+import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
@@ -24,6 +24,7 @@ import { createSolanaMarket } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
 import { readSolanaReferencePrice, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps,
   SolanaReferencePriceError } from "./solana-reference-price";
+import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, type SolanaAccountScope,
@@ -54,6 +55,24 @@ function publicTrade(record: SolanaLiveRecord) {
   const { intent, signature, preparedAtMs, minOutAmount, quotedOutAmount } = record.submission;
   return { mode: "live" as const, requestId: intent.requestId, intent, signature, status: record.status,
     preparedAtMs, minOutAmount, quotedOutAmount, settlement: record.settlement ?? null };
+}
+/**
+ * A failed live status read as the owner sees it. This module's own refusals,
+ * and the two RPC problems only an operator can fix (no independent fallback
+ * provider, or a transport without two providers), are shown by their fixed
+ * text; SolanaRpcError never carries provider content. Anything else is generic.
+ */
+function statusBlocker(error: unknown): string {
+  if (error instanceof SolanaAppRuntimeError) return error.message;
+  if (error instanceof SolanaRpcError && (error.code === "invalid-fallback" || error.code === "no-quorum")) return error.message;
+  return "The configured vault, balances or live permissions could not be verified.";
+}
+/** What the owner is told when a donation waits for an owner token account that is closed or unsafe. */
+function refundBlocker(mint: string): string {
+  const token = mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+  const stopped = mint === SOLANA_USDG_MINT ? "Buying is paused until then; exits remain available." : "Selling and automated exits are refused until then.";
+  return `Someone sent ${token} to your vault's next swap account. The vault returns it to your own ${token} token account, which is closed or not safe to use `
+    + `(it has a delegate or close authority, or is frozen). Reopen your ${token} token account in your wallet, or withdraw a little ${token} here, which opens it. ${stopped}`;
 }
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
@@ -602,8 +621,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (currentBook && shortOfBook(currentBook, balances)) blockers.push("Vault balances are below recorded trades; reconcile capital transfers before trading.");
           if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
           if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
+          // A donation in the next swap's temporary input account goes back to the
+          // owner's own token account for that mint during the swap; while that
+          // account is closed or unsafe the executor refuses every swap from that
+          // mint (owner-refund). USDG is the buy side, WSOL the sell and exit side.
+          for (const mint of await readSolanaOwnerRefundBlocks(rpc(), programId, vault, scope.owner, live.state.seq, live.slot)) {
+            if (mint === SOLANA_USDG_MINT) buysOnly(refundBlocker(mint)); else blockers.push(refundBlocker(mint));
+          }
         }
-      } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
+      } catch (error) { blockers.push(statusBlocker(error)); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");

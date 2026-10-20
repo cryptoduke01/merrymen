@@ -132,6 +132,42 @@ function pendingDonation(raw: Account, mint: string, authority: string, program:
   if (raw.owner === "11111111111111111111111111111111" && !raw.executable && raw.data.length === 0) return 0n;
   return tokenBalance(raw, mint, authority, program);
 }
+/**
+ * Tokens anyone sent to a swap's temporary input account (`temp`, a raw
+ * getMultipleAccounts entry, null when absent), and whether the owner's own
+ * token account for that mint (`ownerToken`) can take them back. The vault
+ * returns such a donation to that account during the swap, so while it is
+ * closed or unsafe (a delegate, a close authority, frozen, another owner or
+ * mint) every swap from that mint at this sequence is refused: owner-refund.
+ * A temporary account that is neither empty nor this mint's token account of
+ * the swap authority is invalid-state.
+ */
+export function solanaPendingRefund(temp: unknown, ownerToken: unknown, mint: string, swapAuthority: string, owner: string, program: string): { donation: bigint; ownerAccountUsable: boolean } {
+  const donation = temp === null ? 0n : pendingDonation(account(temp), mint, swapAuthority, program);
+  let ownerAccountUsable = true;
+  try { tokenBalance(account(ownerToken), mint, owner, program); } catch { ownerAccountUsable = false; }
+  return { donation, ownerAccountUsable };
+}
+/**
+ * The input mints (USDG for buys, WSOL for sells and exits) whose next swap, at
+ * vault sequence `seq`, the executor would refuse with owner-refund. Read at or
+ * after `minContextSlot`.
+ */
+export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId: string, vault: string, owner: string, seq: bigint, minContextSlot = 1): Promise<string[]> {
+  const swapAuthority = await deriveSolanaSwapAuthority(programId, vault, seq);
+  const mints = [[SOLANA_USDG_MINT, TOKEN_2022_PROGRAM], [SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM]] as const;
+  const keys: string[] = [];
+  for (const [mint, program] of mints) keys.push(await deriveSolanaAta(swapAuthority, mint, program), await deriveSolanaAta(owner, mint, program));
+  return rpc.read(async read => {
+    const result = context(await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
+    if (!Array.isArray(result.value) || result.value.length !== keys.length) return fail();
+    const accounts = result.value as unknown[];
+    return mints.filter(([mint, program], index) => {
+      const refund = solanaPendingRefund(accounts[2 * index], accounts[2 * index + 1], mint, swapAuthority, owner, program);
+      return refund.donation > 0n && !refund.ownerAccountUsable;
+    }).map(([mint]) => mint);
+  });
+}
 function paperIntent(intent: SolanaLiveIntent) {
   return parseSolanaSwapIntent({ kind: intent.kind, chain: intent.chain, mode: "paper", requestId: intent.requestId,
     inputMint: intent.inputMint, outputMint: intent.outputMint, amountRaw: intent.amountRaw, slippageBps: intent.slippageBps });
@@ -460,12 +496,9 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const waiting = context(await rpc("getMultipleAccounts", [[tempInput, ownerRefund],
           { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
         if (!Array.isArray(waiting.value) || waiting.value.length !== 2) return fail();
-        const donation = waiting.value[0] === null ? 0n : pendingDonation(account(waiting.value[0]), intent.inputMint, swapAuthority, inputProgram);
-        let refundAccount: string | null = null;
-        if (donation > 0n) {
-          try { tokenBalance(account(waiting.value[1]), intent.inputMint, intent.owner, inputProgram); } catch { return fail("owner-refund"); }
-          refundAccount = ownerRefund;
-        }
+        const refund = solanaPendingRefund(waiting.value[0], waiting.value[1], intent.inputMint, swapAuthority, intent.owner, inputProgram);
+        if (refund.donation > 0n && !refund.ownerAccountUsable) return fail("owner-refund");
+        const refundAccount: string | null = refund.donation > 0n ? ownerRefund : null;
         const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "confirmed" }])));
         return { slot: result.slot, state, inputBalance, outputBalance, payerBalance: payer.lamports, rent, swapAuthority, tempInput, refundAccount };
       });
