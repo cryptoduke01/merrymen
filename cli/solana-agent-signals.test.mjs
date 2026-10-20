@@ -193,7 +193,8 @@ test("a second Ctrl+C forces a wedged worker to stop", { skip: !posix, timeout: 
   agent.wedge();
   await delay(300);
   process.kill(agent.cli.pid, "SIGINT");
-  await delay(1_000);
+  // A deliberate second press, outside the window that merges duplicates.
+  await delay(SOLANA_WORKER_REPEAT_MS + 500);
   assert.equal(alive(worker), true, "the first press only asks for a graceful stop");
   const started = Date.now();
   process.kill(agent.cli.pid, "SIGINT");
@@ -210,7 +211,7 @@ test("the first Ctrl+C says the stop waits for the tick and how to force it", { 
   process.kill(-agent.cli.pid, "SIGINT");
   const [code] = await agent.exited;
   assert.equal(code, 0, agent.output());
-  const notices = agent.output().match(/stopping after the current tick\. Press Ctrl\+C again to force\./g) ?? [];
+  const notices = agent.output().match(/stopping after the current tick\. Press Ctrl\+C again to force \(presses within 1\.5 s count as this one\)\./g) ?? [];
   assert.equal(notices.length, 1, `one press, one notice, although it reached the worker twice:\n${agent.output()}`);
 });
 
@@ -334,7 +335,25 @@ test("worker stop: the same press delivered twice (terminal and launcher) does n
   later(1);
   host.emit("SIGINT");
   assert.deepEqual(events.exits, [130], "a deliberate second press still forces");
-  assert.ok(SOLANA_WORKER_REPEAT_MS >= 200 && SOLANA_WORKER_REPEAT_MS <= 1_000, "short enough for a deliberate second press");
+  assert.ok(SOLANA_WORKER_REPEAT_MS >= 1_000 && SOLANA_WORKER_REPEAT_MS <= 2_000, "short enough for a deliberate second press");
+});
+
+test("worker stop: a launcher's copy that a loaded machine delivers a second late is still the same press", () => {
+  for (const lateMs of [600, 1_000, 1_400]) {
+    const { host, events, later } = stopHarness();
+    host.emit("SIGINT");
+    later(lateMs);
+    host.emit("SIGINT");
+    assert.deepEqual([events.aborts, events.exits], [1, []], `a copy ${lateMs} ms late must not force a stop mid-tick`);
+    assert.match(events.writes.join(""), /Press Ctrl\+C again to force \(presses within 1\.5 s count as this one\)\./);
+  }
+});
+
+test("the solana-agent command merges duplicate signals over the same window as its worker", () => {
+  // cli/bin.mjs cannot import the TypeScript constant; it keeps its own copy.
+  const source = readFileSync(BIN, "utf8");
+  const windows = [...source.matchAll(/const REPEAT_MS = ([0-9_]+);/g)].map((match) => Number(match[1].replaceAll("_", "")));
+  assert.deepEqual(windows, [SOLANA_WORKER_REPEAT_MS]);
 });
 
 test("worker stop: after the run finished, a stop exits at once with the run's own code, never 130", () => {

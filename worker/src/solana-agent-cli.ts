@@ -12,10 +12,13 @@ export const SOLANA_WORKER_PARENT_GRACE_MS = 60_000;
 /**
  * Signals closer together than this are one press delivered twice. A terminal
  * sends Ctrl+C to the whole process group, and a launcher in that group (npm
- * run, npx, a shell wrapper) may forward its own copy within milliseconds: that
- * copy must not force a stop mid-tick. A deliberate second press comes later.
+ * run, npx, a shell wrapper) forwards its own copy, within milliseconds when
+ * the machine is idle but much later under heavy load: that copy must not force
+ * a stop mid-tick. A deliberate second press comes later. Erring long only
+ * means a forcing press must wait a moment; erring short forces a stop nobody
+ * asked for. `merrymen solana-agent` (cli/bin.mjs REPEAT_MS) uses the same window.
  */
-export const SOLANA_WORKER_REPEAT_MS = 500;
+export const SOLANA_WORKER_REPEAT_MS = 1_500;
 /**
  * Set by `merrymen solana-agent` to its own pid for the worker it spawns with
  * an IPC channel. A worker that has this, but whose parent is no longer that
@@ -93,7 +96,7 @@ export interface SolanaWorkerStopOptions {
 export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: SolanaWorkerStopOptions): { parentLost(): boolean; finished(): void } {
   const now = options.now ?? Date.now, repeatMs = options.repeatMs ?? SOLANA_WORKER_REPEAT_MS;
   let presses = 0, lastPressAt = 0, stopping = false, finished = false, parentLost = false;
-  const stop = (why: string, hint = " Press Ctrl+C again to force.") => {
+  const stop = (why: string, hint = ` Press Ctrl+C again to force (presses within ${repeatMs / 1000} s count as this one).`) => {
     if (stopping) return;
     stopping = true;
     options.write(`[solana-worker] ${why}: stopping after the current tick.${hint}\n`);
@@ -147,7 +150,7 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
     process.stdout.write("merrymen solana-agent\nRuns explicitly enabled Solana rebalancing strategies in each account's selected paper or live mode. Configure the authenticated app, private RPC/Jupiter settings and shared storage first. Live mode additionally requires a verified immutable vault deployment and an owner-approved session.\n"
-      + "Stopping: Ctrl+C (or SIGTERM/SIGHUP) stops after the current tick; press it again to force a stop, which the trading store recovers from like a crash. "
+      + `Stopping: Ctrl+C (or SIGTERM/SIGHUP) stops after the current tick; press it again more than ${SOLANA_WORKER_REPEAT_MS / 1000} s later to force a stop, which the trading store recovers from like a crash. `
       + "If the merrymen command that started the worker is killed, the worker stops after its tick and exits within 60 s.\n");
     return;
   }

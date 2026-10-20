@@ -1680,9 +1680,10 @@ switch (cmd) {
     // child.kill there would terminate the child abruptly instead.
     if (process.platform !== "win32") {
       // Signals closer together than this are one press delivered twice: the
-      // terminal's copy and a launcher's (npx, npm run) forwarded copy.
-      // Matches SOLANA_WORKER_REPEAT_MS in worker/src/solana-agent-cli.ts.
-      const REPEAT_MS = 500;
+      // terminal's copy and a launcher's (npx, npm run) forwarded copy, which
+      // can arrive late under heavy load. Matches SOLANA_WORKER_REPEAT_MS in
+      // worker/src/solana-agent-cli.ts (cli/solana-agent-signals.test.mjs checks).
+      const REPEAT_MS = 1_500;
       let presses = 0, lastPressAt = 0;
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
         process.on(signal, () => {
