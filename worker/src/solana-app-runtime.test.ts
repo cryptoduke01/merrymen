@@ -636,6 +636,26 @@ test("one asset above its book and the other below: a withdrawal prepare books n
   } finally { f.raw.close(); }
 });
 
+test("a withdrawal prepare never fails on the inflow read: one raw token above the book while a provider is down still prepares what the book covers", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true; await f.registered(); await cashBook(f);
+    // Anyone sent the vault one raw USDG; the fallback cannot answer the finalized balance read.
+    f.controls.cash = 90_000_001n;
+    f.providers.fallback = async (method, params = []) => { if (method === "getMultipleAccounts") throw new SolanaRpcError("network"); return f.read(method, params); };
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    assert.ok(prepared.transactionBase64);
+    const store = new SolanaTradingStore(f.db, f.scope);
+    assert.equal((await store.liveBook())!.cashRaw, "90000000", "the unagreed excess is not booked");
+    // Never more than the book while the excess is unbooked.
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000001" }), /exceeds the reconciled vault balance/);
+    // Once both providers answer, the inflow is booked and can be withdrawn too.
+    f.providers.fallback = null;
+    await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "90000001" });
+    assert.equal((await store.liveBook())!.cashRaw, "90000001");
+  } finally { f.raw.close(); }
+});
+
 test("an inflow is booked only when both providers agree on the finalized balances: one provider's phantom deposit never raises the book", async () => {
   const f = await fixture();
   try {

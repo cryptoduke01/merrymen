@@ -1124,9 +1124,14 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
           // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner:
           // only when nothing is short (as status books it), and only what both providers agree on.
+          // Best effort, as in status: anyone can send the vault one raw token, so a provider that is
+          // down or behind, or an inflow that cannot be booked now, never fails the withdrawal. The book
+          // stays as it was and the cap below (the lower of book and vault) still bounds the amount.
           if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) {
-            const agreed = await finalizedBalancesQuorum(vault, book.slot);
-            if (agreed && !shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
+            try {
+              const agreed = await finalizedBalancesQuorum(vault, book.slot);
+              if (agreed && !shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
+            } catch { /* Booked by a later read. */ }
           }
           book = (await s.liveBook())!;
           // Never more than the book records, nor than the vault holds: a vault below its book
