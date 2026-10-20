@@ -194,9 +194,24 @@ test("a Privy DID remap on the tenant: the new identity re-binds by proving the 
   assert.equal((await request("bind", "POST", { token: "token-bob", tenant: W, body: { owner: OWNER, nonce: original.nonce,
     signature: base58Encode(ed25519.sign(new TextEncoder().encode(original.message), OWNER_SEED)) } })).status, 401);
   assert.equal((await store.get(W))!.did, "did:privy:alice");
-  // Bob proves the SAME owner key with a fresh challenge naming him: the binding is re-bound.
+  // The ordinary binding message ("grants no trading or withdrawal authority") never moves a binding, even signed by the
+  // bound key over a fresh re-bind nonce naming Bob: only the re-bind message does.
+  const ordinary = await request("bind", "GET", { token: "token-bob", tenant: W, query: `?owner=${OWNER}` });
+  const offered = await ordinary.json() as { nonce: string; message: string; rebind?: boolean };
+  assert.equal(offered.rebind, true); assert.doesNotMatch(offered.message, /grants no trading/);
+  // The module instance the routes use (loaded under the Privy stand-in in before()).
+  const { solanaBindingMessage } = createRequire(import.meta.url)(join(WEB, "lib/solana-auth.ts")) as typeof import("./solana-auth");
+  const binding = solanaBindingMessage({ tenant: W, did: "did:privy:bob" }, OWNER, ORIGIN, offered.nonce);
+  assert.match(binding, /grants no trading or withdrawal authority/);
+  assert.equal((await request("bind", "POST", { token: "token-bob", tenant: W, body: { owner: OWNER, nonce: offered.nonce,
+    signature: base58Encode(ed25519.sign(new TextEncoder().encode(binding), OWNER_SEED)) } })).status, 401);
+  assert.equal((await store.get(W))!.did, "did:privy:alice"); assert.deepEqual(await store.rebinds(W), []);
+  // Bob proves the SAME owner key over a fresh re-bind challenge naming both identities and what moves: the binding is re-bound.
   const proof = await bind("token-bob", W, OWNER, OWNER_SEED);
-  assert.match(proof.message, /Identity: did:privy:bob/); assert.match(proof.message, new RegExp(`Tenant: ${W}`));
+  assert.match(proof.message, /^Merrymen Solana wallet re-bind v1\n/);
+  assert.match(proof.message, /Move this Solana account's controls to my current Merrymen sign-in\./);
+  assert.match(proof.message, /live mode and trading limits, the trading permission registered on Solana, the autonomous strategy \(turned off until I turn it on again\), and owner actions such as revoking and withdrawing/);
+  assert.match(proof.message, /\nPrevious identity: did:privy:alice\n/); assert.match(proof.message, /\nIdentity: did:privy:bob\n/); assert.match(proof.message, new RegExp(`Tenant: ${W}`));
   assert.equal(proof.response.status, 200);
   const rebound = (await proof.response.json() as { binding: { did: string; owner: string; strategy: { enabled: boolean } } }).binding;
   assert.equal(rebound.did, "did:privy:bob"); assert.equal(rebound.owner, OWNER); assert.equal(rebound.strategy.enabled, false, "automation waits for the new identity");

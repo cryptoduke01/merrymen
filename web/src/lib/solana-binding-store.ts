@@ -69,9 +69,13 @@ CREATE TABLE IF NOT EXISTS solana_wallet_binding_rebinds (
  * The Solana owner key is the authority here, not the sign-in. A principal
  * whose verified DID now maps to the tenant (authenticateSolana: cookie and
  * DID agree) may re-bind the tenant's EXISTING binding to its DID by signing a
- * fresh binding challenge with the SAME owner key: the signed message names
- * the tenant, the new DID, the owner and the origin, its nonce is single-use,
- * and the bind route verifies and consumes it before calling rebind. Holding
+ * fresh RE-BIND challenge with the SAME owner key (bind/rebind-proof.ts): the
+ * signed message says it moves the account's controls (mode, limits, the
+ * registered permission, the strategy, owner actions) to the new sign-in, and
+ * names the tenant, the previous and the new DID, the owner and the origin; its
+ * nonce is single-use, and the bind route verifies and consumes it before
+ * calling rebind. The ordinary binding message, which says it grants no
+ * authority, is never accepted for a re-bind. Holding
  * that key already means holding the vault (every owner transaction needs its
  * signature and pays only to its own accounts), so a re-bind grants nothing
  * the key does not already have, and without the key a remapped DID stays
