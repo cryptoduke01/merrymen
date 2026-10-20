@@ -26,7 +26,7 @@ import {
   isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust,
   solanaRecoveryRevokeInstructions, solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
-import type { SolanaLiveRpc } from "./solana-live-rpc";
+import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 
@@ -832,6 +832,26 @@ describe("solana-recover program trust", () => {
       send: async () => "x" } as unknown as SolanaLiveRpc);
     assert.equal(narrow.readEach, undefined);
     assert.equal((narrow as unknown as Record<string, unknown>).singleEndpoint, true);
+  });
+
+  it("a run verifies the program through that view of the owner's own transport, flags and all", async () => {
+    // On its own this branch reads no transport flag during verification, so the
+    // owner transport counts each time the run's view copies its singleEndpoint.
+    const fake = await chain();
+    const base = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: RPC }, fetch: fake.fetch, timeoutMs: 15_000, singleEndpoint: true,
+      sleep: async (ms) => fake.tick(ms) });
+    const copiedAt: number[] = [];
+    const owner = {
+      get singleEndpoint() { copiedAt.push(fake.calls.length); return true; },
+      providerKey: base.providerKey, read: base.read, readEach: base.readEach, send: base.send,
+    } as unknown as SolanaLiveRpc;
+    const out: string[] = [];
+    const result = await runSolanaRecovery({ rpc: owner, programId: PROGRAM, owner: OWNER, send: false, releases: RELEASED },
+      { log: (line) => out.push(line), sleep: async () => {} });
+    assert.equal(result.sent, false);
+    assert.match(out.join("\n"), /Program binary verified: the released Merrymen vault program/);
+    assert.deepEqual(copiedAt, [0], "the view was built from the owner's transport, flag included, before any RPC call");
+    assert.ok(fake.calls.includes("getAccountInfo"), "and the program was read through it");
   });
 
   it("pins releases in packages/core: the tool's default list is the shared one, frozen and well formed", () => {
