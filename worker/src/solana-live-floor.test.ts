@@ -176,7 +176,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   const runtime = (more: Record<string, string> = {}) => createSolanaAppRuntime({ db, rpc, market, env: { ...env, ...more }, now: () => clock.now }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
-  const agent = () => createSolanaAgent({ db, runtime: app, market, now: () => clock.now });
+  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
   return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, db };
 }
 const manual = (inputMint: string, amountRaw: string, requestId: string) => ({ kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId, inputMint,
@@ -338,6 +338,30 @@ test("a WSOL withdrawal still prepares while the Pyth generation setting names n
   await valued.runtime().prepareOwnerAction(valued.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "100000000" });
   assert.deepEqual(valued.pythReads, [CURRENT.account]);
   assert.equal((await new SolanaTradingStore(valued.db, valued.scope).setup())!.withdrawValuation?.reference.referenceOut, "15000000");
+});
+
+test("status names a misconfigured reference setting as a blocker of every trade, and an agent held by it still says the [alert]", async t => {
+  processGeneration(t, undefined);
+  const SOURCE = "The independent SOL price source (Pyth generation) is misconfigured.", TOLERANCE = "The independent SOL price tolerance is misconfigured.";
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 } });
+  const good = await f.app.status(f.scope);
+  assert.deepEqual([good.live.ready, good.live.blockers], [true, []]);
+  for (const [more, blocker] of [[{ MERRYMEN_SOLANA_PYTH_GENERATION: "both" }, SOURCE], [{ MERRYMEN_SOLANA_PYTH_GENERATION: "Upgraded" }, SOURCE],
+    [{ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "49" }, TOLERANCE], [{ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "3e2" }, TOLERANCE]] as const) {
+    await clearReferenceAlerts();
+    let status: Awaited<ReturnType<typeof f.app.status>> | undefined;
+    const said = await referenceAlerts(t, async () => { status = await f.runtime(more).status(f.scope); });
+    // Not ready, and no exit either: trade() would refuse a sell as configuration too.
+    assert.deepEqual([status!.live.ready, status!.live.canExit, status!.live.blockers], [false, false, [blocker]], JSON.stringify(more));
+    assert.deepEqual(said, blocker === SOURCE ? [CONFIG_ALERT] : [], JSON.stringify(more));
+  }
+  // The agent holds instead of trying, and the operator still hears about the generation, once.
+  await clearReferenceAlerts();
+  let outcomes: string[] = [];
+  const said = await referenceAlerts(t, async () => { outcomes = (await f.agent(f.runtime({ MERRYMEN_SOLANA_PYTH_GENERATION: "both" })).tick()).map(r => r.outcome); });
+  assert.deepEqual(outcomes, ["held"]);
+  assert.deepEqual(said, [CONFIG_ALERT]);
+  assert.deepEqual(f.pythReads, []); assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
 });
 
 test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {

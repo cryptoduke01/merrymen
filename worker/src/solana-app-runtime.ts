@@ -565,6 +565,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       } catch (error) { blockers.push(error instanceof SolanaAppRuntimeError ? error.message : "The configured vault, balances or live permissions could not be verified."); }
       if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
+      // trade() refuses every live trade, exits too, while either reference setting is invalid. The generation
+      // check also says the [alert], so an agent held by this blocker still pages the operator.
+      try { solanaReferenceToleranceBps(env); } catch { blockers.push("The independent SOL price tolerance is misconfigured."); }
+      try { requireSolanaPythGeneration(env, now()); } catch { blockers.push("The independent SOL price source (Pyth generation) is misconfigured."); }
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
       else if (binding.requestedMode === "live" && (binding.limits.perTradeWsol === undefined || binding.limits.dailyWsol === undefined)) blockers.push("Save per-trade and daily SOL sell limits for live trading.");
