@@ -16,15 +16,16 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
-import { createSolanaLiveMarket } from "./solana-live-market";
+import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
   type SolanaPythGeneration } from "./solana-reference-price";
 import { pythAccount, pythReference } from "./solana-reference-price-fixture";
+import { SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
-import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStore } from "./solana-trading-store";
 import { sealSecret } from "./store-crypto";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -53,7 +54,7 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
-async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
+async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust" | "zero" | "down"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
   env?: Record<string, string>; priorityFees?: number[] }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
@@ -155,6 +156,10 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   // Two agreeing providers, as the live transport always has: deployment checks and bookings need both.
   const rpc: SolanaLiveRpc = { read: fn => fn(read), readEach: async fn => [await fn(read), await fn(read)], send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
+    // "zero": no route buys SOL back (Jupiter's zero-output answer); "down": the SOL quote fails otherwise.
+    if (opts.mark === "zero" && i.inputMint === SOLANA_WRAPPED_SOL_MINT) throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: i.inputMint,
+      outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: "0", minOutAmount: "0", slippageBps: i.slippageBps, contextSlot: SLOT, quotedAtMs: clock.now });
+    if (opts.mark === "down" && i.inputMint === SOLANA_WRAPPED_SOL_MINT) throw new SolanaMarketError("invalid-quote");
     const out = opts.mark === "dust" ? 1n : fairOut(i.inputMint, BigInt(i.amountRaw));
     return { source: "jupiter" as const, inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),
       minOutAmount: ((out * BigInt(10_000 - i.slippageBps) / 10_000n) || 1n).toString(), slippageBps: i.slippageBps, contextSlot: SLOT,
@@ -180,7 +185,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: NOW - 5000 }));
   if (opts.strategy) { const b = (await bindings.get(TENANT))!; await bindings.strategy(TENANT, owner, b.revision, opts.strategy as never); }
   // `runtime(more, via)`: an app runtime on the same database, chain and clock whose env adds `more`, reading through `via` (default: the chain itself).
-  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc) => createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now }), app = runtime();
+  // `log` receives the runtime's operator lines (default: stderr).
+  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc, log?: (line: string) => void) =>
+    createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}) }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
@@ -266,6 +273,55 @@ test("D: a manual buy built at 1% of fair is refused", async t => {
   const f = await fixture(t, { cash: 100_000_000n, wsol: 0n, mark: "fair", build: { kind: "factor", num: 1n, den: 100n } });
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "manual-buy-1") }), /refused: risk/);
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("D2: SOL dust that no route buys back is valued at zero, and a manual buy still goes through", async t => {
+  // 1,000 lamports of SOL: Jupiter's zero-output answer, worth 0.00015 USDG at $150.
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "zero", build: { kind: "fair" } });
+  const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-dust") });
+  assert.ok("status" in placed && placed.status === "pending");
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.risk.equityUsdg, "100000000", "the dust adds nothing to equity");
+  assert.equal(f.sends.length, 1);
+});
+
+test("D3: a SOL mark that fails any other way still refuses a buy; so does a zero-output mark for SOL worth a cent or more, which never trips the breaker", async t => {
+  const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" } });
+  await assert.rejects(down.app.trade(down.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-mark-down") }), /valid quote/);
+  assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
+  // 1 SOL bought at $150 beside 100 USDG, and Jupiter answers zero output for it. Valued at zero, equity would be
+  // 40% below the high-water mark and the persisted breaker would pause buys until the owner signs a resume.
+  // Pyth says it is worth 150 USDG: the answer is unusable, and this buy alone is refused.
+  const book = async (f: Awaited<ReturnType<typeof fixture>>) => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  for (const [wsol, label] of [[1_000_000_000n, "1 SOL"], [66_667n, "66,667 lamports: 1 cent"]] as const) {
+    const big = await fixture(t, { cash: 100_000_000n, wsol, mark: "zero", build: { kind: "fair" } });
+    await assert.rejects(big.app.trade(big.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-zero-mark") }),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "invalid-quote", label);
+    assert.deepEqual(await big.submissions(), [], label); assert.equal(big.sends.length, 0, label);
+    assert.equal((await book(big)).buyPaused, undefined, `${label}: the breaker stays as it was`);
+  }
+  // Just under a cent (66,666 lamports, 9,999 micro-USDG) is dust: valued at zero, and the buy goes through.
+  const dust = await fixture(t, { cash: 100_000_000n, wsol: 66_666n, mark: "zero", build: { kind: "fair" } });
+  const placed = await dust.app.trade(dust.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-cent") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await dust.submissions())[0]!.submission.risk.equityUsdg, "100000000");
+});
+
+test("D4: the agent plans around SOL dust that no route buys back instead of stopping at it; any other mark failure still stops the tick", async t => {
+  const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "zero", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["submitted"]);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(row!.submission.intent.amountRaw, "25000000");
+  assert.equal(f.sends.length, 1);
+  const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await down.agent().tick()).map(r => r.outcome), ["unavailable"]);
+  assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
+  // A zero-output answer for 1 SOL, worth 150 USDG at Pyth, is not dust: the tick stops before any route is built.
+  const big = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await big.agent().tick()).map(r => r.outcome), ["unavailable"]);
+  assert.deepEqual(await big.submissions(), []); assert.equal(big.sends.length, 0);
+  assert.ok(!big.net.urls.some(url => url.startsWith("https://api.jup.ag/")), "no route was asked for");
+  assert.ok(big.pythReads.length > 0, "the dust check read Pyth");
 });
 
 /** The reference-price [alert] lines this process said while `run` ran. */
@@ -410,6 +466,64 @@ test("status names a misconfigured reference setting as a blocker of every trade
   assert.deepEqual(outcomes, ["held"]);
   assert.deepEqual(said, [CONFIG_ALERT]);
   assert.deepEqual(f.pythReads, []); assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
+test("status blocks trades and exits on a Jupiter key every live route refuses, as on a missing one, and a set but unusable key says the [alert]", async t => {
+  const JUPITER = "Configure Jupiter quote access.";
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const good = await f.app.status(f.scope);
+  assert.deepEqual([good.live.ready, good.live.canExit, good.live.blockers], [true, true, []]);
+  for (const [apiKey, alerted] of [["bad key", true], ["   ", true], ["x".repeat(1025), true], ["caf\u00e9", true], ["", false]] as const) {
+    const lines: string[] = [], app = f.runtime({ MERRYMEN_JUPITER_API_KEY: apiKey }, f.rpc, line => lines.push(line));
+    const status = await app.status(f.scope);
+    // Not ready, and no exit either: the live route builder refuses a sell's route as configuration too.
+    assert.deepEqual([status.live.ready, status.live.canExit, status.live.blockers], [false, false, [JUPITER]], JSON.stringify(apiKey));
+    const alerts = lines.filter(line => line.startsWith("[alert] solana-jupiter-key misconfigured"));
+    assert.equal(alerts.length, alerted ? 1 : 0, JSON.stringify(apiKey));
+    // Once a minute while it persists; the value itself is never logged.
+    await app.status(f.scope); assert.equal(lines.filter(line => line.startsWith("[alert] solana-jupiter-key")).length, alerted ? 1 : 0);
+    if (apiKey === "bad key") {
+      assert.ok(lines.every(line => !line.includes(apiKey)));
+      f.clock.now += 60_000; await app.status(f.scope); f.clock.now -= 60_000;
+      assert.equal(lines.filter(line => line.startsWith("[alert] solana-jupiter-key")).length, 2);
+      // The trade the blocker stands for: refused as configuration before anything is signed or sent.
+      await assert.rejects(app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "bad-key-exit") }),
+        (error: unknown) => error instanceof SolanaLiveMarketError && error.code === "configuration");
+      assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+    }
+  }
+});
+
+test("status blocks trades and exits once the day's operations are used, by expired attempts beyond the allowance or by trades, as admission refuses them", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  // The fixture's limits allow 20 operations a day. Rows inside the last 24 hours, and one just outside it.
+  const row = async (requestId: string, status: string, createdAtMs: number) => f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(TENANT, f.scope.owner, requestId, f.vault, "0", `sig-${requestId}`, status, createdAtMs, "0", JSON.stringify({ intent: { requestId }, signature: `sig-${requestId}` }));
+  await row("old-expired", "expired", NOW - 86_400_000);
+  for (let i = 0; i < 19; i++) await row(`dropped-${i}`, "expired", NOW - 1000 - i);
+  const view = async (more: Record<string, string> = {}) => { const s = await f.runtime(more).status(f.scope); return [s.live.ready, s.live.canExit, s.live.blockers]; };
+  assert.deepEqual(await view(), [true, true, []], "19 of 20 counted: one operation left");
+  await row("dropped-19", "expired", NOW - 1);
+  assert.deepEqual(await view(), [false, false, [SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED]], "20 of 20 counted");
+  // The blocker says what admission does: the exit is refused with the same words, before anything is sent.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-exhausted") }),
+    (error: unknown) => error instanceof Error && error.message === SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
+  assert.equal(f.sends.length, 0);
+  // An allowance of 1 leaves one operation.
+  assert.deepEqual(await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "1" }), [true, true, []]);
+  // An unreadable allowance is its own configuration blocker, not this one.
+  assert.deepEqual((await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "97" }))[2], [SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED]);
+  // Trades that landed or failed use operations whatever the allowance.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id LIKE 'dropped-%'").run();
+  assert.deepEqual(await view({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" }), [false, false, [SOLANA_STATUS_DAILY_OPERATIONS_USED]]);
+  await assert.rejects(f.runtime({ MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" }).trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-used") }),
+    /rolling daily limit/);
+  assert.equal(f.sends.length, 0);
+  // As they leave the window, neither blocker stays (the fixture's on-chain permission has expired by then).
+  f.clock.now = NOW - 2 + 86_400_000;
+  await f.db.prepare("UPDATE solana_wallet_bindings SET limits_json=?").run(JSON.stringify({ ...limits, expiresAtMs: f.clock.now + 3_600_000 }));
+  const later = (await view())[2] as string[];
+  assert.ok(!later.includes(SOLANA_STATUS_DAILY_OPERATIONS_USED) && !later.includes(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED), JSON.stringify(later));
 });
 
 test("with MERRYMEN_SOLANA_PYTH_GENERATION=upgraded, live trades are read, checked by the executor and admitted by the store on the upgraded account alone", async t => {

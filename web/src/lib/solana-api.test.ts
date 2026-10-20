@@ -10,6 +10,7 @@ import { LIMITS_NO_LONGER_VALID, SolanaAppRuntimeError } from "../../../worker/s
 import { SolanaMarketError } from "../../../worker/src/solana-market";
 import { SolanaRpcError } from "../../../worker/src/solana-rpc";
 import { SolanaTradingStoreError } from "../../../worker/src/solana-trading-store";
+import { SolanaPaperStoreError } from "../../../worker/src/solana-paper-store";
 import { OWNER_OUTCOME_UNKNOWN, solanaRequestBody, solanaResponse } from "./solana-api";
 import { SolanaWebError } from "./solana-auth";
 
@@ -153,22 +154,28 @@ test("failures to use Solana's answer about a saved owner transaction are an unk
   assert.equal(signature.status, 400);
 });
 
-test("a live route that cannot be built is not 'no supported route': setup is unavailable, anything else is a neutral retry", async () => {
+test("a live route that cannot be built is answered by the builder's code: setup is unavailable, a provider fault is a neutral retry, and only a route shape is 'no supported route'", async () => {
   const key = process.env.MERRYMEN_JUPITER_API_KEY;
   try {
-    // The builder raises the same codeless error for a missing or invalid key and for a bad answer.
-    for (const value of [undefined, "", "   ", "bad key", "x".repeat(1025)]) {
+    // The code decides, not this process's settings: each answer is the same whatever the key here says.
+    for (const value of [undefined, "", "bad key", "configured-key"]) {
       if (value === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = value;
-      const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
-      assert.equal(response.status, 503, JSON.stringify(value));
-      assert.deepEqual(await response.json(), { error: "Solana trading is not available.", ownerFacing: true }, JSON.stringify(value));
+      const setup = await solanaResponse(async () => { throw new SolanaLiveMarketError("configuration"); });
+      assert.equal(setup.status, 503, JSON.stringify(value));
+      assert.deepEqual(await setup.json(), { error: "Solana trading is not available.", ownerFacing: true }, JSON.stringify(value));
+      const provider = await solanaResponse(async () => { throw new SolanaLiveMarketError("provider"); });
+      const neutral = await provider.json() as { error: string };
+      assert.equal(provider.status, 503, JSON.stringify(value));
+      assert.equal(neutral.error, "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.");
+      assert.doesNotMatch(neutral.error, /no supported route|another amount/i); ownerSafe(neutral.error);
+      const route = await solanaResponse(async () => { throw new SolanaLiveMarketError("route"); });
+      assert.equal(route.status, 409, JSON.stringify(value));
+      assert.deepEqual(await route.json(), { error: "No supported route is available for this trade right now. Nothing was sent. Preview again or try another amount.", ownerFacing: true });
     }
-    process.env.MERRYMEN_JUPITER_API_KEY = "configured-key";
-    const response = await solanaResponse(async () => { throw new SolanaLiveMarketError(); });
-    const body = await response.json() as { error: string };
-    assert.equal(response.status, 503);
-    assert.equal(body.error, "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.");
-    assert.doesNotMatch(body.error, /no supported route|another amount/i); ownerSafe(body.error);
+    // A code this layer does not know is never 'no supported route'.
+    const unknown = await solanaResponse(async () => { throw new SolanaLiveMarketError("something-new" as SolanaLiveMarketError["code"]); });
+    assert.equal(unknown.status, 503);
+    assert.doesNotMatch((await unknown.json()).error, /no supported route|not available/i);
   } finally { if (key === undefined) delete process.env.MERRYMEN_JUPITER_API_KEY; else process.env.MERRYMEN_JUPITER_API_KEY = key; }
 });
 
@@ -225,4 +232,50 @@ test("a paced intent answers 429 in its own words, never as an outage", async ()
   const response = await solanaResponse(async () => { throw new SolanaWebError(429, "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds."); });
   assert.equal(response.status, 429);
   assert.deepEqual(await response.json(), { error: "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 6 seconds.", ownerFacing: true });
+});
+
+test("paper write-off refusals are 409s in fixed owner words; other book rules keep the store's 400", async () => {
+  // The write-off contract: not_dust, no_position, invalid_quote and stale_safety answer 409 with fixed text.
+  const fixed: Array<[SolanaPaperStoreError["code"], RegExp]> = [
+    ["not_dust", /^A route still buys this position back, so it cannot be written off\. Sell it instead\. Nothing was changed\.$/],
+    ["no_position", /^Your paper portfolio holds no position in that token\. Nothing was changed\.$/],
+    ["invalid_quote", /could not be used\. Nothing was recorded\./], ["stale_safety", /too old .* Nothing was recorded\./],
+    ["remainder_unquoted", /remainder that no route buys back\. Sell the whole position, or less of it\./],
+    ["book_missing", /^Create your paper portfolio first\.$/], ["version_conflict", /changed while this request was prepared\. Refresh and try again\./],
+  ];
+  for (const [code, text] of fixed) {
+    const response = await solanaResponse(async () => { throw new SolanaPaperStoreError(code); });
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 409, code);
+    assert.match(String(body.error), text, code);
+    assert.notEqual(body.error, new SolanaPaperStoreError(code).message, `${code}: the owner's words, not the store's`);
+    assert.deepEqual(Object.keys(body).sort(), ["error", "ownerFacing"], code);
+    ownerSafe(String(body.error));
+  }
+  for (const code of ["invalid_input", "per_trade_limit", "daily_limit", "drawdown_limit", "insufficient_balance", "position_limit"] as const) {
+    const response = await solanaResponse(async () => { throw new SolanaPaperStoreError(code); });
+    assert.equal(response.status, 400, code);
+    assert.equal((await response.json()).error, new SolanaPaperStoreError(code).message, code);
+  }
+  // An owner not in paper mode: the runtime's early refusal (before the paid quote) and the store's own
+  // refusal under the lock answer alike, 409 with the same text.
+  const mode = "Paper trading is not the selected Solana mode.";
+  for (const error of [new SolanaAppRuntimeError("permission", mode), new SolanaTradingStoreError(mode)]) {
+    const response = await solanaResponse(async () => { throw error; });
+    assert.equal(response.status, 409, error.name); assert.deepEqual(await response.json(), { error: mode, ownerFacing: true }, error.name);
+  }
+  // A ledger without a write-off is this deployment's shape: unavailable, never an outage or a refusal.
+  const missing = await solanaResponse(async () => { throw new SolanaPaperServiceError("This Solana paper ledger has no owner write-off."); });
+  assert.equal(missing.status, 503); assert.equal((await missing.json()).error, "Solana trading is not available.");
+});
+
+test("prepare-side 'pending' refusals stay 409 refusals: neither notSaved nor an unknown outcome", async () => {
+  const runtime = readFileSync(fileURLToPath(new URL("../../../worker/src/solana-app-runtime.ts", import.meta.url)), "utf8");
+  for (const message of ["Refresh the pending owner transaction before preparing another.", "The permission is awaiting final confirmation."]) {
+    assert.ok(runtime.includes(JSON.stringify(message)), `still raised: ${message}`);
+    const response = await solanaResponse(async () => { throw new SolanaAppRuntimeError("pending", message); });
+    assert.equal(response.status, 409, message);
+    assert.deepEqual(await response.json(), { error: message, ownerFacing: true }, message);
+  }
+  assert.ok(runtime.includes(`fail("Refresh the pending owner transaction before preparing another.", "pending")`));
 });

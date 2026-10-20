@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { join } from "node:path";
 import { after, before, beforeEach, describe, it, mock } from "node:test";
@@ -21,6 +21,14 @@ import { solanaEnabled } from "./solana-enabled";
 const WEB = fileURLToPath(new URL("../", import.meta.url));
 const API = join(WEB, "app/api/solana");
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+/** Every route.ts under app/api/solana, nested ones included, by its path below it ("paper", "paper/write-off"). */
+function solanaRoutes(dir: string, prefix = ""): string[] {
+  return readdirSync(join(dir, prefix), { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => {
+    const route = prefix ? `${prefix}/${entry.name}` : entry.name;
+    return [...(existsSync(join(dir, route, "route.ts")) ? [route] : []), ...solanaRoutes(dir, route)];
+  });
+}
+
 const flag = process.env.MERRYMEN_SOLANA;
 const set = (value: string | undefined) => { if (value === undefined) delete process.env.MERRYMEN_SOLANA; else process.env.MERRYMEN_SOLANA = value; };
 
@@ -44,7 +52,7 @@ before(() => {
   });
   try {
     const load = createRequire(import.meta.url);
-    for (const route of readdirSync(API)) {
+    for (const route of solanaRoutes(API)) {
       const mod = load(join(API, route, "route.ts")) as Record<string, unknown>;
       for (const method of METHODS) if (typeof mod[method] === "function") handlers.push({ route, method, handle: mod[method] as (req: Request) => Promise<Response> });
     }
@@ -73,7 +81,7 @@ describe("the Solana switch", () => {
 
   it("finds every route, including the ones that sign in directly", () => {
     const routes = new Set(handlers.map((h) => h.route));
-    for (const route of ["bind", "intent", "owner", "paper", "settings", "setup", "status", "strategy"]) assert.ok(routes.has(route), route);
+    for (const route of ["bind", "intent", "owner", "paper", "paper/write-off", "settings", "setup", "status", "strategy"]) assert.ok(routes.has(route), route);
     assert.ok(handlers.some((h) => h.route === "bind" && h.method === "GET"));
   });
 

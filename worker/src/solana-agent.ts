@@ -1,15 +1,17 @@
 /** Deterministic, opt-in USDG/SOL rebalancer. Both modes use the same admission boundary. */
+import { createHash } from "node:crypto";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
-import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits } from "../../packages/core/src/solana";
+import { parseSolanaRawAmount, parseSolanaSwapIntent, validateSolanaAccountLimits, validateSolanaQuote, type SolanaPaperLimits, type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
 import { getSolanaAppRuntime } from "./solana-app-runtime";
 import type { Db } from "./db";
-import { createSolanaMarket } from "./solana-market";
+import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
-import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule,
+import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED,
+  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, SolanaTradingStoreError,
   type SolanaAccountScope } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
@@ -60,11 +62,26 @@ export async function boundSolanaRebalanceSell(
   }
   return null;
 }
-type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade">;
+/** solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust. */
+type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust">>;
 export interface SolanaAgentOptions {
   db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
   referenceToleranceBps?: number;
+  /** The runtime's MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE, for the expired-attempt alerts only. Default SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE. */
+  expiredAttemptAllowance?: number;
+  /** Operator log lines ([alert] and [warn]). Default: stderr. Never carries keys, signed bytes or tenant identities. */
+  log?: (line: string) => void;
+}
+/** While an expired-attempt condition persists for an account, its line is repeated at most this often. */
+export const SOLANA_AGENT_ALERT_REPEAT_MS = 10 * 60_000;
+/**
+ * A stable, opaque name for one account in operator logs: no tenant identity or
+ * owner key, but the same account always reads the same, and an operator who
+ * knows the account can compute it.
+ */
+export function solanaAccountRef(scope: SolanaAccountScope): string {
+  return createHash("sha256").update(`merrymen-solana-account/v1 ${scope.tenant} ${scope.owner}`).digest("hex").slice(0, 16);
 }
 /** The heartbeat is written at least this often during a tick; the UI shows the worker offline after 90 s. */
 const HEARTBEAT_REFRESH_MS = 30_000;
@@ -76,8 +93,62 @@ const HEARTBEAT_REFRESH_MS = 30_000;
 export type SolanaAgentOutcome = "held" | "waiting" | "submitted" | "replayed" | "unavailable";
 export function createSolanaAgent(options: SolanaAgentOptions) {
   const now = options.now ?? Date.now;
+  const log = options.log ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  const allowance = options.expiredAttemptAllowance ?? SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
+  /**
+   * EXPIRED ATTEMPTS, SAID TO THE OPERATOR (owner decision G2-3: with the
+   * default allowance of 0 every proven-expired attempt counts toward the
+   * owner's maxOpsPerDay, so a burst of dropped packets can pause automated
+   * trading, exits included, for up to 24 hours; the store has no logger).
+   * - [alert] when expired attempts used up the account's daily operations: the
+   *   agent holds the strategy before trying (dailyOperationsUsed), or admission
+   *   refused it for that reason;
+   * - [warn] when the expired attempts that count use more than half of them.
+   * Each at most once per SOLANA_AGENT_ALERT_REPEAT_MS per account while it
+   * persists, and at once again after it clears. Logging never changes an outcome.
+   */
+  const said = new Map<string, number>();
+  const say = (key: string, line: string) => {
+    const at = now(), last = said.get(key);
+    if (last !== undefined && at >= last && at - last < SOLANA_AGENT_ALERT_REPEAT_MS) return;
+    said.set(key, at);
+    try { log(line); } catch { /* Logging never changes an outcome. */ }
+  };
+  type ExpiredUse = Awaited<ReturnType<typeof solanaExpiredAttemptUse>>;
+  const report = (scope: SolanaAccountScope, use: ExpiredUse, maxOpsPerDay: number, refused: boolean) => {
+    const account = solanaAccountRef(scope);
+    const fields = JSON.stringify({ solana: refused ? "alert" : "warn", kind: refused ? "expired-attempts-exhausted" : "expired-attempts-high", account,
+      expired: use.expired, counted: use.counted, allowance, operations: use.operations, maxOpsPerDay });
+    const remedy = "MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE (a whole number from 0 to 96, default 0) sets how many a day do not count";
+    if (refused) return say(`exhausted:${account}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations, so its automated trades and exits pause until they leave the 24 h window: ${fields} — ${remedy}`);
+    said.delete(`exhausted:${account}`);
+    if (use.counted * 2 > maxOpsPerDay) say(`high:${account}`, `[warn] Solana proven-expired attempts use more than half of an account's daily operations; at the limit its automated trades and exits pause: ${fields} — ${remedy}`);
+    else said.delete(`high:${account}`);
+  };
+  const expiredUse = async (scope: SolanaAccountScope, maxOpsPerDay: number, refused: boolean) => {
+    try { report(scope, await solanaExpiredAttemptUse(options.db, scope, now(), allowance), maxOpsPerDay, refused); } catch {
+      if (refused) say(`exhausted:${solanaAccountRef(scope)}`, `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations: ${
+        JSON.stringify({ solana: "alert", kind: "expired-attempts-exhausted", account: solanaAccountRef(scope), allowance, maxOpsPerDay })}`);
+    }
+  };
+  /**
+   * Whether admission would refuse every live trade of this account, exits
+   * included, for its daily operations, by the store's rolling 24-hour
+   * arithmetic: trades (landed, failed or pending) reached maxOpsPerDay, or
+   * with the proven-expired attempts beyond the allowance they did (said as the
+   * [alert]). Checked before the status read, so such an account costs no RPC
+   * read, quote, route or signature each tick while it waits for the window.
+   * Only provider load rides on it: admission still enforces the limit itself.
+   */
+  const dailyOperationsUsed = async (scope: SolanaAccountScope, maxOpsPerDay: number): Promise<boolean> => {
+    const use = await solanaExpiredAttemptUse(options.db, scope, now(), allowance);
+    if (use.operations + use.counted < maxOpsPerDay) return false;
+    if (use.operations < maxOpsPerDay) report(scope, use, maxOpsPerDay, true);
+    return true;
+  };
   const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
-  // When each tenant's strategy last found nothing to do (in band), by settings revision.
+  // When each tenant's strategy last found nothing to do (in band), or admission refused it
+  // because expired attempts used up its daily operations, by settings revision.
   // Only provider load rides on this: admission spacing is durable in the store.
   const checked = new Map<string, { revision: number; atMs: number }>();
   const admitted = async (scope: SolanaAccountScope, requestId: string) => !!(
@@ -127,6 +198,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           const last = checked.get(row.tenant);
           if (at < schedule.dueAtMs || (last && last.revision === revision && at - last.atMs < intervalMs)) { results.push({ owner: row.owner, outcome: "waiting" }); continue; }
           const inBand = () => { checked.set(row.tenant, { revision, atMs: at }); results.push({ owner: row.owner, outcome: "held" }); };
+          if (row.requested_mode === "live" && await dailyOperationsUsed(scope, limits.maxOpsPerDay)) { results.push({ owner: row.owner, outcome: "held" }); continue; }
           // A paper strategy needs only its paper book: no chain reads, no vault verification.
           const status = recovered.get(scope.tenant) ?? await options.runtime.status(scope, row.requested_mode === "paper" ? { liveReads: false } : undefined);
           let cashRaw: string, wsolRaw: string;
@@ -142,7 +214,17 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (BigInt(wsolRaw) > 0n) {
             const markIntent = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "rebalance-mark",
               inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: wsolRaw, slippageBps: 50 });
-            const mark = await options.market.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount;
+            let mark: SolanaQuote | null = null;
+            try { mark = await options.market.quote(markIntent); }
+            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; }
+            if (mark) { validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount; }
+            // SOL no route buys back (Jupiter's zero-output answer) is dust: nothing to sell and worth
+            // zero, as the runtime and the paper book value it at a buy. Planned as no position, so
+            // it never stops the strategy. Live, only once Pyth shows it is worth under a cent
+            // (the runtime's solMarkDust, the bound its buy check applies): a zero-output answer for
+            // more is unusable, and like any other failure makes the tick unavailable, with no route built.
+            else if (row.requested_mode === "paper" || await options.runtime.solMarkDust?.(wsolRaw)) wsolRaw = "0";
+            else throw new SolanaMarketError("invalid-quote");
           }
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
@@ -152,7 +234,15 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (options.signal?.aborted) break;
           // Already admitted under this ID (another worker got there first): a replay submits nothing.
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
-          await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal });
+          try { await options.runtime.trade(scope, { mode: row.requested_mode, intent, autonomousRevision: Number(row.revision), signal: options.signal }); }
+          catch (error) {
+            // Held by the owner's daily operations, which expired attempts used up (counted by admission after the
+            // check above): said as an [alert], and not tried again until the interval passes, as when in band.
+            if (row.requested_mode !== "live" || !(error instanceof SolanaTradingStoreError) || error.message !== SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) throw error;
+            await expiredUse(scope, limits.maxOpsPerDay, true);
+            inBand(); continue;
+          }
+          if (row.requested_mode === "live") await expiredUse(scope, limits.maxOpsPerDay, false);
           results.push({ owner: row.owner, outcome: "submitted" });
         } catch { results.push({ owner: row.owner, outcome: "unavailable" }); }
       }
@@ -172,7 +262,11 @@ export async function runSolanaAgent(signal: AbortSignal) {
   // refuse it in the runtime, so only size with the widest headroom here.
   let referenceToleranceBps = SOLANA_REFERENCE_MAX_TOLERANCE_BPS;
   try { referenceToleranceBps = solanaReferenceToleranceBps(process.env); } catch { /* Refused at trade time. */ }
-  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal, referenceToleranceBps });
+  // Only for the expired-attempt alerts; a malformed setting refuses every live trade in the runtime anyway.
+  let expiredAttemptAllowance = SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
+  try { expiredAttemptAllowance = solanaExpiredAttemptAllowance(process.env); } catch { /* Refused at trade time. */ }
+  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal,
+    referenceToleranceBps, expiredAttemptAllowance });
   while (!signal.aborted) {
     try {
       const results = await agent.tick();

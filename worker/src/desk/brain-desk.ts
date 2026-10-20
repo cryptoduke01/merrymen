@@ -23,7 +23,16 @@ export interface BrainDeskConfig {
 
 const MAX_BYTES = 64 * 1024;
 const STANCES: ReadonlySet<string> = new Set(["constructive", "neutral", "cautious", "avoid"]);
-const FORBIDDEN = /0x[0-9a-fA-F]{16,}|https?:\/\/|www\.|t\.me\//i;
+/**
+ * What Brain's DeskAnalysis validator refuses in any field
+ * (services/brain/brain/schemas.py): a 0x hex blob, a link in any form a chat
+ * renders clickable (`http` anywhere, `www.`, `t.me/`) and a cashtag (`$`
+ * before a letter; `$` before a digit is a price). Checked again here, with
+ * Brain's 40-character floor on the read, so a read an older or a different
+ * Brain build lets through is refused in the same place.
+ */
+const FORBIDDEN = /0x[0-9a-fA-F]{16,}|http|www\.|t\.me\/|\$[A-Za-z]/i;
+const READ_MIN_CHARS = 40;
 
 async function readBounded(res: Response, max: number): Promise<string> {
   const reader = res.body?.getReader();
@@ -60,7 +69,7 @@ export function parseDeskAnalysis(raw: unknown): TgDeskThought | null {
   const read = text(a.read, 900);
   const watch = text(a.watch ?? "", 260);
   const invalidation = text(a.invalidation ?? "", 260);
-  if (!read || read.length < 20 || watch === null || invalidation === null) return null;
+  if (!read || read.length < READ_MIN_CHARS || watch === null || invalidation === null) return null;
   if (typeof a.stance !== "string" || !STANCES.has(a.stance)) return null;
   const confidence = typeof a.confidence === "number" && Number.isFinite(a.confidence) ? Math.min(1, Math.max(0, a.confidence)) : undefined;
   return { read, stance: a.stance as TgDeskStance, watch, invalidation, ...(confidence !== undefined ? { confidence } : {}) };

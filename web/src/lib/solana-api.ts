@@ -48,7 +48,7 @@ const NOT_AVAILABLE = "Solana trading is not available.";
  */
 function setupError(error: unknown): boolean {
   if (error instanceof SolanaMarketError) return error.code === "missing-jupiter-key" || error.code === "invalid-jupiter-key";
-  if (error instanceof SolanaLiveMarketError) return liveMarketKeyUnusable();
+  if (error instanceof SolanaLiveMarketError) return error.code === "configuration";
   if (error instanceof SolanaRpcError) return ["missing-config", "invalid-config", "invalid-fallback", "invalid-timeout"].includes(error.code);
   // The deployed program does not match the audited binary hash this deployment pins.
   if (error instanceof SolanaExecutionError) return error.code === "unsafe-program";
@@ -99,19 +99,18 @@ const EXECUTION_REFUSALS: Partial<Record<SolanaExecutionError["code"], readonly 
   "owner-refund": [409, "Tokens someone sent to your vault are waiting to be returned to your own token account for this asset, which is closed or not safe to use. Nothing was sent. Your Solana status says what to fix in that account; then try again."],
 };
 /**
- * The live route builder (solana-live-market) raises one codeless error for
- * everything: a missing or invalid Jupiter key (this deployment's setup), an
- * unusable Jupiter answer, a quote outside the RPC's slot window, or a route
- * shape the vault does not take. The key is checked here as the builder checks
- * it, so setup answers as unavailable (setupError); everything else gets a
- * neutral answer that neither claims there is no route nor asks for another
- * amount. The route is built before anything is signed, so nothing was sent.
+ * The live route builder (solana-live-market) says why it built no route, by
+ * code. The route is built before anything is signed, so nothing was sent.
+ * - configuration (a missing or unusable Jupiter key): this deployment's setup,
+ *   answered as unavailable (setupError).
+ * - route (a route shape the vault does not take): a 409 the owner can act on,
+ *   by previewing again or trying another amount.
+ * - provider (an unusable answer, a quote outside the RPC's slot window) and
+ *   any code this file does not know: a neutral 503 that neither claims there
+ *   is no route nor asks for another amount.
  */
-function liveMarketKeyUnusable(): boolean {
-  const apiKey = process.env.MERRYMEN_JUPITER_API_KEY?.trim();
-  return !apiKey || apiKey.length > 1024 || /[^\x21-\x7e]/.test(apiKey);
-}
 const NO_LIVE_ROUTE = "A route for this trade could not be prepared right now. Nothing was sent. Preview again shortly.";
+const NO_SUPPORTED_ROUTE = "No supported route is available for this trade right now. Nothing was sent. Preview again or try another amount.";
 /** SolanaMarketError zero-output: no route returns anything for this amount (dust). */
 const TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
 /**
@@ -185,7 +184,33 @@ const OUTCOME_UNKNOWN = "Solana's answer about your owner transaction could not 
 const PAPER_SETUP = new Set([
   "Solana paper trading is local-only until hosted tenant binding is implemented.",
   "The USDG mint does not match the configured cash asset.",
+  "This Solana paper ledger has no owner write-off.",
 ]);
+/**
+ * PAPER BOOK RULES THE OWNER CAN ACT ON, BY CODE: 409 WITH FIXED TEXT.
+ *
+ * All seven codes below are answered 409 with the text beside them, from any
+ * paper route, whichever the request:
+ * - not_dust (a route still buys the lot), no_position, invalid_quote and
+ *   stale_safety (the zero-output answer is unusable or too old): the write-off
+ *   route's (POST /api/solana/paper/write-off) refusals, also raised by a paper
+ *   trade's commit when a quote or safety read went stale under the lock;
+ * - remainder_unquoted (a paper sale would leave a remainder no route buys
+ *   back), book_missing (no paper book yet) and version_conflict (the book
+ *   changed while the request was prepared): raised by paper trade commits,
+ *   the write-off and the book's other updates. These used to answer 400 with
+ *   the store's message; they are the book's state, not a malformed request.
+ * Every other book code keeps 400 with the store's own fixed message.
+ */
+const PAPER_BOOK_REFUSALS: Partial<Record<SolanaPaperStoreError["code"], string>> = {
+  not_dust: "A route still buys this position back, so it cannot be written off. Sell it instead. Nothing was changed.",
+  no_position: "Your paper portfolio holds no position in that token. Nothing was changed.",
+  invalid_quote: "The market's answer for this request could not be used. Nothing was recorded. Try again shortly.",
+  stale_safety: "The market data for this request was too old by the time it could be recorded. Nothing was recorded. Try again.",
+  remainder_unquoted: "This sale would leave a remainder that no route buys back. Sell the whole position, or less of it. Nothing was recorded.",
+  book_missing: "Create your paper portfolio first.",
+  version_conflict: "Your paper portfolio changed while this request was prepared. Refresh and try again. Nothing was recorded.",
+};
 
 /**
  * Every /api/solana route answers through this. With Solana off for this
@@ -201,6 +226,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     if (setupError(error)) message = NOT_AVAILABLE;
     else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
+    else if (error instanceof SolanaPaperStoreError && Object.hasOwn(PAPER_BOOK_REFUSALS, error.code)) { status = 409; message = PAPER_BOOK_REFUSALS[error.code]!; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
     // Before the unknown-outcome check: nothing was saved, whatever the message says.
     else if (error instanceof SolanaAppRuntimeError && error.code === "not-saved") { status = NOT_SAVED_MALFORMED.has(error.message) ? 400 : 409; message = error.message; notSaved = true; }
@@ -209,6 +235,7 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     else if (error instanceof SolanaAppRuntimeError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaTradingStoreError) { status = 409; message = error.message; }
     else if (error instanceof SolanaExecutionError && Object.hasOwn(EXECUTION_REFUSALS, error.code)) [status, message] = EXECUTION_REFUSALS[error.code]!;
+    else if (error instanceof SolanaLiveMarketError && error.code === "route") { status = 409; message = NO_SUPPORTED_ROUTE; }
     else if (error instanceof SolanaLiveMarketError) message = NO_LIVE_ROUTE;
     else if (error instanceof SolanaSettlementError) { status = 409; message = SETTLEMENT_MISMATCH; }
     else if (error instanceof SolanaPaperServiceError && PAPER_REFUSALS.has(error.message)) [status, message] = PAPER_REFUSALS.get(error.message)!;

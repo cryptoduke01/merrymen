@@ -61,6 +61,20 @@ export class SolanaMarketError extends Error {
   }
 }
 
+/**
+ * MERRYMEN_JUPITER_API_KEY as every Jupiter request sends it, and as status
+ * checks it: trimmed, then 1 to 1024 printable ASCII characters with no spaces.
+ * Missing, or anything else, refuses (the live route builder answers either as
+ * its 'configuration' code). One rule, so status never shows live trading ready
+ * with a key every quote and route would refuse.
+ */
+export function solanaJupiterApiKey(env: Readonly<Record<string, string | undefined>>): string {
+  const apiKey = env.MERRYMEN_JUPITER_API_KEY?.trim();
+  if (!apiKey) throw new SolanaMarketError("missing-jupiter-key");
+  if (apiKey.length > 1024 || /[^\x21-\x7e]/.test(apiKey)) throw new SolanaMarketError("invalid-jupiter-key");
+  return apiKey;
+}
+
 type JsonObject = Record<string, unknown>;
 function object(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -300,9 +314,7 @@ export function createSolanaMarket(options: MarketOptions = {}): SolanaMarket {
     },
     async quote(rawIntent) {
       const intent = parseSolanaSwapIntent(rawIntent);
-      const apiKey = source.MERRYMEN_JUPITER_API_KEY?.trim();
-      if (!apiKey) throw new SolanaMarketError("missing-jupiter-key");
-      if (apiKey.length > 1024 || /[^\x21-\x7e]/.test(apiKey)) throw new SolanaMarketError("invalid-jupiter-key");
+      const apiKey = solanaJupiterApiKey(source);
       const url = new URL(JUPITER_QUOTE_URL);
       url.search = new URLSearchParams({ inputMint: intent.inputMint, outputMint: intent.outputMint,
         amount: intent.amountRaw, slippageBps: String(intent.slippageBps), swapMode: "ExactIn",

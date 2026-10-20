@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,13 @@ import { wrapSqlite } from "../../../worker/src/db";
 
 const WEB = fileURLToPath(new URL("../", import.meta.url));
 const API = join(WEB, "app/api/solana");
+/** Every route.ts under app/api/solana, nested ones included, by its path below it ("paper", "paper/write-off"). */
+function solanaRoutes(dir: string, prefix = ""): string[] {
+  return readdirSync(join(dir, prefix), { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => {
+    const route = prefix ? `${prefix}/${entry.name}` : entry.name;
+    return [...(existsSync(join(dir, route, "route.ts")) ? [route] : []), ...solanaRoutes(dir, route)];
+  });
+}
 const W = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
 const OWNER_SEED = new Uint8Array(32).fill(7), OWNER = base58Encode(ed25519.getPublicKey(OWNER_SEED));
 const SECOND_SEED = new Uint8Array(32).fill(8), SECOND = base58Encode(ed25519.getPublicKey(SECOND_SEED));
@@ -79,7 +86,7 @@ before(() => {
   });
   try {
     ({ mintSession } = load(join(WEB, "lib/auth.ts")) as { mintSession: typeof mintSession });
-    for (const route of readdirSync(API)) {
+    for (const route of solanaRoutes(API)) {
       const mod = load(join(API, route, "route.ts")) as Record<string, unknown>;
       routes[route] = Object.fromEntries(["GET", "POST"].filter((method) => typeof mod[method] === "function").map((method) => [method, mod[method] as (req: Request) => Promise<Response>]));
     }
@@ -118,6 +125,7 @@ const CALLS: Array<[string, string, unknown?, string?]> = [
   ["settings", "POST", { mode: "paper", limits, revision: 1 }],
   ["intent", "POST", { mode: "paper", action: "preview", intent: {} }],
   ["paper", "POST", { initialCashRaw: "1000000" }],
+  ["paper/write-off", "POST", { mint: SECOND }],
   ["setup", "POST", { stage: "prepare", sessionPublicKey: SECOND }],
   ["owner", "POST", { stage: "prepare", action: "revoke" }],
   ["strategy", "POST", { strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 }, revision: 1 }],

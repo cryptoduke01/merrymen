@@ -9,7 +9,7 @@ import { deriveSolanaVaultAddress, deriveSolanaSwapAuthority, deriveSolanaAta, S
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { createSolanaExecutor, reconcileSolanaSubmission, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveRecord, type SolanaSignedSubmission, type SolanaExecutorOptions } from "./solana-executor";
 import { settleSolanaReceipt, solanaVaultEvents } from "./solana-settlement";
-import { JUPITER_SWAP_PROGRAM, type JupiterCpiRoute } from "./solana-live-market";
+import { JUPITER_SWAP_PROGRAM, SolanaLiveMarketError, type JupiterCpiRoute } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc, SolanaSendOptions } from "./solana-live-rpc";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
@@ -394,6 +394,15 @@ test("refuses unsafe authority, mutation, simulation, fees, stale safety and ris
     (f: Awaited<ReturnType<typeof fixture>>) => { f.options.programBinarySha256 = "0".repeat(64); },
     (f: Awaited<ReturnType<typeof fixture>>) => { f.options.feePayerKeyPair = f.options.sessionKeyPair; }]) {
     const f = await fixture(); change(f); await assert.rejects(createSolanaExecutor(f.options).execute(f.intent));
+    assert.ok(!f.calls.includes("persist")); assert.ok(!f.calls.includes("send"));
+  }
+});
+
+test("a build quote that went stale before signing is the provider's 'preview again shortly', never the owner's 400 with validator text", async () => {
+  // The risk check (RPC, the SOL mark, Pyth) took long enough for the 30 s quote to expire.
+  for (const delay of [30_000, 45_000]) {
+    const f = await fixture(); f.controls.riskDelay = delay;
+    await assert.rejects(createSolanaExecutor(f.options).execute(f.intent), (error: unknown) => error instanceof SolanaLiveMarketError && error.code === "provider", String(delay));
     assert.ok(!f.calls.includes("persist")); assert.ok(!f.calls.includes("send"));
   }
 });

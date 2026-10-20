@@ -23,6 +23,7 @@ import { wrapSqlite, type Db } from "../db";
 import { resetIdentityStoreForTest } from "../identity-store";
 import { applyLedgerSchema } from "../store";
 import {
+  addressy,
   cachedIdentities,
   CALLS_PER_AGENT,
   callsSql,
@@ -384,6 +385,11 @@ describe("roomName", () => {
     // A Solana mint is an address too (Solana P0).
     assert.equal(roomName(SOLANA_USDG_MINT, SLUG1), generated);
     assert.equal(roomName(SOLANA_USDG_MINT, null), DEFAULT_AGENT_NAME);
+  });
+
+  it("addressy reads a Solana key glued to a word as an id, as thesis-policy.ts's backstop does", () => {
+    for (const s of [`CA${SOLANA_USDG_MINT}`, `${SOLANA_USDG_MINT}is`, `buy CA${SOLANA_USDG_MINT} now`, SOLANA_USDG_MINT, "0xdeadbeefcafe", "rh:12345"]) assert.equal(addressy(s), true, s);
+    for (const s of ["Pine Stoat", "Robin", "CASHCAT", "x".repeat(60)]) assert.equal(addressy(s), false, s);
   });
 
   it("never falls back to an address when there is no slug to seed on", () => {

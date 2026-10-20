@@ -16,6 +16,7 @@ import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeE
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
+import { SolanaMarketError } from "./solana-market";
 import { ensureSolanaTradingSchema, SolanaTradingStore } from "./solana-trading-store";
 import { PYTH_SOL_USD_ACCOUNT } from "./solana-reference-price";
 import { pythAccount } from "./solana-reference-price-fixture";
@@ -155,6 +156,57 @@ test("authenticated paper execution is durable and never calls transaction submi
   } finally { f.raw.close(); }
 });
 
+test("a hosted owner writes off a paper dust lot through the runtime: the answer is the book and the record, and only for a canonical mint", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    const buy = await f.app.trade(f.scope, { mode: "paper", intent: f.trade }) as { outputAmountRaw: string };
+    // Now nothing buys the lot back: the market's zero-output answer for exactly that lot.
+    const dust: SolanaPaperMarket = { readMint: f.market.readMint, quote: async intent => {
+      if (intent.outputMint !== SOLANA_USDG_MINT) return f.market.quote(intent);
+      throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+        outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: f.clock.now });
+    } };
+    const app = f.runtime({ market: dust });
+    for (const mint of ["", " " + SOLANA_WRAPPED_SOL_MINT, "not-a-mint", 7]) {
+      await assert.rejects(app.writeOffPaper(f.scope, { mint } as { mint: string }), (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "invalid", String(mint));
+    }
+    await assert.rejects(app.writeOffPaper({ ...f.scope, tenant: "0x2222222222222222222222222222222222222222" }, { mint: SOLANA_WRAPPED_SOL_MINT }), /binding/);
+    const result = await app.writeOffPaper(f.scope, { mint: SOLANA_WRAPPED_SOL_MINT });
+    assert.deepEqual(Object.keys(result).sort(), ["paper", "writtenOff"]);
+    assert.equal(Object.hasOwn(result.paper, "writtenOff"), false);
+    assert.equal(result.writtenOff.amountRaw, buy.outputAmountRaw); assert.equal(result.writtenOff.realizedPnlRaw, "-1000000");
+    assert.deepEqual(result.paper.positions, []); assert.deepEqual(result.paper.writeOffs, [result.writtenOff]);
+    assert.deepEqual(await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner), result.paper);
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("an owner in live mode is refused a paper write-off before any quote is asked for", async () => {
+  const f = await fixture();
+  try {
+    await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    await f.app.trade(f.scope, { mode: "paper", intent: f.trade });
+    await f.live();
+    // Even a lot that qualifies as dust: the store would refuse it too, but only after the paid quote.
+    let quotes = 0;
+    const counted: SolanaPaperMarket = { readMint: f.market.readMint, quote: async intent => {
+      quotes++;
+      if (intent.outputMint !== SOLANA_USDG_MINT) return f.market.quote(intent);
+      throw new SolanaMarketError("zero-output", { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw,
+        outAmount: "0", minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: 1000, quotedAtMs: f.clock.now });
+    } };
+    const app = f.runtime({ market: counted });
+    const refused = await app.writeOffPaper(f.scope, { mint: SOLANA_WRAPPED_SOL_MINT }).then(() => assert.fail("must refuse"), (error: unknown) => error);
+    assert.match(String(refused), /Paper trading is not the selected Solana mode/);
+    assert.equal(quotes, 0, "no paid quote for a refused write-off");
+    // Answered as the store's own refusal would be: 409 with the same text.
+    assert.ok(refused instanceof SolanaAppRuntimeError && refused.code === "permission");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner))!.positions.length, 1, "the old paper book is untouched");
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
 test("live configuration failure never falls back to a paper fill", async () => {
   const f = await fixture();
   try {
@@ -287,6 +339,23 @@ test("a revoke that did run is never booked failed, even with no receipt", async
     await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
     f.controls.height = 5001; f.controls.epoch = 2n; // the epoch moved: it may have landed
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+  } finally { f.raw.close(); }
+});
+
+test("one owner transaction at a time, a revocation included: while one is pending a new revoke is refused and the saved record is kept", async () => {
+  // Owner decision (W round 1): no second slot for an emergency revoke. Replacing the pending record would
+  // lose the transaction its outcome is booked from; the page points a stuck owner to the recovery tool.
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    const before = (await new SolanaTradingStore(f.db, f.scope).setup())!;
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === "Refresh the pending owner transaction before preparing another.");
+    assert.deepEqual(await new SolanaTradingStore(f.db, f.scope).setup(), before, "the pending record is not replaced");
+    assert.deepEqual(f.sent, [signedTransactionBase64]);
   } finally { f.raw.close(); }
 });
 
@@ -552,6 +621,34 @@ test("the fee payer warning threshold is explicit configuration (audit G2-4)", a
     assert.equal(status.live.feePayer?.level, "ok"); assert.deepEqual(status.live.warnings, []); assert.equal(status.live.feePayer?.lowLamports, "2500000");
     const broken = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS: "lots" }, log: () => {} });
     assert.match((await broken.status(f.scope)).live.blockers.join(" "), /warning threshold is misconfigured/);
+  } finally { f.raw.close(); }
+});
+
+test("a misconfigured fee setting is a status blocker that still shows the vault, balances, fee payer and owner wallet; a bad fee cap refuses a live trade as configuration", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.cash = 8_000_000n; f.controls.feePayerLamports = 3_000_000;
+    const good = await f.app.status(f.scope);
+    assert.equal(good.live.ready, true, good.live.blockers.join(" | "));
+    for (const [setting, value, blocker] of [["MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS", "lots", /fee payer warning threshold is misconfigured/],
+      ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "lots", /network fee limit setting is misconfigured/], ["MERRYMEN_SOLANA_MAX_FEE_LAMPORTS", "0", /network fee limit setting is misconfigured/]] as const) {
+      const app = f.runtime({ env: { ...f.env, [setting]: value }, log: () => {} });
+      const status = await app.status(f.scope);
+      assert.deepEqual(status.live.blockers.length, 1, status.live.blockers.join(" | "));
+      assert.match(status.live.blockers[0]!, blocker, setting);
+      assert.equal(status.live.ready, false); assert.equal(status.live.canExit, false);
+      // Everything else is still read and shown.
+      assert.deepEqual(status.live.balances, good.live.balances, setting); assert.deepEqual(status.live.ownerWallet, good.live.ownerWallet, setting);
+      assert.deepEqual(status.live.recoverable, good.live.recoverable, setting); assert.equal(status.live.vault, good.live.vault, setting);
+      // Still called low below the default threshold, which stands in for the one that cannot be read.
+      assert.deepEqual({ ...status.live.feePayer, lowLamports: null }, { ...good.live.feePayer, lowLamports: null }, setting);
+      assert.equal(good.live.feePayer?.level, "low"); assert.equal(status.live.feePayer?.lowLamports, null, "no configured threshold to show");
+      assert.deepEqual(status.live.warnings, good.live.warnings, setting);
+      if (setting === "MERRYMEN_SOLANA_MAX_FEE_LAMPORTS") {
+        await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: `fee-cap-${value}` } }), "configuration", blocker, value);
+      }
+    }
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });
 
@@ -892,13 +989,14 @@ test("withdrawing WSOL capital in the app lowers the high-water mark by its valu
 });
 
 test("a WSOL withdrawal whose value cannot be read still prepares and lands, and leaves the high-water mark where it was", async () => {
-  for (const unreadable of ["no quote", "no reference price", "a misconfigured reference tolerance"] as const) {
+  for (const unreadable of ["no quote", "no reference price", "a misconfigured reference tolerance", "a misconfigured Pyth generation"] as const) {
     const f = await fixture();
     try {
       await wsolCapital(f);
       if (unreadable !== "no reference price") servePyth(f);
       const app = f.runtime({ market: pricedMarket(f, unreadable === "no quote"),
-        ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}) });
+        ...(unreadable === "a misconfigured reference tolerance" ? { env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense" } } : {}),
+        ...(unreadable === "a misconfigured Pyth generation" ? { env: { ...f.env, MERRYMEN_SOLANA_PYTH_GENERATION: "both" } } : {}) });
       const prepared = await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "40000000" });
       assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.withdrawValuation, undefined, unreadable);
       const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
@@ -1352,6 +1450,33 @@ test("a retry of a recorded live trade is returned whatever previewed minimum it
     for (const answer of answers) assert.deepEqual(answer, { mode: "live", requestId: "owner-retry", intent, signature: "owner-retry-signature", status: "pending",
       preparedAtMs: f.clock.now, minOutAmount: "995000", quotedOutAmount: "1000000", settlement: null });
     await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: { ...asked, amountRaw: "2000000", minOutAmount: "1" } }), /different live trade/);
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("a misconfigured reference tolerance pages the operator: one [alert] a minute per process, naming the setting and never the value", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const quiet: string[] = [];
+    assert.equal((await f.runtime({ log: line => quiet.push(line) }).status(f.scope)).live.ready, true);
+    assert.deepEqual(quiet.filter(line => line.startsWith("[alert] solana-reference-tolerance")), [], "a good setting says nothing");
+    const lines: string[] = [];
+    const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "nonsense-9999" }, log: line => lines.push(line) });
+    const said = () => lines.filter(line => line.startsWith("[alert] solana-reference-tolerance"));
+    const status = await app.status(f.scope);
+    assert.ok(status.live.blockers.includes("The independent SOL price tolerance is misconfigured."));
+    assert.equal(status.live.canExit, false);
+    assert.deepEqual(said(), ["[alert] solana-reference-tolerance misconfigured: MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS must be a whole number from 50 to 1000 (unset is 300); "
+      + "no live Solana trade, exits included, is admitted until it is fixed"]);
+    assert.ok(!lines.join("\n").includes("nonsense-9999"), "the value is never echoed");
+    // Within the minute: refused again as configuration, not said again.
+    f.clock.now += 30_000;
+    await rejectsWith(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "tolerance-1" } }), "configuration", /tolerance is misconfigured/);
+    assert.equal(said().length, 1);
+    f.clock.now += 30_000;
+    await app.status(f.scope);
+    assert.equal(said().length, 2, "said again once a minute has passed");
     assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });

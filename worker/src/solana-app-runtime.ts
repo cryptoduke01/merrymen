@@ -6,9 +6,9 @@ import {
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction,
 } from "@solana/kit";
 import { ed25519 } from "@noble/curves/ed25519";
-import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode } from "../../packages/core/src/ids";
+import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Decode, canonicalId } from "../../packages/core/src/ids";
 import { parseSolanaRawAmount, parseSolanaSwapIntent, parseSolanaTradeRequest, requireSolanaLiveSellLimits, SolanaPaperValidationError, validateSolanaAccountLimits, validateSolanaQuote,
-  type SolanaPaperLimits, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
+  type SolanaPaperLimits, type SolanaQuote, type SolanaSwapIntent, type SolanaTradeRequest } from "../../packages/core/src/solana";
 import {
   buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction,
   buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction, buildSetSolanaBreakerInstruction, decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress,
@@ -20,14 +20,15 @@ import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlock
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
-import { createSolanaMarket } from "./solana-market";
+import { createSolanaMarket, SolanaMarketError, solanaJupiterApiKey } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
-import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
-  SolanaReferencePriceError } from "./solana-reference-price";
+import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaMarkDust, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
+  SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
+  SOLANA_REFERENCE_MIN_TOLERANCE_BPS } from "./solana-reference-price";
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, solanaExpiredAttemptAllowance, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 
 /**
@@ -82,6 +83,14 @@ function publicTrade(record: SolanaLiveRecord) {
  * setting: SolanaRpcError("invalid-fallback") names the deployment variable,
  * which stays in operator tools (check:solana-rpc, the worker's own errors).
  */
+/**
+ * The status blocker while the account's trades in the last 24 hours (landed,
+ * failed or pending) reached its maxOpsPerDay: admission refuses every live
+ * trade, exits included, until the oldest leaves the window.
+ * SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED is the blocker when proven-expired attempts
+ * beyond the allowance are what used the day's operations up.
+ */
+export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximum number of trades for the last 24 hours. Trading and automated exits resume as they leave the window.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
 /**
  * A failed live status read as the owner sees it. This module's own refusals,
@@ -328,6 +337,62 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     return createKeyPairFromPrivateKeyBytes(seed(env.MERRYMEN_SOLANA_FEE_PAYER_SEED, "Configure the separate Solana network fee payer before live trading."));
   }
   const log = options.log ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  /**
+   * MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS, or a configuration refusal that
+   * also says an [alert] to the operator, at most once a minute per process: an
+   * unreadable tolerance refuses every live trade, exits included, as a bad
+   * Pyth generation does (which requireSolanaPythGeneration alerts on). The
+   * line names the setting and its range, never the value.
+   */
+  let toleranceAlertAtMs: number | undefined;
+  function referenceToleranceBps(): number {
+    try { return solanaReferenceToleranceBps(env); } catch {
+      const at = now();
+      if (toleranceAlertAtMs === undefined || at < toleranceAlertAtMs || at - toleranceAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
+        toleranceAlertAtMs = at;
+        try {
+          log(`[alert] solana-reference-tolerance misconfigured: MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS must be a whole number from ${SOLANA_REFERENCE_MIN_TOLERANCE_BPS} `
+            + `to ${SOLANA_REFERENCE_MAX_TOLERANCE_BPS} (unset is ${SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS}); no live Solana trade, exits included, is admitted until it is fixed`);
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return fail("The independent SOL price tolerance is misconfigured.", "configuration");
+    }
+  }
+  /**
+   * Why admission (recordSigned) would refuse every live trade, exits included,
+   * for the account's daily operations, by its own rolling 24-hour arithmetic:
+   * operations that landed, failed or are pending reached maxOpsPerDay, or with
+   * the proven-expired attempts beyond the allowance they did. Null when neither.
+   * An unreadable allowance is already a configuration blocker, so it adds nothing.
+   */
+  async function dailyOperationsUsed(s: SolanaTradingStore, maxOpsPerDay: number): Promise<string | null> {
+    let allowance: number;
+    try { allowance = solanaExpiredAttemptAllowance(env); } catch { return null; }
+    const use = await solanaExpiredAttemptUse(s.db, s.scope, now(), allowance);
+    if (use.operations >= maxOpsPerDay) return SOLANA_STATUS_DAILY_OPERATIONS_USED;
+    return use.operations + use.counted >= maxOpsPerDay ? SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED : null;
+  }
+  /**
+   * Whether MERRYMEN_JUPITER_API_KEY is one every Jupiter request accepts
+   * (solanaJupiterApiKey). A key that is set but unusable also says an [alert]
+   * to the operator, at most once a minute per process: every quote and live
+   * route, exits included, is refused as configuration until it is fixed. The line names the
+   * setting and its rule, never the value. An unset or empty key is not configured yet.
+   */
+  let jupiterKeyAlertAtMs: number | undefined;
+  function jupiterKeyUsable(): boolean {
+    try { solanaJupiterApiKey(env); return true; } catch {
+      const at = now();
+      if (env.MERRYMEN_JUPITER_API_KEY && (jupiterKeyAlertAtMs === undefined || at < jupiterKeyAlertAtMs || at - jupiterKeyAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS)) {
+        jupiterKeyAlertAtMs = at;
+        try {
+          log("[alert] solana-jupiter-key misconfigured: MERRYMEN_JUPITER_API_KEY must be 1 to 1024 printable ASCII characters with no spaces; "
+            + "no Solana quote or live route, exits included, is made until it is fixed");
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return false;
+    }
+  }
   // Rent-exempt minimums by account size. They change only by feature activation; reread every window.
   const rents = new Map<number, { lamports: bigint; atMs: number }>();
   async function rentFor(read: SolanaLiveRead, size: number): Promise<bigint> {
@@ -344,8 +409,18 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * every tenant's exits stop. The executor itself refuses anything the payer
    * cannot fund, so these levels never block a trade it would sign.
    */
+  const DEFAULT_MAX_FEE_LAMPORTS = 5_000_000n;
+  /**
+   * The network fee and rent cap per live trade, in lamports
+   * (MERRYMEN_SOLANA_MAX_FEE_LAMPORTS, default 5,000,000). An unreadable value
+   * is configuration: a status blocker, and a refusal before anything is signed.
+   */
+  function maxFeeLamports(): bigint {
+    try { return parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? DEFAULT_MAX_FEE_LAMPORTS.toString()); }
+    catch { return fail("The Solana network fee limit setting is misconfigured: it must be a whole number of lamports above zero. Live trading and exits stay refused until an operator fixes it.", "configuration"); }
+  }
   function feePayerLow(): bigint {
-    const maxFee = parseSolanaRawAmount(env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000");
+    const maxFee = maxFeeLamports();
     const raw = env.MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS;
     if (raw === undefined) return maxFee * 4n;
     try { return parseSolanaRawAmount(raw); } catch { return fail("The fee payer warning threshold is misconfigured.", "configuration"); }
@@ -353,7 +428,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
   let feePayerAlert: { level: FeePayerLevel; atMs: number } | undefined;
   /** One structured line per change of level, repeated every FEE_PAYER_ALERT_REPEAT_MS while it is not ok. */
-  function reportFeePayer(level: FeePayerLevel, details: Record<string, string>) {
+  function reportFeePayer(level: FeePayerLevel, details: Record<string, string | null>) {
     const at = now(), last = feePayerAlert;
     if (level === "ok") {
       if (last && last.level !== "ok") log(JSON.stringify({ solana: "fee-payer-ok", ...details }));
@@ -554,6 +629,14 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   async function prepareOwner(s: SolanaTradingStore, instructions: Instruction[], details: Omit<SolanaPreparedSetup,
     "transactionBase64" | "messageBase64" | "blockhash" | "lastValidBlockHeight" | "preparedAtMs" | "expiresAtMs">, creates: readonly OwnerCreate[] = []) {
     const previous = await s.setup();
+    // One owner transaction at a time, a revocation included (owner decision, 2026-10-20): the
+    // saved record is what its outcome is booked from, so it is never replaced while it may
+    // still land. A revoke waits for it to finalize or provably expire. When the record stays
+    // pending (providers disagree, its reads fail), the page says the server cannot settle it
+    // and, where it shows the recovery card, points to `merrymen solana-recover`, which revokes
+    // with the owner's own key (SolanaOwnerActions). Trading is held meanwhile (status blocker).
+    // The alternative, a second slot or a setup history so a revoke can be prepared beside
+    // it, is not built.
     if (previous?.signature && previous.status !== "failed" && previous.status !== "finalized") fail("Refresh the pending owner transaction before preparing another.", "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
@@ -595,7 +678,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     try {
       const exit = parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana, mode: "paper", requestId: "withdraw-valuation",
         inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: WITHDRAW_VALUATION_SLIPPAGE_BPS });
-      const toleranceBps = solanaReferenceToleranceBps(env), generation = requireSolanaPythGeneration(env, now());
+      const toleranceBps = referenceToleranceBps(), generation = requireSolanaPythGeneration(env, now());
       const quote = await market().quote(exit); validateSolanaQuote(quote, exit, now());
       const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
       return { quote, reference: solanaReferenceBound(exit, price, toleranceBps) };
@@ -654,7 +737,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const session = await s.session();
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
-      let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string; level: FeePayerLevel } | null = null;
+      let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string | null; level: FeePayerLevel } | null = null;
       let ownerWallet: { lamports: string; revokeLamports: string; withdrawLamports: string } | null = null;
       let recoverable: { nativeLamports: string; unsyncedWsolLamports: string } | null = null;
       try {
@@ -663,12 +746,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         // vault, fee payer, owner wallet and recoverable SOL are still read and shown.
         try { computeUnitPrices(); } catch (error) { blockers.push(statusBlocker(error)); }
         try { expiredAttemptAllowance(); } catch (error) { blockers.push(statusBlocker(error)); }
+        // So are the fee settings: an unreadable fee cap (which trade() refuses) or
+        // warning threshold. The fee payer is still read and shown, and is still
+        // called low (and alerted on) below the default threshold, four times the
+        // default fee cap, while the configured one cannot be read.
+        let low: bigint | null = null;
+        try { low = feePayerLow(); } catch (error) { blockers.push(statusBlocker(error)); }
+        const alertBelow = low ?? DEFAULT_MAX_FEE_LAMPORTS * 4n;
         if (!liveReads) { if (binding.requestedMode === "live") blockers.push("Live vault state was not read."); }
         else {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
           if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
           await verifyDeployment(cfg);
-          const low = feePayerLow(), vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+          const vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
           const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const payerState = await rpc().read(async read => {
@@ -694,13 +784,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (payerState.owner.held < revokeNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL, too little to revoke or withdraw (at least ${sol(revokeNeeds)} SOL to revoke, up to ${sol(withdrawNeeds)} SOL to withdraw). Keep some SOL there so you can act in an emergency.`);
           else if (payerState.owner.held < withdrawNeeds) warnings.push(`Your owner wallet holds ${sol(payerState.owner.held)} SOL: enough to revoke, but a withdrawal may need up to ${sol(withdrawNeeds)} SOL to open your token account. Keep some SOL there so you can act in an emergency.`);
           const level: FeePayerLevel = payerState.lamports < payerState.exitMinimum ? "exits-blocked" : payerState.lamports < payerState.buyMinimum ? "buys-blocked"
-            : payerState.lamports < low ? "low" : "ok";
+            : payerState.lamports < alertBelow ? "low" : "ok";
           feePayerView = { lamports: payerState.lamports.toString(), exitMinimumLamports: payerState.exitMinimum.toString(),
-            buyMinimumLamports: payerState.buyMinimum.toString(), lowLamports: low.toString(), level };
+            buyMinimumLamports: payerState.buyMinimum.toString(), lowLamports: low === null ? null : low.toString(), level };
           reportFeePayer(level, { feePayer, ...feePayerView });
           if (level === "exits-blocked") blockers.push(`The shared network fee payer holds ${sol(payerState.lamports)} SOL, below the ${sol(payerState.exitMinimum)} SOL one exit needs. Trading and automated exits are paused until an operator funds it.`);
           else if (level === "buys-blocked") buysOnly(`The shared network fee payer holds ${sol(payerState.lamports)} SOL: enough for exits, not for buys (${sol(payerState.buyMinimum)} SOL). Buying is paused until an operator funds it; exits remain available.`);
-          else if (level === "low") warnings.push(`The shared network fee payer is low (${sol(payerState.lamports)} SOL; operators are alerted below ${sol(low)} SOL). Trading continues.`);
+          else if (level === "low") warnings.push(`The shared network fee payer is low (${sol(payerState.lamports)} SOL; operators are alerted below ${sol(alertBelow)} SOL). Trading continues.`);
           const live = await readSolanaVaultState(rpc(), programId, scope.owner);
           balances = await readSolanaVaultBalances(rpc(), vault, live.slot);
           cashTokenAccount = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
@@ -735,15 +825,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
         }
       } catch (error) { blockers.push(statusBlocker(error)); }
-      if (!env.MERRYMEN_JUPITER_API_KEY) blockers.push("Configure Jupiter quote access.");
+      // The builder's own key rule: a key every live route would refuse (blank, too long,
+      // unprintable) blocks trades and exits as a missing one does, and pages the operator.
+      if (!jupiterKeyUsable()) blockers.push("Configure Jupiter quote access.");
       if (await s.operatorHeld()) blockers.push(OPERATOR_HOLD);
       // trade() refuses every live trade, exits too, while either reference setting is invalid. The generation
       // check also says the [alert], so an agent held by this blocker still pages the operator.
-      try { solanaReferenceToleranceBps(env); } catch { blockers.push("The independent SOL price tolerance is misconfigured."); }
+      try { referenceToleranceBps(); } catch { blockers.push("The independent SOL price tolerance is misconfigured."); }
       try { requireSolanaPythGeneration(env, now()); } catch { blockers.push("The independent SOL price source (Pyth generation) is misconfigured."); }
       if (binding.requestedMode !== "live") blockers.push("Live mode is not selected.");
       if (!binding.limits || binding.limits.expiresAtMs <= now()) blockers.push("Save current Solana trading limits.");
       else if (binding.requestedMode === "live" && (binding.limits.perTradeWsol === undefined || binding.limits.dailyWsol === undefined)) blockers.push("Save per-trade and daily SOL sell limits for live trading.");
+      if (binding.requestedMode === "live" && binding.limits && binding.limits.expiresAtMs > now()) {
+        const used = await dailyOperationsUsed(s, binding.limits.maxOpsPerDay);
+        if (used) blockers.push(used);
+      }
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");
       const ownerTransaction = await s.setup();
@@ -762,6 +858,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (binding.requestedMode !== "paper" || !binding.limits || JSON.stringify(binding.limits) !== JSON.stringify(input.limits)) fail("Save paper mode and its limits before creating the book.", "permission");
       return s.createPaper(input.initialCashRaw, input.limits);
     },
+    /**
+     * The owner's write-off of one dust lot in the hosted paper book: the whole
+     * lot is quoted back to USDG first, and only the market's zero-output answer
+     * qualifies it (createSolanaPaperService.writeOff). The trading store then
+     * applies it under the tenant book lock. Answers the book after it and the
+     * write-off record. An owner not in paper mode is refused before the paid
+     * quote; the store checks the mode again under the lock.
+     */
+    async writeOffPaper(scope: SolanaAccountScope, input: { mint: string }) {
+      if (!object(input) || typeof input.mint !== "string" || canonicalId(CHAINS.solana, "token", input.mint) !== input.mint) fail("Invalid Solana token mint.");
+      const s = await store(scope);
+      if ((await s.binding()).requestedMode !== "paper") fail("Paper trading is not the selected Solana mode.", "permission");
+      const { writtenOff, ...paper } = await paperService(s).writeOff(scope.owner, input.mint);
+      return { paper, writtenOff };
+    },
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {
       const s = await store(scope), parsed = intent(input.intent, input.mode);
       if (input.mode === "paper") return paperService(s).preview(scope.owner, parsed);
@@ -779,14 +890,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (JSON.stringify(expected) !== JSON.stringify(prior.submission.intent)) fail("The request ID already belongs to a different live trade.");
         return publicTrade(await reconcileSolanaSubmission(rpc(), s, scope.owner, parsed.requestId, now) ?? prior);
       }
-      const cfg = config(), prices = computeUnitPrices(), secret = await s.sessionSeed(dek());
+      const cfg = config(), prices = computeUnitPrices(), maxFee = maxFeeLamports(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       // Refused as configuration before anything is signed; the store counts with it at admission.
       const expiredAllowance = expiredAttemptAllowance();
       const journal: SolanaLiveJournal = { get: (owner, requestId) => s.get(owner, requestId), settle: (...args) => s.settle(...args),
         recordSigned: submission => s.recordSigned(submission, { expiredAttemptAllowance: expiredAllowance }) };
-      let toleranceBps: number;
-      try { toleranceBps = solanaReferenceToleranceBps(env); } catch { return fail("The independent SOL price tolerance is misconfigured.", "configuration"); }
+      const toleranceBps = referenceToleranceBps();
       // One generation, from this runtime's env, for the read, the executor's check and the store's admission check.
       // Both settings are checked only after a recorded request was returned above: a bad one never blocks its replay.
       let pythGeneration: SolanaPythGeneration;
@@ -795,7 +905,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
-        journal, maxFeeLamports: env.MERRYMEN_SOLANA_MAX_FEE_LAMPORTS ?? "5000000", now, signal: input.signal,
+        journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot }) => {
           const observedAtMs = now(), balances = await readSolanaVaultBalances(liveRpc, vault, slot);
@@ -805,13 +915,26 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const tradable = (await tradableIn(s, balances))!;
           const held = BigInt(tradable.wsolRaw), cash = BigInt(tradable.cashUsdg);
           const evidence: Array<{ intent: SolanaSwapIntent; quote: typeof quote }> = [];
-          let equity = cash;
+          let equity = cash, zeroMark = false;
           if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(tradable.wsolRaw, "live-portfolio-mark");
-            const mark = await quotes.quote(markIntent); validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); }
+            // SOL that no route buys back (Jupiter's zero-output answer) is valued at zero, as the
+            // paper book values it, once Pyth shows it is dust (below): never a reason to refuse
+            // every buy as "too small". Any other failure still refuses.
+            let mark: SolanaQuote | null = null;
+            try { mark = await quotes.quote(markIntent); }
+            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; zeroMark = true; }
+            if (mark) { validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); } }
           // Independent of Jupiter: the build quote's guaranteed output is checked
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
           let reference: ReturnType<typeof solanaReferenceBound>;
-          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration })), toleranceBps); }
+          try {
+            const price = await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration }));
+            // A zero-output mark for SOL worth a cent or more at Pyth is not dust: valued at zero it would
+            // trip the persisted drawdown breaker on one anomalous answer. Refused as an unusable mark
+            // instead, like any other mark failure, for this buy only (SOLANA_MARK_DUST_MAX_USDG_RAW).
+            if (zeroMark && !solanaMarkDust(held, price)) throw new SolanaMarketError("invalid-quote");
+            reference = solanaReferenceBound(current, price, toleranceBps);
+          }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());
@@ -954,6 +1077,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
+    /**
+     * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
+     * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the
+     * independent Pyth SOL/USD price, read now in this runtime's generation, as
+     * a live buy's risk check reads it. False whenever that cannot be shown (a
+     * bad setting, a price that cannot be read or proven): the agent then stops
+     * the tick as for any other mark failure, and builds no route.
+     */
+    async solMarkDust(wsolRaw: string): Promise<boolean> {
+      try {
+        const amount = parseSolanaRawAmount(wsolRaw), generation = requireSolanaPythGeneration(env, now());
+        const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
+        return solanaMarkDust(amount, price);
+      } catch { return false; }
+    },
   };
 }
 let runtime: ReturnType<typeof createSolanaAppRuntime> | undefined;

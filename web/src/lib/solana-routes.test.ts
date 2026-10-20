@@ -15,7 +15,7 @@ let binding: bindings.SolanaBinding;
 let calls: Array<{ method: string; args: unknown[] }>;
 let deny = false;
 const routes: Record<string, (req: Request) => Promise<Response>> = {};
-const methods = ["setupPaper", "preview", "trade", "prepareLive", "submitSetup", "activateLive", "prepareOwnerAction", "submitOwnerAction"];
+const methods = ["setupPaper", "writeOffPaper", "preview", "trade", "prepareLive", "submitSetup", "activateLive", "prepareOwnerAction", "submitOwnerAction"];
 // These exercise a deployment that offers Solana; solana-enabled.test.ts covers one that does not.
 const flag = process.env.MERRYMEN_SOLANA;
 after(() => { if (flag === undefined) delete process.env.MERRYMEN_SOLANA; else process.env.MERRYMEN_SOLANA = flag; });
@@ -39,7 +39,7 @@ before(() => {
     return original.call(this, id, parent, isMain);
   });
   try {
-    for (const route of ["paper", "intent", "setup", "settings", "strategy", "owner"]) routes[route] = createRequire(import.meta.url)(`${directory}${route}/route.ts`).POST;
+    for (const route of ["paper", "paper/write-off", "intent", "setup", "settings", "strategy", "owner"]) routes[route] = createRequire(import.meta.url)(`${directory}${route}/route.ts`).POST;
   } finally { interception.mock.restore(); }
 });
 beforeEach(() => {
@@ -78,6 +78,17 @@ test("the owner's previewed minimum reaches the runtime's trade, and the page se
   assert.ok(placeTrade.length > 0, "placeTrade must exist for this pin to mean anything");
   assert.equal((placeTrade.match(/api</g) ?? []).length, 1, "one request");
   assert.match(placeTrade, /api<\{ receipt: Receipt \}>\("intent", \{ action: "trade", mode, intent: \{ \.\.\.intent, minOutAmount: preview\.quote\.minOutAmount \} \}\)/);
+});
+test("the paper write-off takes only a canonical mint and always writes off in the verified binding's book", async () => {
+  const mint = "So11111111111111111111111111111111111111112";
+  for (const body of [{}, { mint: "" }, { mint: "not-a-mint" }, { mint: ` ${mint}` }, { mint: 7 }, { mint, owner }, { mint, tenant }, { mint, amountRaw: "1" }]) {
+    assert.equal((await post("paper/write-off", body)).status, 400, JSON.stringify(body));
+  }
+  assert.deepEqual(calls, []);
+  const response = await post("paper/write-off", { mint });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls.pop(), { method: "writeOffPaper", args: [scope, { mint }] });
+  assert.deepEqual(calls, []);
 });
 test("live mode requires explicit separate consent and registration requires saved live mode", async () => {
   assert.equal((await post("settings", { mode: "live", limits, revision: 2 })).status, 400);
