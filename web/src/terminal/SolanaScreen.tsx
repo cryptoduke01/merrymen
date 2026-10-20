@@ -7,10 +7,10 @@ import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store
 import type { SolanaBinding } from "@/lib/solana-binding-store";
 import { privyEnabled } from "@/lib/privy-client";
 import { useSolanaOwner } from "./useSolanaOwner";
-import { requestJson } from "./request-json";
+import { RequestError, UNREACHABLE } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
+import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
@@ -56,6 +56,43 @@ function hoursLeft(expiresAtMs: number): string {
   return remaining > 0 ? String(Math.min(168, Math.max(1, Math.ceil(remaining / 3_600_000)))) : "24";
 }
 
+/**
+ * THE SOLANA ROUTES' FETCH: requestJson, KEEPING THE BODY'S FIELDS.
+ *
+ * The same deadline, cancellation, sentences and status 0 for no answer as
+ * requestJson (request-json.ts), except that a refusal is a
+ * SolanaRequestError carrying the answer's validated notSaved and
+ * freshMinOutAmount, which requestJson drops. (A cross-track request asks for
+ * RequestError to keep the body, so this can go back to requestJson.)
+ */
+export async function solanaRequestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const deadline = AbortSignal.timeout(20_000), caller = init.signal, controller = new AbortController();
+  const cancel = () => controller.abort(caller?.reason), expire = () => controller.abort(deadline.reason);
+  if (caller?.aborted) cancel(); else caller?.addEventListener("abort", cancel, { once: true });
+  deadline.addEventListener("abort", expire, { once: true });
+  try {
+    let response: Response;
+    try { response = await fetch(url, { ...init, cache: "no-store", signal: controller.signal }); }
+    catch { throw new SolanaRequestError(UNREACHABLE, 0); }
+    const isJson = /\bjson\b/i.test(response.headers.get("content-type") ?? "");
+    // A body that promised JSON and broke off half way is the same as no body.
+    const data: unknown = isJson ? await response.json().catch(() => undefined) : undefined;
+    if (!response.ok) {
+      // The server's sentence for a 4xx or an explicitly owner-facing 5xx, as requestJson reads it.
+      const d: { error?: unknown; errors?: unknown; why?: unknown; ownerFacing?: unknown } = data !== null && typeof data === "object" ? data : {};
+      const owned = response.status >= 500 && d.ownerFacing !== true ? null
+        : typeof d.error === "string" && d.error ? d.error : Array.isArray(d.errors) && d.errors.length ? d.errors.join(" ") : typeof d.why === "string" && d.why ? d.why : null;
+      if (response.status >= 500 && owned === null && data !== undefined) console.warn(`[merrymen] ${url} answered ${response.status}:`, data);
+      throw new SolanaRequestError(owned ?? `merrymen answered with an error (${response.status}). Try again in a moment.`, response.status, data);
+    }
+    if (data === undefined) throw new SolanaRequestError("merrymen sent back something that isn't data. Try again in a moment.", response.status);
+    return data as T;
+  } finally {
+    caller?.removeEventListener("abort", cancel);
+    deadline.removeEventListener("abort", expire);
+  }
+}
+
 export function SolanaScreen() {
   return <section className="solana-screen" aria-labelledby="solana-title">
     <header><p className="solana-eyebrow">Solana · mainnet</p><h1 id="solana-title">Your Solana account</h1><p>Practice at live prices, or authorize a bounded trading session for real funds.</p></header>
@@ -67,6 +104,8 @@ function ConnectedSolana() {
   const signer = useSolanaOwner();
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  // A pacing answer (429): this request was not processed; the owner waits and tries again. Not a failure.
+  const [notice, setNotice] = useState("");
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
@@ -98,7 +137,7 @@ function ConnectedSolana() {
     const token = await tokenSource.current();
     if (requestedIdentity !== identity.current || requestedEpoch !== accountEpoch.current) throw new Error("Your signing account changed. Refresh before continuing.");
     if (!token) throw new Error("Your sign-in expired. Sign in again.");
-    const result = await requestJson<T>(`/api/solana/${path}`, { signal,
+    const result = await solanaRequestJson<T>(`/api/solana/${path}`, { signal,
       headers: { Authorization: `Bearer ${token}`, "X-Merrymen-Privy-Did": requestedIdentity, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
     });
@@ -136,7 +175,7 @@ function ConnectedSolana() {
   }, [load]);
   useEffect(() => {
     accountEpoch.current++;
-    setStatus(null); setError(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
+    setStatus(null); setError(""); setNotice(""); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
     discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
@@ -145,9 +184,15 @@ function ConnectedSolana() {
   }, [signer.did, signer.authenticated, refresh, discardReview]);
   const act = async (fn: () => Promise<void>) => {
     if (inFlight.current) return;
-    inFlight.current = true; setBusy(true); setError("");
+    inFlight.current = true; setBusy(true); setError(""); setNotice("");
     const epoch = accountEpoch.current;
-    try { await fn(); } catch (e) { if (epoch === accountEpoch.current) setError(e instanceof Error ? e.message : "The Solana request did not finish. Refresh before retrying."); }
+    try { await fn(); } catch (e) {
+      if (epoch !== accountEpoch.current) return;
+      // Paced before anything ran: the server's own words say to wait. The page
+      // keeps what it holds (a preview, signed bytes) for the next try.
+      if (e instanceof RequestError && e.status === 429) setNotice(e.message);
+      else setError(e instanceof Error ? e.message : "The Solana request did not finish. Refresh before retrying.");
+    }
     finally { inFlight.current = false; setBusy(false); }
   };
   const binding = status?.binding;
@@ -395,6 +440,7 @@ function ConnectedSolana() {
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
+    {notice && <p role="status" className="solana-notice">{notice}</p>}
     <div className="solana-card"><h2>Wallet ownership</h2>
       {binding ? <><p className="solana-address">{binding.owner}</p><p>{sameWallet ? "Verified wallet connected." : "Connect the exact embedded wallet shown above before signing a permission."}</p></>
         : <><p>{signer.address ?? (signer.ready ? "Create your protected Solana wallet, then verify that it belongs to this account." : "Connecting your protected wallet…")}</p>

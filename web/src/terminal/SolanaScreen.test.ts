@@ -97,7 +97,7 @@ async function register() {
   if ([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign permission with my wallet")) await press("Sign permission with my wallet");
 }
 const field = (label: string) => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!.value;
-let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen;
+let SolanaScreen: typeof import("./SolanaScreen").SolanaScreen, screen: typeof import("./SolanaScreen");
 const recoveryPath = fileURLToPath(new URL("./SolanaRecovery.tsx", import.meta.url));
 let testDom: typeof import("./test-dom").testDom, json: typeof import("./test-dom").json, deferred: typeof import("./test-dom").deferred;
 let ui: ReturnType<typeof testDom>;
@@ -148,7 +148,7 @@ before(async () => {
     }
     return original.call(this, id, parent, isMain);
   });
-  try { SolanaScreen = createRequire(import.meta.url)(path).SolanaScreen; }
+  try { screen = createRequire(import.meta.url)(path); SolanaScreen = screen.SolanaScreen; }
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
@@ -905,6 +905,77 @@ test("a trade carries the minimum of its own preview, and nothing is sent withou
   assert.equal(intent.amountRaw, "2000000"); assert.equal(intent.minOutAmount, "19900000");
 });
 
+test("the Solana fetch keeps a refusal's validated notSaved and freshMinOutAmount, and otherwise answers as requestJson does", async () => {
+  const { SolanaRequestError, refusedByServer } = await import("./SolanaOwnerActions");
+  const { RequestError, UNREACHABLE } = await import("./request-json");
+  const answer = (response: () => Response) => { globalThis.fetch = async () => response(); return screen.solanaRequestJson<unknown>("/api/solana/intent", { method: "POST", body: "{}" }).then(() => null, (e: unknown) => e); };
+  const moved = await answer(() => json({ error: "The price moved. Preview again; nothing was sent.", ownerFacing: true, freshMinOutAmount: "9000000" }, 409)) as InstanceType<typeof SolanaRequestError>;
+  assert.ok(moved instanceof SolanaRequestError); assert.ok(moved instanceof RequestError); assert.ok(refusedByServer(moved));
+  assert.equal(moved.status, 409); assert.equal(moved.message, "The price moved. Preview again; nothing was sent."); assert.equal(moved.freshMinOutAmount, "9000000"); assert.equal(moved.notSaved, false);
+  const unsaved = await answer(() => json({ error: "Nothing prepared.", ownerFacing: true, notSaved: true }, 409)) as InstanceType<typeof SolanaRequestError>;
+  assert.equal(unsaved.notSaved, true); assert.equal(unsaved.freshMinOutAmount, null);
+  // Anything but the exact shapes reads as absent.
+  for (const [notSaved, fresh] of [["true", "0"], [1, "09000000"], [null, 9000000], [{}, "9e6"], [false, "9000000.0"], [[true], " 9000000"], [undefined, "1".repeat(40)], [undefined, "-1"]] as const) {
+    const odd = await answer(() => json({ error: "Refused.", ownerFacing: true, notSaved, freshMinOutAmount: fresh }, 409)) as InstanceType<typeof SolanaRequestError>;
+    assert.equal(odd.notSaved, false, JSON.stringify(notSaved)); assert.equal(odd.freshMinOutAmount, null, JSON.stringify(fresh));
+  }
+  // No answer, an answer that is not JSON, an unexplained 5xx, and success: requestJson's sentences.
+  const none = await answer(() => { throw new TypeError("network down"); }) as InstanceType<typeof SolanaRequestError>;
+  assert.equal(none.status, 0); assert.equal(none.message, UNREACHABLE);
+  const proxy = await answer(() => new Response("<html>bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } })) as Error & { status: number };
+  assert.equal(proxy.status, 502); assert.equal(proxy.message, "merrymen answered with an error (502). Try again in a moment.");
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const hidden = await answer(() => json({ error: "internal detail" }, 503)) as Error & { status: number };
+    assert.equal(hidden.message, "merrymen answered with an error (503). Try again in a moment."); assert.equal(warn.mock.callCount(), 1);
+  } finally { warn.mock.restore(); }
+  const owned = await answer(() => json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503)) as Error;
+  assert.equal(owned.message, "Solana is temporarily unavailable.");
+  const text = await answer(() => new Response("ok", { status: 200 })) as Error & { status: number };
+  assert.equal(text.message, "merrymen sent back something that isn't data. Try again in a moment.");
+  globalThis.fetch = async () => json({ preview: 1 });
+  assert.deepEqual(await screen.solanaRequestJson("/api/solana/intent"), { preview: 1 });
+  // A caller's cancellation reaches the request.
+  const abort = new AbortController(); let seen: AbortSignal | undefined;
+  globalThis.fetch = async (_url, init) => { seen = init?.signal ?? undefined; abort.abort(); throw new DOMException("aborted", "AbortError"); };
+  const cancelled = await screen.solanaRequestJson("/api/solana/status", { signal: abort.signal }).then(() => null, (e: unknown) => e as Error & { status: number });
+  assert.equal(seen?.aborted, true); assert.equal(cancelled!.status, 0);
+});
+test("a paced preview or trade (429) is a wait, not a failure: nothing more is sent and the preview stays", async () => {
+  state.runtime.paper = paper;
+  const trades: Record<string, unknown>[] = [];
+  let pacePreview = true, paceTrade = true;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "intent" && body?.action === "preview") return pacePreview ? json({ error: "Too many Solana previews. Try again in 3 seconds.", ownerFacing: true }, 429) : json({ preview: { quote: quoteFor(20_000) } });
+    if (path === "intent" && body?.action === "trade") {
+      trades.push(body);
+      if (paceTrade) return json({ error: "Too many Solana trade requests. This request was not processed; a trade you already placed is unaffected. Refresh to check it, then try again in 2 seconds.", ownerFacing: true }, 429);
+      return json({ receipt: { mode: "paper", requestId: (body.intent as { requestId: string }).requestId } });
+    }
+    throw new Error("Unexpected fixture route");
+  };
+  // Text, never the node: a failed assertion must not inspect a whole DOM.
+  const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
+  await render(); await ui.click("Preview trade");
+  assert.equal(alert(), null);
+  assert.equal(ui.container.querySelector(".solana-notice[role=status]")?.textContent, "Too many Solana previews. Try again in 3 seconds.");
+  assert.equal(calls.filter((call) => call.path === "intent").length, 1);
+  pacePreview = false;
+  await ui.click("Preview trade");
+  assert.equal(ui.container.querySelector(".solana-notice")?.textContent ?? null, null, "the next request clears the wait");
+  await ui.click("Simulate trade");
+  assert.equal(alert(), null);
+  assert.match(ui.container.querySelector(".solana-notice[role=status]")!.textContent!, /^Too many Solana trade requests\. This request was not processed/);
+  assert.equal(trades.length, 1);
+  // The preview the owner saw is still there, to try again with the same request and minimum.
+  assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
+  assert.equal(button("Simulate trade").disabled, false);
+  paceTrade = false;
+  await ui.click("Simulate trade");
+  assert.equal(trades.length, 2); assert.deepEqual(trades[1], trades[0]);
+  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+});
 test("a quote that is already past its expiry never offers a trade, whatever the device clock says", async () => {
   state.runtime.paper = paper;
   respond = async (path, body) => {

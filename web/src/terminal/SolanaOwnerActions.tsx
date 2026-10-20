@@ -113,6 +113,31 @@ export function refusedByServer(error: unknown): error is RequestError {
   return error instanceof RequestError && error.status >= 400 && error.status < 500 && ![401, 403, 404, 408, 429].includes(error.status);
 }
 
+/** A canonical positive integer of base units, as solanaResponse sends freshMinOutAmount. */
+const FRESH_MINIMUM = /^[1-9][0-9]{0,38}$/;
+/**
+ * A SOLANA ROUTE'S ANSWER, WITH WHAT ITS BODY SAYS BEYOND THE SENTENCE.
+ *
+ * requestJson keeps only a refusal's sentence and status. solanaResponse
+ * (web/src/lib/solana-api.ts) adds two fields the page acts on, kept here
+ * only after validation; anything else reads as absent:
+ * - notSaved: THIS request saved and sent nothing. It says nothing about an
+ *   earlier submission of the same bytes (savedNothing).
+ * - freshMinOutAmount: on a price-moved 409, what the fresh quote guarantees,
+ *   in the output token's base units: a canonical positive integer.
+ * SolanaScreen's solanaRequestJson throws it for every Solana route.
+ */
+export class SolanaRequestError extends RequestError {
+  readonly notSaved: boolean;
+  readonly freshMinOutAmount: string | null;
+  constructor(message: string, status: number, body?: unknown) {
+    super(message, status);
+    const fields: { notSaved?: unknown; freshMinOutAmount?: unknown } = body !== null && typeof body === "object" ? body : {};
+    this.notSaved = fields.notSaved === true;
+    this.freshMinOutAmount = typeof fields.freshMinOutAmount === "string" && FRESH_MINIMUM.test(fields.freshMinOutAmount) ? fields.freshMinOutAmount : null;
+  }
+}
+
 /** The server's saved owner transaction, as the status route reports it. */
 export type OwnerRecord = { signature: string; status: string; kind?: string } | null;
 
