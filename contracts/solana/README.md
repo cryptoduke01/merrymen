@@ -134,7 +134,10 @@ before it is unpacked, runs `test.sh`, checks that every runtime test ran, and r
 the artifact (`merrymen_vault.build.json`: program ID, SHA-256, toolchain and the run
 that built it). `solana · rebuild` builds the same source again from `git archive` on
 another runner, and `app` requires the two hashes to be equal. Both jobs build only when
-a pull request changes a Solana-relevant path; pushes to main and manual runs always do.
+a pull request changes a Solana-relevant path (`scripts/ci/solana-paths.mjs`; it counts
+`.cargo/`, `rust-toolchain` and `.gitattributes` at the repository root and in
+`contracts/` too, because cargo and git apply them to the vault's build and source);
+pushes to main and manual runs always do.
 
 `solana · test` then runs `build.sh --record` and checks that the manifest it writes,
 `build-manifests/Linux-x86_64.json`, is for the artifact the runtime tests ran against.

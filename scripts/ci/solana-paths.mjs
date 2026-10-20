@@ -37,6 +37,17 @@ import { fileURLToPath } from "node:url";
  * the build. rust-toolchain(.toml) picks the host toolchain test.sh's native
  * and runtime tests run on (the SBF build itself always uses +solana).
  *
+ * Git attributes above contracts/solana: git applies the root .gitattributes
+ * and contracts/.gitattributes (contracts/solana's own are under the first
+ * pattern) both when actions/checkout writes the tree solana · test builds and
+ * when solana-rebuild.sh runs `git archive HEAD contracts/solana`. An eol,
+ * ident or filter attribute changes the bytes a build reads (the root file
+ * already sets `*.sh text eol=lf`, and build.sh is a source-digest input), and
+ * export-ignore or export-subst changes what the archive holds, so the rebuild
+ * would build other source than the tests did. Listing them makes a pull
+ * request that changes only attributes build both copies and compare them,
+ * instead of skipping to a main run that fails after the merge.
+ *
  * Not listed: .github/kaka/gate.cjs and package.json, which the CI script
  * tests (scripts/ci/*.test.mjs) read but the vault build does not. Those tests
  * are in npm test, so app · tests runs them on every pull request, a change to
@@ -51,6 +62,7 @@ export const SOLANA_PATHS = [
   /^worker\/src\/solana/,
   /^(?:contracts\/)?\.cargo\//,
   /^(?:contracts\/)?rust-toolchain(?:\.toml)?$/,
+  /^(?:contracts\/)?\.gitattributes$/,
 ];
 
 export function solanaPaths(paths) {

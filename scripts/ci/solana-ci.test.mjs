@@ -421,6 +421,12 @@ describe("solana-paths.mjs", () => {
       "rust-toolchain.toml",
       "rust-toolchain",
       "contracts/rust-toolchain.toml",
+      // Git applies these when it checks out contracts/solana and when
+      // solana-rebuild.sh archives it (eol, export-ignore, export-subst).
+      ".gitattributes",
+      "contracts/.gitattributes",
+      "contracts/solana/.gitattributes",
+      "contracts/solana/programs/merrymen-vault/src/.gitattributes",
     ];
     const unrelated = [
       "README.md",
@@ -440,6 +446,10 @@ describe("solana-paths.mjs", () => {
       "tools/rust-toolchain.toml",
       "rust-toolchain.toml.bak",
       ".cargo-config.toml",
+      "web/.gitattributes",
+      "contracts/src/.gitattributes",
+      ".gitattributes.bak",
+      "x.gitattributes",
     ];
     assert.deepEqual(solanaPaths([...relevant, ...unrelated]), relevant);
   });
@@ -494,6 +504,7 @@ describe("solana-paths.mjs", () => {
     put("README.md", "readme\n");
     put("docs/guide.md", "guide\n");
     put("contracts/solana/programs/merrymen-vault/src/lib.rs", "// vault\n");
+    put("contracts/solana/Cargo.toml", "[workspace]\n");
     gitIn(origin, "add", "-A");
     gitIn(origin, "commit", "-q", "-m", "base");
     let prs = 0;
@@ -528,6 +539,28 @@ describe("solana-paths.mjs", () => {
     // A file moved out of contracts/solana is a vault change, so renames count on both sides.
     const moved = decideFor(() => gitIn(origin, "mv", "contracts/solana/programs/merrymen-vault/src/lib.rs", "docs/lib.rs"));
     assert.equal(moved.output, "run=true\n");
+    // A pull request that changes only the attributes git applies to the
+    // vault: export-ignore drops a source file from solana-rebuild.sh's
+    // `git archive HEAD contracts/solana`, so the rebuild would build other
+    // source than the tested checkout. Both must build, on the pull request.
+    const lib = "contracts/solana/programs/merrymen-vault/src/lib.rs";
+    /** The files `git archive <ref> contracts/solana` holds, in a fresh clone of that branch. */
+    const archived = branch => {
+      const clone = fresh("archive");
+      gitIn(clone, "clone", "-q", "--depth", "1", "--branch", branch, `file://${origin}`, ".");
+      const tar = spawnSync("git", ["archive", "--format=tar", "HEAD", "contracts/solana"], { cwd: clone, env: env() });
+      assert.equal(tar.status, 0, String(tar.stderr));
+      const names = spawnSync("tar", ["-tf", "-"], { input: tar.stdout, encoding: "utf8" });
+      assert.equal(names.status, 0, names.stderr);
+      return names.stdout.split("\n").filter(Boolean);
+    };
+    assert.ok(archived("main").includes(lib), "the base archive holds lib.rs");
+    for (const [file, pattern] of [[".gitattributes", lib], ["contracts/.gitattributes", lib.slice("contracts/".length)]]) {
+      const attributes = decideFor(() => put(file, `${pattern} export-ignore\n`));
+      assert.equal(attributes.output, "run=true\n", file);
+      assert.ok(attributes.stdout.split("\n").includes(`  ${file}`), attributes.stdout);
+      assert.equal(archived(`merge-${prs}`).includes(lib), false, `${file}: git archive still holds ${lib}`);
+    }
     // Not a merge commit (the job checked out something else): build.
     const plain = fresh("plain");
     gitIn(plain, "clone", "-q", "--depth", "2", `file://${origin}`, ".");
