@@ -328,16 +328,15 @@ jobs:
       # THE RELEASE MANIFEST. build.sh --record builds the source once more
       # from a copy in another directory (about one more SBF build of time),
       # requires identical bytes, and writes build-manifests/Linux-x86_64.json
-      # for this pinned Linux build; the upload below carries it. The check
-      # fails when that manifest is not for the artifact the tests ran
-      # against, or when a committed Linux manifest exists and differs from
-      # it. With none committed it passes and says so: the owner reviews the
-      # uploaded manifest and commits it, which turns the comparison on.
+      # for this pinned Linux build; the upload below carries it. verify fails
+      # unless that manifest is for the artifact the tests ran against and the
+      # .so on disk is still that artifact. The comparison with a committed
+      # manifest is the job's last step.
       - name: Linux build manifest
         if: needs.solana-paths.outputs.run == 'true'
         run: |
           contracts/solana/build.sh --record
-          node scripts/ci/solana-linux-manifest.mjs contracts/solana "$VAULT_TESTED_SHA256"
+          node scripts/ci/solana-linux-manifest.mjs verify contracts/solana "$VAULT_TESTED_SHA256"
         env:
           CARGO_INCREMENTAL: "0"
           VAULT_TESTED_SHA256: ${{ steps.record.outputs.sha256 }}
@@ -365,6 +364,15 @@ jobs:
             contracts/solana/target/deploy/merrymen_vault.build.json
             contracts/solana/build-manifests/Linux-x86_64.json
           if-no-files-found: error
+
+      # Last, so a run whose manifest differs has still uploaded it for the
+      # owner. Fails only when a committed Linux manifest exists and differs
+      # from this pinned Linux build. With none committed it passes and says
+      # so: the owner reviews the uploaded manifest and commits it, which
+      # turns this comparison on.
+      - name: Linux manifest matches the committed one
+        if: needs.solana-paths.outputs.run == 'true'
+        run: node scripts/ci/solana-linux-manifest.mjs compare contracts/solana
 
   # The same program built again on another runner, from `git archive` at
   # another path, with a fresh CARGO_HOME. `app` requires the two hashes to be

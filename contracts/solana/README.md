@@ -129,14 +129,17 @@ that built it). `solana · rebuild` builds the same source again from `git archi
 another runner, and `app` requires the two hashes to be equal. Both jobs build only when
 a pull request changes a Solana-relevant path; pushes to main and manual runs always do.
 
-`solana · test` then runs `build.sh --record` and uploads `build-manifests/Linux-x86_64.json`
-with the artifact. The job fails when a committed Linux manifest exists and differs from
-that pinned Linux build; while none is committed it only reports the recorded values. To
-commit it, take the artifact from a run whose `app` check passed, check that the manifest's
-`source.digest` equals `build.sh --source-digest` at that commit and its `artifact.sha256`
-equals the tested and rebuilt hashes in `app`'s log, and commit the file unchanged. From
-then on a program change needs a new Linux manifest as well: its pull request fails until
-the manifest from that run's artifact is committed.
+`solana · test` then runs `build.sh --record`, checks that the manifest it writes,
+`build-manifests/Linux-x86_64.json`, is for the artifact the runtime tests ran against, and
+uploads it with the artifact. Its last step fails when a committed Linux manifest exists
+and differs from that pinned Linux build; while none is committed it only reports the
+recorded values. To commit the first one, take the artifact from a run whose `app` check
+passed, check that the manifest's `source.digest` equals `build.sh --source-digest` at that
+commit and its `artifact.sha256` equals the tested and rebuilt hashes in `app`'s log, and
+commit the file unchanged. From then on a program change needs a new Linux manifest as
+well: its pull request fails (this step, and the TypeScript manifest test) until the
+manifest that run uploaded is committed. Check it against `solana · rebuild`'s hash the
+same way; the next run must then pass, which shows CI reproduced it.
 
 A release artifact is `merrymen-vault-sbf-release-candidate-<commit>-run<id>.<attempt>`,
 from a CI run on `refs/heads/main` (a push to main, or a manual run on main) whose `app`
