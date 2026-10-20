@@ -285,14 +285,26 @@ test("D2: SOL dust that no route buys back is valued at zero, and a manual buy s
   assert.equal(f.sends.length, 1);
 });
 
-test("D3: a SOL mark that fails any other way still refuses a buy, and a position worth more than the drawdown limit that quotes to zero trips the breaker", async t => {
+test("D3: a SOL mark that fails any other way still refuses a buy; so does a zero-output mark for SOL worth a cent or more, which never trips the breaker", async t => {
   const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" } });
   await assert.rejects(down.app.trade(down.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-mark-down") }), /valid quote/);
   assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
-  // 1 SOL bought at $150 beside 100 USDG: valued at zero, equity is 40% below the high-water mark.
-  const big = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" } });
-  await assert.rejects(big.app.trade(big.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-zero-mark") }), /drawdown breaker/);
-  assert.deepEqual(await big.submissions(), []); assert.equal(big.sends.length, 0);
+  // 1 SOL bought at $150 beside 100 USDG, and Jupiter answers zero output for it. Valued at zero, equity would be
+  // 40% below the high-water mark and the persisted breaker would pause buys until the owner signs a resume.
+  // Pyth says it is worth 150 USDG: the answer is unusable, and this buy alone is refused.
+  const book = async (f: Awaited<ReturnType<typeof fixture>>) => JSON.parse((await f.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string }).book_json);
+  for (const [wsol, label] of [[1_000_000_000n, "1 SOL"], [66_667n, "66,667 lamports: 1 cent"]] as const) {
+    const big = await fixture(t, { cash: 100_000_000n, wsol, mark: "zero", build: { kind: "fair" } });
+    await assert.rejects(big.app.trade(big.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-zero-mark") }),
+      (error: unknown) => error instanceof SolanaMarketError && error.code === "invalid-quote", label);
+    assert.deepEqual(await big.submissions(), [], label); assert.equal(big.sends.length, 0, label);
+    assert.equal((await book(big)).buyPaused, undefined, `${label}: the breaker stays as it was`);
+  }
+  // Just under a cent (66,666 lamports, 9,999 micro-USDG) is dust: valued at zero, and the buy goes through.
+  const dust = await fixture(t, { cash: 100_000_000n, wsol: 66_666n, mark: "zero", build: { kind: "fair" } });
+  const placed = await dust.app.trade(dust.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-beside-cent") });
+  assert.ok("status" in placed && placed.status === "pending");
+  assert.equal((await dust.submissions())[0]!.submission.risk.equityUsdg, "100000000");
 });
 
 test("D4: the agent plans around SOL dust that no route buys back instead of stopping at it; any other mark failure still stops the tick", async t => {
@@ -304,6 +316,12 @@ test("D4: the agent plans around SOL dust that no route buys back instead of sto
   const down = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "down", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
   assert.deepEqual((await down.agent().tick()).map(r => r.outcome), ["unavailable"]);
   assert.deepEqual(await down.submissions(), []); assert.equal(down.sends.length, 0);
+  // A zero-output answer for 1 SOL, worth 150 USDG at Pyth, is not dust: the tick stops before any route is built.
+  const big = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "zero", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  assert.deepEqual((await big.agent().tick()).map(r => r.outcome), ["unavailable"]);
+  assert.deepEqual(await big.submissions(), []); assert.equal(big.sends.length, 0);
+  assert.ok(!big.net.urls.some(url => url.startsWith("https://api.jup.ag/")), "no route was asked for");
+  assert.ok(big.pythReads.length > 0, "the dust check read Pyth");
 });
 
 /** The reference-price [alert] lines this process said while `run` ran. */

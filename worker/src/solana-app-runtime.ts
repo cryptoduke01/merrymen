@@ -22,7 +22,7 @@ import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
 import { createSolanaMarket, SolanaMarketError, solanaJupiterApiKey } from "./solana-market";
 import { createSolanaPaperService, type SolanaPaperMarket } from "./solana-paper-service";
-import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
+import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaMarkDust, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional, solanaReferenceToleranceBps, type SolanaPythGeneration,
   SolanaReferencePriceError, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS,
   SOLANA_REFERENCE_MIN_TOLERANCE_BPS } from "./solana-reference-price";
 import { SolanaRpcError } from "./solana-rpc";
@@ -915,19 +915,26 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           const tradable = (await tradableIn(s, balances))!;
           const held = BigInt(tradable.wsolRaw), cash = BigInt(tradable.cashUsdg);
           const evidence: Array<{ intent: SolanaSwapIntent; quote: typeof quote }> = [];
-          let equity = cash;
+          let equity = cash, zeroMark = false;
           if (held > 0n && current.inputMint === SOLANA_USDG_MINT) { const markIntent = makeExit(tradable.wsolRaw, "live-portfolio-mark");
             // SOL that no route buys back (Jupiter's zero-output answer) is valued at zero, as the
-            // paper book values it: the conservative direction for the drawdown check, and never
-            // a reason to refuse every buy as "too small". Any other failure still refuses.
+            // paper book values it, once Pyth shows it is dust (below): never a reason to refuse
+            // every buy as "too small". Any other failure still refuses.
             let mark: SolanaQuote | null = null;
             try { mark = await quotes.quote(markIntent); }
-            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; }
+            catch (error) { if (!(error instanceof SolanaMarketError && error.code === "zero-output")) throw error; zeroMark = true; }
             if (mark) { validateSolanaQuote(mark, markIntent, now()); evidence.push({ intent: markIntent, quote: mark }); equity += BigInt(mark.minOutAmount); } }
           // Independent of Jupiter: the build quote's guaranteed output is checked
           // against Pyth SOL/USD, and a sell is charged at least its reference value.
           let reference: ReturnType<typeof solanaReferenceBound>;
-          try { reference = solanaReferenceBound(current, await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration })), toleranceBps); }
+          try {
+            const price = await liveRpc.read(read => readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration }));
+            // A zero-output mark for SOL worth a cent or more at Pyth is not dust: valued at zero it would
+            // trip the persisted drawdown breaker on one anomalous answer. Refused as an unusable mark
+            // instead, like any other mark failure, for this buy only (SOLANA_MARK_DUST_MAX_USDG_RAW).
+            if (zeroMark && !solanaMarkDust(held, price)) throw new SolanaMarketError("invalid-quote");
+            reference = solanaReferenceBound(current, price, toleranceBps);
+          }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());
@@ -1070,6 +1077,21 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         ...(input.action === "withdraw" ? { mint: input.mint, amountRaw: input.amountRaw, ...details } : input.action === "withdraw-sol" ? { amountRaw: input.amountRaw } : {}) }, creates);
     },
     submitOwnerAction: (scope: SolanaAccountScope, input: { signedTransactionBase64: string }) => submitOwner(scope, input, "owner"),
+    /**
+     * Whether `wsolRaw` of held SOL is dust a zero-output mark may value at zero
+     * (solanaMarkDust): worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the
+     * independent Pyth SOL/USD price, read now in this runtime's generation, as
+     * a live buy's risk check reads it. False whenever that cannot be shown (a
+     * bad setting, a price that cannot be read or proven): the agent then stops
+     * the tick as for any other mark failure, and builds no route.
+     */
+    async solMarkDust(wsolRaw: string): Promise<boolean> {
+      try {
+        const amount = parseSolanaRawAmount(wsolRaw), generation = requireSolanaPythGeneration(env, now());
+        const price = await rpc().read(async read => readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
+        return solanaMarkDust(amount, price);
+      } catch { return false; }
+    },
   };
 }
 let runtime: ReturnType<typeof createSolanaAppRuntime> | undefined;

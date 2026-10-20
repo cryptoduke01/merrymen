@@ -62,7 +62,8 @@ export async function boundSolanaRebalanceSell(
   }
   return null;
 }
-type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade">;
+/** solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust. */
+type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust">>;
 export interface SolanaAgentOptions {
   db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
@@ -219,8 +220,11 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (mark) { validateSolanaQuote(mark, markIntent, now()); solValueUsdgRaw = mark.minOutAmount; }
             // SOL no route buys back (Jupiter's zero-output answer) is dust: nothing to sell and worth
             // zero, as the runtime and the paper book value it at a buy. Planned as no position, so
-            // it never stops the strategy. Any other failure still makes the tick unavailable.
-            else wsolRaw = "0";
+            // it never stops the strategy. Live, only once Pyth shows it is worth under a cent
+            // (the runtime's solMarkDust, the bound its buy check applies): a zero-output answer for
+            // more is unusable, and like any other failure makes the tick unavailable, with no route built.
+            else if (row.requested_mode === "paper" || await options.runtime.solMarkDust?.(wsolRaw)) wsolRaw = "0";
+            else throw new SolanaMarketError("invalid-quote");
           }
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);

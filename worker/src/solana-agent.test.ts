@@ -477,21 +477,33 @@ test("the agent's SOL mark: a zero-output answer is dust planned as no position;
   await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: NOW + 100 * 3_600_000 });
   await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 60 });
   await ensureSolanaTradingSchema(db);
-  const trades: Array<{ inputMint: string; amountRaw: string }> = [];
+  const trades: Array<{ inputMint: string; amountRaw: string }> = [], dustChecks: string[] = [];
+  // The runtime's Pyth dust check (solMarkDust): `dust` says what it shows.
+  let dust: boolean | "absent" = true;
   const runtime = {
     status: async () => ({ paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "1000" }, pending: [], ready: true, canExit: true, blockers: [] } }),
     trade: async (_scope: unknown, request: { intent: { inputMint: string; amountRaw: string } }) => { trades.push(request.intent); return {}; },
+    get solMarkDust() { return dust === "absent" ? undefined : async (wsolRaw: string) => { dustChecks.push(wsolRaw); return dust; }; },
   } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
-  let failure: Error = new SolanaMarketError("zero-output", { source: "jupiter", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT,
+  const zero = new SolanaMarketError("zero-output", { source: "jupiter", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT,
     inAmount: "1000", outAmount: "0", minOutAmount: "0", slippageBps: 50, contextSlot: 1, quotedAtMs: NOW });
+  let failure: Error = zero;
   const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw failure; } };
   const clock = { now: NOW };
   const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now });
   assert.deepEqual((await agent.tick()).map(r => r.outcome), ["submitted"]);
   assert.deepEqual(trades.map(i => [i.inputMint, i.amountRaw]), [[SOLANA_USDG_MINT, "5000000"]], "a buy toward the target, as if no SOL were held");
+  assert.deepEqual(dustChecks, ["1000"], "dust by the independent price");
+  // A zero-output answer for SOL Pyth does not show to be dust, or with no way to check, is a mark failure like any other.
+  for (const shown of [false, "absent"] as const) {
+    dust = shown; clock.now += 3_600_000;
+    assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"], String(shown));
+  }
+  dust = true;
   for (const other of [new SolanaMarketError("invalid-quote"), new SolanaMarketError("stale-quote"), new Error("network")]) {
     failure = other; clock.now += 3_600_000;
     assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"], other.message);
   }
   assert.equal(trades.length, 1, "no trade on any other mark failure");
+  assert.equal(dustChecks.length, 2, "only a zero-output answer is checked for dust");
 });

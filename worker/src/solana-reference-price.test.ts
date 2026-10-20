@@ -5,7 +5,8 @@ import { SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, PYTH_SOL_USD_FEED_ID, PYTH_SPONSORED_SHARD,
   SOLANA_PYTH_DEFAULT_GENERATION, SOLANA_PYTH_FEEDS, SOLANA_REFERENCE_ALERT_REPEAT_MS, SOLANA_REFERENCE_MAX_AGE_MS, createSolanaReferenceAlerts, derivePythPriceFeedAccount,
-  parsePythSolUsd, readSolanaReferencePrice, requireSolanaPythGeneration, solanaPythFeed, solanaPythGeneration, solanaReferenceBound, solanaReferenceNotional,
+  parsePythSolUsd, readSolanaReferencePrice, requireSolanaPythGeneration, SOLANA_MARK_DUST_MAX_USDG_RAW, solanaMarkDust, solanaPythFeed, solanaPythGeneration,
+  solanaReferenceBound, solanaReferenceNotional, solanaReferenceWsolValue,
   solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration,
   type SolanaReferenceRefusal } from "./solana-reference-price";
 import { PYTH_SOL_USD_MAINNET_SNAPSHOT, PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, pythAccount, pythReference,
@@ -266,6 +267,24 @@ test("values both directions at the reference and floors guaranteed output by th
   for (const tolerance of [50, 49, 1001]) assert.throws(() => solanaReferenceBound(sell, reference, tolerance), SolanaReferencePriceError);
   assert.throws(() => solanaReferenceBound({ ...sell, amountRaw: "1" }, reference, 300), SolanaReferencePriceError); // too small to value
   assert.throws(() => solanaReferenceBound({ ...sell, outputMint: SOLANA_WRAPPED_SOL_MINT }, reference, 300), SolanaReferencePriceError);
+});
+
+test("a zero-output mark is dust only for SOL worth under one cent at the reference, by the bound's own arithmetic", () => {
+  assert.equal(SOLANA_MARK_DUST_MAX_USDG_RAW, 10_000n);
+  // $150.00000000: 66,666 lamports are worth 9,999 micro-USDG, 66,667 are worth 10,000.
+  const at150 = pythReference(NOW, 15_000_000_000n);
+  assert.equal(solanaReferenceWsolValue(66_666n, at150), 9_999n);
+  assert.deepEqual([0n, 1_000n, 66_666n].map(amount => solanaMarkDust(amount, at150)), [true, true, true]);
+  assert.deepEqual([66_667n, 1_000_000_000n].map(amount => solanaMarkDust(amount, at150)), [false, false]);
+  // The same valuation solanaReferenceBound charges a sell at.
+  assert.equal(solanaReferenceWsolValue(1_000_000_000n, at150).toString(), solanaReferenceBound(sell, at150, 300).valueUsdg);
+  // Another exponent scales the same way.
+  assert.equal(solanaReferenceWsolValue(1_000_000_000n, { ...at150, price: "15000", exponent: -2 }), 150_000_000n);
+  // A reference that cannot value anything refuses, never answers "dust".
+  for (const bad of [{ ...at150, price: "0" }, { ...at150, price: "-1" }, { ...at150, price: "1.5" }, { ...at150, exponent: 1 }, { ...at150, exponent: -13 }, { ...at150, exponent: 0.5 }]) {
+    assert.throws(() => solanaMarkDust(1n, bad), (error: unknown) => error instanceof SolanaReferencePriceError && error.reason === "bound", JSON.stringify(bad));
+  }
+  assert.throws(() => solanaMarkDust(-1n, at150), SolanaReferencePriceError);
 });
 
 test("a stored bound must recompute exactly from its own reference and stay fresh", () => {

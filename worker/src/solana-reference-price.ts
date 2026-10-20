@@ -395,6 +395,30 @@ export function verifySolanaReferenceBound(bound: SolanaReferenceBound, intent: 
   return expected;
 }
 
+/**
+ * MARK DUST (owner decision, round 2): the most held SOL may be worth at the
+ * independent Pyth SOL/USD price for Jupiter's zero-output mark to value it at
+ * zero: under one US cent, 10,000 USDG base units. Real dust (a remainder no
+ * route buys back) is worth far less, so buys beside it go on. A zero-output
+ * mark for SOL worth more is an answer that cannot be used, refused like any
+ * other mark failure: valuing a real position at zero would trip the persisted
+ * drawdown breaker on one anomalous quote. The direction is fail-closed either
+ * way (exits stay open); this keeps the refusal to that one buy.
+ */
+export const SOLANA_MARK_DUST_MAX_USDG_RAW = 10_000n;
+/** What `wsolRaw` lamports are worth at the reference, in USDG base units (rounded down). */
+export function solanaReferenceWsolValue(wsolRaw: bigint, reference: SolanaReferencePrice): bigint {
+  if (!object(reference) || typeof reference.price !== "string" || !/^[1-9][0-9]{0,18}$/.test(reference.price) || wsolRaw < 0n) return fail("bound");
+  const exponent = reference.exponent;
+  if (!Number.isSafeInteger(exponent) || exponent < -12 || exponent > 0) return fail("bound");
+  // As solanaReferenceBound: one lamport is worth price × 10^(exponent - 3) micro-USDG.
+  return wsolRaw * BigInt(reference.price) / 10n ** BigInt(3 - exponent);
+}
+/** Whether a zero-output mark may value `wsolRaw` of held SOL at zero: worth under SOLANA_MARK_DUST_MAX_USDG_RAW at the reference. */
+export function solanaMarkDust(wsolRaw: bigint, reference: SolanaReferencePrice): boolean {
+  return solanaReferenceWsolValue(wsolRaw, reference) < SOLANA_MARK_DUST_MAX_USDG_RAW;
+}
+
 /** The USDG notional admission charges: a buy's input, a sell's quoted or reference proceeds, whichever is larger. */
 export function solanaReferenceNotional(intent: { inputMint: string; amountRaw: string }, quotedOut: string, bound: SolanaReferenceBound): bigint {
   if (intent.inputMint === SOLANA_USDG_MINT) return parseSolanaRawAmount(intent.amountRaw);
