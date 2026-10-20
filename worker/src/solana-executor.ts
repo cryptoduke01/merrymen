@@ -104,7 +104,7 @@ export class SolanaExecutionError extends Error {
   constructor(readonly code: "invalid-intent" | "invalid-state" | "unsafe-program" | "unsafe-route" | "simulation" | "fee-cap" | "risk" | "conflict" | "cancelled" | "owner-refund" | "price-moved",
     detail: { freshMinOutAmount?: string } = {}) {
     super(code === "owner-refund"
-      ? "Solana live execution refused: owner-refund. Tokens were sent to this swap's temporary account; the vault returns them to the owner's own token account for that mint, which is closed or unsafe. The owner must reopen it before this swap can run."
+      ? "Solana live execution refused: owner-refund. Tokens were sent to this swap's temporary account; the vault returns them to the owner's own token account for that mint, which is closed or unsafe (a delegate or close authority set, or frozen). This swap cannot run until that account is usable; the owner's status says what to fix."
       : `Solana live execution refused: ${code}.`);
     this.name = "SolanaExecutionError";
     if (code === "price-moved" && detail.freshMinOutAmount !== undefined) this.freshMinOutAmount = detail.freshMinOutAmount;
@@ -142,27 +142,56 @@ function pendingDonation(raw: Account, mint: string, authority: string, program:
   return tokenBalance(raw, mint, authority, program);
 }
 /**
- * Tokens anyone sent to a swap's temporary input account (`temp`, a raw
- * getMultipleAccounts entry, null when absent), and whether the owner's own
- * token account for that mint (`ownerToken`) can take them back. The vault
- * returns such a donation to that account during the swap, so while it is
- * closed or unsafe (a delegate, a close authority, frozen, another owner or
- * mint) every swap from that mint at this sequence is refused: owner-refund.
- * A temporary account that is neither empty nor this mint's token account of
- * the swap authority is invalid-state.
+ * Why the owner's own token account for a mint cannot take a donation back,
+ * which decides what the owner can do about it:
+ * - missing: no account (closed or never opened), or an address holding only
+ *   lamports, which opening the account takes over. Reopening it fixes it, as
+ *   does an owner withdrawal, which opens it (CreateIdempotent).
+ * - delegated: a delegate (or delegated amount) or a close authority is set.
+ *   Only removing them in the owner's wallet fixes it; a withdrawal does not
+ *   (the vault's Withdraw does not check that account) and would leave the
+ *   withdrawn tokens where the delegate can move them.
+ * - frozen: only the token's freeze authority can thaw it.
+ * - invalid: anything else (not this owner's token account for this mint).
  */
-export function solanaPendingRefund(temp: unknown, ownerToken: unknown, mint: string, swapAuthority: string, owner: string, program: string): { donation: bigint; ownerAccountUsable: boolean } {
-  const donation = temp === null ? 0n : pendingDonation(account(temp), mint, swapAuthority, program);
-  let ownerAccountUsable = true;
-  try { tokenBalance(account(ownerToken), mint, owner, program); } catch { ownerAccountUsable = false; }
-  return { donation, ownerAccountUsable };
+export type SolanaOwnerRefundProblem = "missing" | "delegated" | "frozen" | "invalid";
+function ownerRefundProblem(raw: unknown, mint: string, owner: string, program: string): SolanaOwnerRefundProblem | null {
+  if (raw === null) return "missing";
+  let parsed: Account;
+  try { parsed = account(raw); } catch { return "invalid"; }
+  try { tokenBalance(parsed, mint, owner, program); return null; } catch { /* why it is unusable, below */ }
+  const data = parsed.data;
+  if (parsed.owner === "11111111111111111111111111111111" && !parsed.executable && data.length === 0) return "missing";
+  if (parsed.owner !== program || parsed.executable || data.length < 165 ||
+      getBase58Decoder().decode(data.subarray(0, 32)) !== mint || getBase58Decoder().decode(data.subarray(32, 64)) !== owner) return "invalid";
+  if (data[108] === 2) return "frozen";
+  // Initialized, this owner's, this mint's: tokenBalance refused it only for a delegate, a delegated amount or a close authority.
+  return data[108] === 1 ? "delegated" : "invalid";
 }
 /**
- * The input mints (USDG for buys, WSOL for sells and exits) whose next swap, at
- * vault sequence `seq`, the executor would refuse with owner-refund. Read at or
- * after `minContextSlot`.
+ * Tokens anyone sent to a swap's temporary input account (`temp`, a raw
+ * getMultipleAccounts entry, null when absent), and whether the owner's own
+ * token account for that mint (`ownerToken`) can take them back, and if not,
+ * why (ownerAccountProblem). The vault returns such a donation to that account
+ * during the swap, so while it is closed or unsafe (a delegate, a close
+ * authority, frozen, another owner or mint) every swap from that mint at this
+ * sequence is refused: owner-refund. A temporary account that is neither empty
+ * nor this mint's token account of the swap authority is invalid-state.
  */
-export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId: string, vault: string, owner: string, seq: bigint, minContextSlot = 1): Promise<string[]> {
+export function solanaPendingRefund(temp: unknown, ownerToken: unknown, mint: string, swapAuthority: string, owner: string, program: string):
+  { donation: bigint; ownerAccountUsable: boolean; ownerAccountProblem: SolanaOwnerRefundProblem | null } {
+  const donation = temp === null ? 0n : pendingDonation(account(temp), mint, swapAuthority, program);
+  const ownerAccountProblem = ownerRefundProblem(ownerToken, mint, owner, program);
+  return { donation, ownerAccountUsable: ownerAccountProblem === null, ownerAccountProblem };
+}
+/** An input mint whose next swap the executor would refuse with owner-refund, and why the owner's account cannot take the donation back. */
+export type SolanaOwnerRefundBlock = { mint: string; problem: SolanaOwnerRefundProblem };
+/**
+ * The input mints (USDG for buys, WSOL for sells and exits) whose next swap, at
+ * vault sequence `seq`, the executor would refuse with owner-refund, each with
+ * why. Read at or after `minContextSlot`.
+ */
+export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId: string, vault: string, owner: string, seq: bigint, minContextSlot = 1): Promise<SolanaOwnerRefundBlock[]> {
   const swapAuthority = await deriveSolanaSwapAuthority(programId, vault, seq);
   const mints = [[SOLANA_USDG_MINT, TOKEN_2022_PROGRAM], [SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM]] as const;
   const keys: string[] = [];
@@ -171,10 +200,10 @@ export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId:
     const result = context(await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
     if (!Array.isArray(result.value) || result.value.length !== keys.length) return fail();
     const accounts = result.value as unknown[];
-    return mints.filter(([mint, program], index) => {
+    return mints.flatMap(([mint, program], index) => {
       const refund = solanaPendingRefund(accounts[2 * index], accounts[2 * index + 1], mint, swapAuthority, owner, program);
-      return refund.donation > 0n && !refund.ownerAccountUsable;
-    }).map(([mint]) => mint);
+      return refund.donation > 0n && refund.ownerAccountProblem !== null ? [{ mint, problem: refund.ownerAccountProblem }] : [];
+    });
   });
 }
 function paperIntent(intent: SolanaLiveIntent) {

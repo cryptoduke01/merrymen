@@ -94,7 +94,9 @@ const EXECUTION_REFUSALS: Partial<Record<SolanaExecutionError["code"], readonly 
   simulation: [409, "This trade failed its pre-flight check on Solana. Nothing was sent. Preview again or try a smaller amount."],
   "unsafe-route": [409, "No safe route is available for this trade right now. Nothing was sent. Preview again or try another amount."],
   conflict: [409, "This request conflicts with a trade or setting that was just recorded. Nothing new was sent. Refresh before trying again."],
-  "owner-refund": [409, "Tokens someone sent to your vault are waiting to be returned to your own token account for this asset, which is closed or not safe to use. Nothing was sent. Reopen that token account in your wallet, then try again."],
+  // One code for every reason the account is unusable; the remedy differs (a closed account is reopened, a delegate is
+  // revoked, a frozen one cannot be fixed here), so the owner is pointed at status, which says which (refundBlocker).
+  "owner-refund": [409, "Tokens someone sent to your vault are waiting to be returned to your own token account for this asset, which is closed or not safe to use. Nothing was sent. Your Solana status says what to fix in that account; then try again."],
 };
 /**
  * The live route builder (solana-live-market) raises one codeless error for

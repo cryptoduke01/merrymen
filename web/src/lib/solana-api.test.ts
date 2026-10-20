@@ -66,7 +66,7 @@ test("live refusals the owner can act on are clear 4xx answers, not an outage", 
   const cases: Array<[SolanaExecutionError["code"], number, RegExp]> = [
     ["risk", 409, /outside your trading limits/], ["fee-cap", 409, /fees are above/], ["simulation", 409, /pre-flight check/],
     ["unsafe-route", 409, /No safe route/], ["conflict", 409, /Refresh before trying again/], ["invalid-intent", 400, /not supported/],
-    ["price-moved", 409, /^The price moved\. Preview again; nothing was sent\.$/], ["owner-refund", 409, /Reopen that token account in your wallet/],
+    ["price-moved", 409, /^The price moved\. Preview again; nothing was sent\.$/], ["owner-refund", 409, /^(?!.*Reopen).*closed or not safe to use\. Nothing was sent\. Your Solana status says what to fix in that account; then try again\.$/],
   ];
   for (const [code, status, text] of cases) {
     const response = await solanaResponse(async () => { throw new SolanaExecutionError(code); });

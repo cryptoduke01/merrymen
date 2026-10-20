@@ -1089,19 +1089,30 @@ test("status names the RPC configuration an operator must fix: no independent fa
   } finally { f.raw.close(); }
 });
 
-test("status tells the owner to reopen a token account a waiting donation needs, and only then (executor owner-refund)", async () => {
-  const cases = [
-    // [donated mint, owner token accounts, owner account state, blocked, exits open]
-    { mint: SOLANA_USDG_MINT, ownerAtas: false, blocked: true, canExit: true },
-    { mint: SOLANA_WRAPPED_SOL_MINT, ownerAtas: false, blocked: true, canExit: false },
-    { mint: SOLANA_WRAPPED_SOL_MINT, ownerAtas: true, delegate: true, blocked: true, canExit: false },
-    { mint: SOLANA_USDG_MINT, ownerAtas: true, blocked: false, canExit: true },
-    { mint: null, ownerAtas: false, blocked: false, canExit: true },
-  ] as const;
+test("status tells the owner how to fix the token account a waiting donation needs, by why it is unusable, and only then (executor owner-refund)", async () => {
+  const REOPEN = /does not exist \(it was closed or never opened\)\. Reopen your (USDG|wrapped SOL) token account in your wallet, or withdraw a little \1 here, which opens it\./;
+  const DELEGATED = /is not safe to use: it has a delegate approved to move its tokens, or a close authority\. Revoke the delegate and remove the close authority in your wallet\. Withdrawing here does not fix this/;
+  const FROZEN = /is frozen\. That cannot be fixed from here: only the token's issuer can unfreeze it\./;
+  const INVALID = /is not a token account the vault can use\. Check that account in your wallet\./;
+  type Owner = "missing" | "usable" | "delegate" | "delegated-amount" | "close-authority" | "frozen" | "other-holder" | "lamports-only";
+  const cases: Array<{ mint: string | null; owner: Owner; remedy?: RegExp; canExit: boolean }> = [
+    { mint: SOLANA_USDG_MINT, owner: "missing", remedy: REOPEN, canExit: true },
+    { mint: SOLANA_WRAPPED_SOL_MINT, owner: "missing", remedy: REOPEN, canExit: false },
+    // An address that holds only lamports is opened like a missing one.
+    { mint: SOLANA_USDG_MINT, owner: "lamports-only", remedy: REOPEN, canExit: true },
+    { mint: SOLANA_WRAPPED_SOL_MINT, owner: "delegate", remedy: DELEGATED, canExit: false },
+    { mint: SOLANA_USDG_MINT, owner: "delegated-amount", remedy: DELEGATED, canExit: true },
+    { mint: SOLANA_USDG_MINT, owner: "close-authority", remedy: DELEGATED, canExit: true },
+    { mint: SOLANA_USDG_MINT, owner: "frozen", remedy: FROZEN, canExit: true },
+    { mint: SOLANA_WRAPPED_SOL_MINT, owner: "frozen", remedy: FROZEN, canExit: false },
+    { mint: SOLANA_WRAPPED_SOL_MINT, owner: "other-holder", remedy: INVALID, canExit: false },
+    { mint: SOLANA_USDG_MINT, owner: "usable", canExit: true },
+    { mint: null, owner: "missing", canExit: true },
+  ];
   for (const item of cases) {
     const f = await fixture();
     try {
-      await readyLive(f); f.controls.sequence = 4n; f.controls.ownerAtas = item.ownerAtas;
+      await readyLive(f); f.controls.sequence = 4n; f.controls.ownerAtas = item.owner === "usable";
       if (item.mint) {
         const program = item.mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM;
         const authority = await deriveSolanaSwapAuthority(PROGRAM, f.vault, 4n);
@@ -1109,16 +1120,27 @@ test("status tells the owner to reopen a token account a waiting donation needs,
         // A temporary account at an earlier sequence is stranded, never a blocker.
         const stale = await deriveSolanaSwapAuthority(PROGRAM, f.vault, 3n);
         f.extra.set(await deriveSolanaAta(stale, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), account(f.tokenAccount(SOLANA_USDG_MINT, 9n, stale), TOKEN_2022_PROGRAM));
-      }
-      if ("delegate" in item) {
-        const data = f.tokenAccount(SOLANA_WRAPPED_SOL_MINT, 0n, f.owner); data.writeUInt32LE(1, 72);
-        f.extra.set(f.ownerWsolAta, account(data, SOLANA_CLASSIC_TOKEN_PROGRAM));
+        const ownerAta = item.mint === SOLANA_USDG_MINT ? f.ownerCashAta : f.ownerWsolAta;
+        const data = f.tokenAccount(item.mint, 0n, item.owner === "other-holder" ? f.vault : f.owner);
+        if (item.owner === "delegate") data.writeUInt32LE(1, 72);
+        if (item.owner === "delegated-amount") data.writeBigUInt64LE(5n, 121);
+        if (item.owner === "close-authority") data.writeUInt32LE(1, 129);
+        if (item.owner === "frozen") data[108] = 2;
+        if (item.owner === "lamports-only") f.extra.set(ownerAta, account(Buffer.alloc(0), SYSTEM, false, 890_880));
+        else if (item.owner !== "missing" && item.owner !== "usable") f.extra.set(ownerAta, account(data, program));
       }
       const status = await f.app.status(f.scope), text = status.live.blockers.join(" | ");
-      const label = JSON.stringify(item);
-      assert.equal(/next swap account/.test(text), item.blocked, `${label}: ${text}`);
-      assert.equal(status.live.ready, !item.blocked, label); assert.equal(status.live.canExit, item.canExit, label);
-      if (item.blocked) assert.match(text, new RegExp(`Reopen your ${item.mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL"} token account`), label);
+      const label = JSON.stringify(item), blocked = !!item.remedy;
+      assert.equal(/next swap account/.test(text), blocked, `${label}: ${text}`);
+      assert.equal(status.live.ready, !blocked, label); assert.equal(status.live.canExit, item.canExit, label);
+      if (item.remedy) {
+        assert.match(text, item.remedy, label);
+        const token = item.mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
+        assert.match(text, new RegExp(`Someone sent ${token} to your vault's next swap account\\. The vault returns it to your own ${token} token account, which`), label);
+        // Withdrawing opens a missing account; into any other it fixes nothing (and with a delegate, hands it the tokens).
+        if (item.remedy !== REOPEN) assert.doesNotMatch(text, /withdraw a little|Reopen your/, label);
+        assert.match(text, item.mint === SOLANA_USDG_MINT ? /Buying is paused (until then|while it stays frozen); exits remain available\./ : /Selling and automated exits are refused (until then|while it stays frozen)\./, label);
+      }
       assert.notEqual(status.live.balances, null, "the vault is still shown");
     } finally { f.raw.close(); }
   }

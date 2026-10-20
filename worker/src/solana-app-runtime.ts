@@ -16,7 +16,7 @@ import {
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
-import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
+import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
@@ -96,12 +96,25 @@ function statusBlocker(error: unknown): string {
   if (error instanceof SolanaRpcError && error.code === "no-quorum") return error.message;
   return "The configured vault, balances or live permissions could not be verified.";
 }
-/** What the owner is told when a donation waits for an owner token account that is closed or unsafe. */
-function refundBlocker(mint: string): string {
-  const token = mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL";
-  const stopped = mint === SOLANA_USDG_MINT ? "Buying is paused until then; exits remain available." : "Selling and automated exits are refused until then.";
-  return `Someone sent ${token} to your vault's next swap account. The vault returns it to your own ${token} token account, which is closed or not safe to use `
-    + `(it has a delegate or close authority, or is frozen). Reopen your ${token} token account in your wallet, or withdraw a little ${token} here, which opens it. ${stopped}`;
+/**
+ * What the owner is told when a donation waits for an owner token account that
+ * is closed or unsafe, with the remedy for why (SolanaOwnerRefundProblem).
+ * Withdrawing opens a missing account, so it is offered only for that one: the
+ * vault's Withdraw does not check the owner's account, so withdrawing into one
+ * with a delegate succeeds, leaves the swap blocked, and puts the tokens where
+ * the delegate can move them.
+ */
+function refundBlocker({ mint, problem }: SolanaOwnerRefundBlock): string {
+  const token = mint === SOLANA_USDG_MINT ? "USDG" : "wrapped SOL", until = problem === "frozen" ? "while it stays frozen" : "until then";
+  const stopped = mint === SOLANA_USDG_MINT ? `Buying is paused ${until}; exits remain available.` : `Selling and automated exits are refused ${until}.`;
+  const waiting = `Someone sent ${token} to your vault's next swap account. The vault returns it to your own ${token} token account, which`;
+  switch (problem) {
+    case "missing": return `${waiting} does not exist (it was closed or never opened). Reopen your ${token} token account in your wallet, or withdraw a little ${token} here, which opens it. ${stopped}`;
+    case "delegated": return `${waiting} is not safe to use: it has a delegate approved to move its tokens, or a close authority. Revoke the delegate and remove the close authority `
+      + `in your wallet. Withdrawing here does not fix this, and ${token} withdrawn into that account could be moved by its delegate. ${stopped}`;
+    case "frozen": return `${waiting} is frozen. That cannot be fixed from here: only the token's issuer can unfreeze it. ${stopped}`;
+    default: return `${waiting} is not a token account the vault can use. Check that account in your wallet. ${stopped}`;
+  }
 }
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
@@ -716,8 +729,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // owner's own token account for that mint during the swap; while that
           // account is closed or unsafe the executor refuses every swap from that
           // mint (owner-refund). USDG is the buy side, WSOL the sell and exit side.
-          for (const mint of await readSolanaOwnerRefundBlocks(rpc(), programId, vault, scope.owner, live.state.seq, live.slot)) {
-            if (mint === SOLANA_USDG_MINT) buysOnly(refundBlocker(mint)); else blockers.push(refundBlocker(mint));
+          for (const block of await readSolanaOwnerRefundBlocks(rpc(), programId, vault, scope.owner, live.state.seq, live.slot)) {
+            if (block.mint === SOLANA_USDG_MINT) buysOnly(refundBlocker(block)); else blockers.push(refundBlocker(block));
           }
         }
       } catch (error) { blockers.push(statusBlocker(error)); }
