@@ -122,10 +122,13 @@ jobs:
           MERRYMEN_SKIP_BUILD: "1"
 
       - name: Test
-        # The same file set as `npm test` (package.json), one shard of it.
-        # site/app tests resolve `next` from the root install; the site has no
-        # CI job of its own, so they run here or nowhere.
-        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs" "site/app/**/*.test.ts"
+        # The same file set as `npm test` (package.json), one shard of it;
+        # scripts/ci/solana-ci.test.mjs holds the two equal. site/app tests
+        # resolve `next` from the root install; the site has no CI job of its
+        # own, so they run here or nowhere. The CI script tests run here on
+        # every pull request, so a change to a file they read outside
+        # solana · paths' list (.github/kaka/gate.cjs, package.json) still runs them.
+        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts" "cli/*.test.mjs" "scripts/ci/*.test.mjs" "site/app/**/*.test.ts"
 
   app-postgres:
     name: app · Postgres suites
@@ -256,6 +259,8 @@ jobs:
           node-version: 22
 
       # The scripts below, and the shape of these jobs, have tests of their own.
+      # app · tests runs them on every pull request too (they are in npm test);
+      # here they run first, so a broken script fails before the 1.6 GB download.
       - name: CI script tests
         if: needs.solana-paths.outputs.run == 'true'
         run: node --test scripts/ci/solana-ci.test.mjs

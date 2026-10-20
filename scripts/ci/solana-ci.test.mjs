@@ -10,7 +10,8 @@
  * program ID its source declares. No test here uses the network: curl and
  * cargo-build-sbf are replaced by stubs on PATH.
  *
- * Run by CI's `solana · test` job: node --test scripts/ci/solana-ci.test.mjs
+ * Part of `npm test`, so CI's app · tests shards run it on every pull request;
+ * `solana · test` also runs it first: node --test scripts/ci/solana-ci.test.mjs
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -277,6 +278,17 @@ describe("the CI jobs", () => {
     assert.equal(greenJobs(docsOnly), true);
     const skipped = docsOnly.map(j => (j.name.startsWith("solana ·") && j.name !== "solana · paths" ? { ...j, conclusion: "skipped" } : j));
     assert.equal(greenJobs(skipped), false, "why the Solana jobs skip their steps, not themselves");
+  });
+
+  it("app · tests runs exactly npm test's file set, these CI script tests included", () => {
+    const quoted = text => [...text.matchAll(/"([^"]+)"/g)].map(m => m[1]);
+    const npmTest = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts.test;
+    assert.match(npmTest, /^tsx --test "/);
+    const shards = steps(job("app-test")).find(s => s.includes("--test-shard=")) ?? "";
+    const command = /^ {8}run: (npx tsx --test --test-shard=\$\{\{ matrix\.shard \}\}\/4 .*)$/m.exec(shards)?.[1] ?? "";
+    assert.ok(command, "app-test has no sharded tsx --test step");
+    assert.deepEqual(quoted(command), quoted(npmTest), "the comment promises the same file set as npm test");
+    assert.ok(quoted(npmTest).includes("scripts/ci/*.test.mjs"), "npm test must run scripts/ci/*.test.mjs");
   });
 
   it("the scripts CI runs directly are executable", () => {
