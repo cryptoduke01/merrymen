@@ -35,6 +35,7 @@
  */
 import { useRef, useState } from "react";
 import { SOLANA_VAULT_RELEASES } from "../../../packages/core/src/solana-live";
+import { SOLANA_VAULT_LOCAL_TEST_PROGRAM } from "../../../packages/core/src/solana-live";
 
 /** Inlined at build time; anything but "1" leaves key export off. */
 export function ownerKeyExportEnabled(): boolean {
@@ -74,6 +75,25 @@ export function solanaVaultReleases(): readonly SolanaVaultRelease[] {
 /** The released binary SHA-256 of `programId`, or null when the tool would not sign for it. */
 export function releasedProgramSha256(programId: string, releases: readonly SolanaVaultRelease[] = solanaVaultReleases()): string | null {
   return releases.find((release) => release.programId === programId)?.sha256 ?? null;
+}
+
+/** Shown instead of registering or funding while the server names a program the page does not trust. */
+export const SOLANA_UNRELEASED_PROGRAM = "The vault program this server names is not a released Merrymen vault program, so this page will not register a permission for it or show a deposit address. Nothing was signed.";
+/**
+ * THE PROGRAM THE PAGE REGISTERS PERMISSIONS FOR AND SHOWS DEPOSIT ADDRESSES OF.
+ *
+ * Only a program in the shared release pin (SOLANA_VAULT_RELEASES), or the
+ * local test program in a build that is not a production build. Never the
+ * server's status answer: the program interprets the limits the page decodes
+ * from the permission's bytes and owns the vault the owner funds, so a
+ * misconfigured MERRYMEN_SOLANA_VAULT_PROGRAM or a compromised server naming
+ * another program would otherwise have owners initialize, register and fund
+ * a vault whose caps no one checked. While nothing is released, a production
+ * build registers nothing.
+ */
+export function pageTrustsVaultProgram(programId: string, releases: readonly SolanaVaultRelease[] = solanaVaultReleases(),
+  production = process.env.NODE_ENV === "production"): boolean {
+  return releasedProgramSha256(programId, releases) !== null || (!production && programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM);
 }
 
 /**

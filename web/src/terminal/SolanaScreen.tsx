@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
-import { CHAINS, SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
+import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
 import { SOLANA_QUOTE_MAX_AGE_MS, SOLANA_REGISTERED_AFTER_REVOKE, type SolanaPaperLimits, type SolanaQuote } from "../../../packages/core/src/solana";
 import type { SolanaPaperSnapshot } from "../../../worker/src/solana-paper-store";
 import type { SolanaBinding } from "@/lib/solana-binding-store";
@@ -11,9 +11,9 @@ import { RequestError, UNREACHABLE } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
 import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, pacedAnswer, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
-import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
+import { ownerKeyExportEnabled, pageTrustsVaultProgram, releasedProgramSha256, SOLANA_UNRELEASED_PROGRAM, SolanaRecovery } from "./SolanaRecovery";
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, secondsUntil, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
-import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
+import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import "./SolanaScreen.css";
@@ -176,6 +176,8 @@ function ConnectedSolana() {
   // The account's wallet was verified with another sign-in (otherSignIn): no wallet to create or verify here.
   const [otherLogin, setOtherLogin] = useState(false);
   const [dust, setDust] = useState<DustLot | null>(null);
+  // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
+  const [depositAccount, setDepositAccount] = useState<string | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
   const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
   const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
@@ -329,6 +331,20 @@ function ConnectedSolana() {
     const timer = setInterval(() => setReviewClock((tick) => tick + 1), 1000);
     return () => clearInterval(timer);
   }, [review]);
+  // A deposit address is shown only when the page derives the same one itself: the bound owner's
+  // vault of a program its own pin trusts (pageTrustsVaultProgram), never the server's word alone.
+  const depositProgram = status?.runtime?.live.programId ?? null, depositOwner = binding?.owner ?? null;
+  useEffect(() => {
+    let current = true;
+    setDepositAccount(null);
+    if (!depositProgram || !depositOwner || !pageTrustsVaultProgram(depositProgram)) return;
+    void (async () => {
+      const vault = await deriveSolanaVaultAddress(depositProgram, depositOwner);
+      const account = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+      if (current) setDepositAccount(account);
+    })().catch(() => undefined);
+    return () => { current = false; };
+  }, [depositProgram, depositOwner]);
   const previewTrade = async () => {
     const intent = tradeIntent(), key = request.current!.key;
     // Timed on this clock from before the request, so a skewed device clock
@@ -473,6 +489,8 @@ function ConnectedSolana() {
     // Exactly the saved limits shown in the live card; the server encodes the saved ones.
     const shown = binding.limits, programId = status?.runtime?.live.programId, blocked = registerBlock();
     if (blocked || !shown || !programId) throw new Error(blocked ?? "Wait for the vault program to be verified before registering.");
+    // The program comes from the server; the page registers only for one its own pin trusts.
+    if (!pageTrustsVaultProgram(programId)) throw new Error(SOLANA_UNRELEASED_PROGRAM);
     discardReview(); setReviewLapsed(false);
     const vault = await deriveSolanaVaultAddress(programId, binding.owner);
     const seed = crypto.getRandomValues(new Uint8Array(32));
@@ -595,6 +613,7 @@ function ConnectedSolana() {
   const liveBook = status?.runtime?.live.book;
   // A vault the server has read, funded or registered: what an owner key backup protects.
   const live = status?.runtime?.live, vaultSeen = !!live && (!!live.balances || !!live.book || !!live.session);
+  const programTrusted = !!live?.programId && pageTrustsVaultProgram(live.programId);
   // The recovery card: only a live binding whose vault the server has read,
   // never a paper binding, never before the status has loaded.
   // OWNER DECISION (the stricter option, as briefed): a paper binding gets no
@@ -680,7 +699,8 @@ function ConnectedSolana() {
         {!!live?.warnings?.length && <ul role="status" aria-label="Warnings" className="solana-warning">{live.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
         {live?.feePayer && Object.hasOwn(FEE_PAYER_LEVELS, live.feePayer.level) && <p>Shared network fee payer: {FEE_PAYER_LEVELS[live.feePayer.level]}{displaySolanaAmountOrNull(live.feePayer.lamports, 9) !== null && ` (${displaySolanaAmountOrNull(live.feePayer.lamports, 9)} SOL)`}. Merrymen pays your trades&apos; network fees from it; your owner wallet pays only for owner transactions.</p>}
         {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span>{status.runtime.live.programId && <> · Program: <span className="solana-address">{status.runtime.live.programId}</span></>}</p>}
-        {status?.runtime?.live.cashTokenAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
+        {live?.programId && !programTrusted && <p role="status">{SOLANA_UNRELEASED_PROGRAM}</p>}
+        {status?.runtime?.live.cashTokenAccount && status.runtime.live.cashTokenAccount === depositAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
         {status?.runtime?.live.balances && <><p className="solana-value">{display(status.runtime.live.balances.cashUsdg)} USDG</p><p>{display(status.runtime.live.balances.wsolRaw, 9)} wrapped SOL · observed at slot {status.runtime.live.balances.slot}</p></>}
         {liveBook && <p>Recorded realized P&amp;L: {display(liveBook.realizedPnlUsdgRaw)} USDG. Network fees: {display(liveBook.networkFeesLamports, 9)} SOL.</p>}
         {liveBook?.quarantinedWsolRaw && liveBook.quarantinedWsolRaw !== "0" && <p role="status">{display(liveBook.quarantinedWsolRaw, 9)} wrapped SOL arrived outside your recorded trades. It is held aside: never traded, never counted in performance, and you can withdraw it.</p>}
@@ -700,7 +720,7 @@ function ConnectedSolana() {
         {!registration && review ? <>
           <button disabled={busy || !sameWallet || !!registerBlock()} onClick={() => void act(signRegistration)}>Sign permission with my wallet</button>
           <button className="solana-secondary" disabled={busy} onClick={discardReview}>Discard prepared permission</button></>
-          : <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && !!registerBlock())} onClick={() => void act(registration ? setupLive : prepareRegistration)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>}
+          : <button disabled={busy || !sameWallet || !binding.limits || !status?.runtime?.live.programId || (!registration && (!!registerBlock() || !programTrusted))} onClick={() => void act(registration ? setupLive : prepareRegistration)}>{registration ? "Finish permission registration" : "Register bounded trading permission"}</button>}
       </div>}
       <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(previewTrade); }}><h2>USDG ↔ wrapped SOL</h2>
         <label>Direction<select disabled={busy} value={side} onChange={(e) => { setSide(e.target.value as "buy" | "sell"); invalidate(); }}><option value="buy">Buy wrapped SOL</option><option value="sell">Sell wrapped SOL</option></select></label>

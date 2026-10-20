@@ -1018,7 +1018,13 @@ list refuses live trading, exits and every app owner action as configuration,
 before any RPC; status still names the program and vault so the recovery card
 can render, and the owner keeps `merrymen solana-recover`. Older releases stay
 listed so their vaults stay usable; a new pin must keep every program owners
-have funded. While the list is empty (today) only the deployment checks apply.
+have funded. While the list is empty (today) only the deployment checks apply
+on the server. The page applies the pin itself, never the server's status
+answer: it registers a permission (initialize and create_session) and shows a
+USDG deposit address (which it derives itself for the bound owner) only for a
+listed program, or for the local test program in a build that is not a
+production build (`pageTrustsVaultProgram` in `web/src/terminal/SolanaRecovery.tsx`).
+So a production build registers nothing until a release is pinned.
 
 ## Build, CI and release
 

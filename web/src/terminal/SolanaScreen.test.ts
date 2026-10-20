@@ -250,6 +250,44 @@ test("registration retries the same signed bytes and bounded seed after an unkno
   assert.equal(ui.dom.window.localStorage.length, 0);
 });
 
+test("registration and the deposit address are offered only for a program the page's own pin trusts, never one the server names alone", async () => {
+  const OTHER = base58Encode(new Uint8Array(32).fill(77));
+  const depositFor = async (program: string) => deriveSolanaAta(await deriveSolanaVaultAddress(program, OWNER), SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  // A server naming a program the pin does not list: no registration, no deposit address, whatever the server says is ready.
+  state = initial("live"); state.binding.limits = liveLimits(); state.runtime.live.programId = OTHER;
+  Object.assign(state.runtime.live, { ready: true, canExit: true, vault: await deriveSolanaVaultAddress(OTHER, OWNER), cashTokenAccount: await depositFor(OTHER) });
+  // A fresh page each time: the pin is fixed at build time, and the page derives the address once per program.
+  const mount = async () => {
+    await ui.remount(React.createElement(SolanaScreen));
+    // Address derivation is asynchronous (WebCrypto); let it settle.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  };
+  await mount();
+  assert.match(ui.container.textContent!, /not a released Merrymen vault program/);
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault"));
+  assert.equal(calls.some((call) => call.path === "setup"), false);
+  // Once the pin lists it, both are offered.
+  releases = [{ programId: OTHER, sha256: "ab".repeat(32) }];
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("not a released Merrymen vault program"));
+  assert.match(ui.container.textContent!, /Fund the Solana vault/);
+  assert.equal(button("Register bounded trading permission").disabled, false);
+  // A deposit address that is not the bound owner's vault of that program is never shown.
+  Object.assign(state.runtime.live, { cashTokenAccount: await depositFor(PROGRAM) });
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault"));
+});
+
+test("the page trusts a released program, and the local test program only outside a production build", async () => {
+  const recovery = createRequire(import.meta.url)(recoveryPath) as typeof import("./SolanaRecovery");
+  const OTHER = base58Encode(new Uint8Array(32).fill(77)), pin = [{ programId: OTHER, sha256: "ab".repeat(32) }];
+  assert.equal(recovery.pageTrustsVaultProgram(OTHER, [], false), false);
+  assert.equal(recovery.pageTrustsVaultProgram(OTHER, pin, true), true);
+  assert.equal(recovery.pageTrustsVaultProgram(PROGRAM, [], false), true);
+  assert.equal(recovery.pageTrustsVaultProgram(PROGRAM, [], true), false);
+});
+
 test("a delayed response from the previous identity never populates a new account view", async () => {
   const old = deferred<Response>();
   let reads = 0;
