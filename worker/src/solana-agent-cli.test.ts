@@ -94,7 +94,9 @@ const LIVE_LIMITS = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPer
 // The strategy's buy is exactly the route's 1 USDG.
 const LIVE_STRATEGY = { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 };
 const SESSION_SEED = new Uint8Array(32).fill(11), FEE_PAYER_SEED = new Uint8Array(32).fill(12), DEK = Buffer.alloc(32, 3);
-const BINARY = Buffer.from("audited-vault-test-binary");
+// The deployed binary declares its own program ID (its 32 bytes appear in it), as a real build of the vault does:
+// the executor refuses a binary that does not (verifySolanaVaultDeployment's requireDeclaredProgramId).
+const BINARY = Buffer.concat([Buffer.from("audited-vault-test-binary"), keyBytes(LIVE_PROGRAM)]);
 const digest = (wire: string) => createHash("sha256").update(wire).digest("hex");
 
 function tokenAccount(mint: string, owner: string, amount: bigint): Buffer {
