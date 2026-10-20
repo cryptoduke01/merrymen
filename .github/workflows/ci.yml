@@ -467,7 +467,7 @@ jobs:
 
   app:
     name: app
-    needs: [app-typecheck, app-build, app-test, app-postgres, solana-paths, solana-test, solana-rebuild]
+    needs: [app-typecheck, app-build, app-test, app-postgres, solana-paths, solana-test, solana-rebuild, brain]
     # Runs even when a part failed, so the required check reports a failure
     # rather than being skipped (a skipped required check never passes).
     if: always()
@@ -481,7 +481,7 @@ jobs:
           VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
           VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
         run: |
-          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana paths: ${{ needs.solana-paths.result }} (build: $SOLANA_BUILD), solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}"
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}, postgres: ${{ needs.app-postgres.result }}, solana paths: ${{ needs.solana-paths.result }} (build: $SOLANA_BUILD), solana test: ${{ needs.solana-test.result }}, solana rebuild: ${{ needs.solana-rebuild.result }}, brain: ${{ needs.brain.result }}"
           # Before the checks below: a program change fails them until its new
           # Linux manifest is committed, and the owner checks that manifest
           # against these two hashes.
@@ -493,6 +493,7 @@ jobs:
           test "${{ needs.solana-paths.result }}" = success
           test "${{ needs.solana-test.result }}" = success
           test "${{ needs.solana-rebuild.result }}" = success
+          test "${{ needs.brain.result }}" = success
           case "$SOLANA_BUILD" in
             true)
               # The vault binary that passed the custody tests is the one the
@@ -629,7 +630,10 @@ jobs:
     # id cases (services/brain/tests/data/onchain_ids.json); the app tests hold
     # the ids.ts half. Without this job, ids.ts and the fixture could change
     # together, CI stay green, and Brain's mirror drift unseen. Python 3.12 as
-    # in Dockerfile.brain; the deps are pyproject's, dev extras included.
+    # in Dockerfile.brain; the deps are pyproject's, dev extras included, each
+    # capped below its next major (services/brain/requirements-ci.txt). A
+    # required part of app: a red brain blocks the merge, as it already closed
+    # the Kaka lane (gate.cjs greenJobs).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -638,7 +642,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install
-        run: python -m pip install --disable-pip-version-check "fastapi>=0.115" "uvicorn>=0.32" "httpx>=0.27" "pydantic>=2.9" "pytest>=8.0" "pytest-asyncio>=0.24"
+        run: python -m pip install --disable-pip-version-check -r services/brain/requirements-ci.txt
 
       # `python -m` puts services/brain on the path, which is how the tests
       # import `brain`.

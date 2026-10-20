@@ -909,7 +909,9 @@ These change Robinhood-facing surfaces and apply whether or not Solana is on.
 
 **Glued ids.** `onchainIdsIn(text, { glued: true })` (core, with Brain's Python
 mirror in `services/brain/brain/onchain_ids.py` pinned to the same answers by
-`services/brain/tests/data/onchain_ids.json`) also finds a Solana key or
+`services/brain/tests/data/onchain_ids.json`, run by CI's `brain` job, a
+required part of `app`, with dependencies capped below their next major in
+`services/brain/requirements-ci.txt`) also finds a Solana key or
 signature written against neighbouring letters or digits (`CA<mint>`,
 `<mint>is`, `tx<sig>done`, `0x<key>`). It reads every maximal base58 run; a run
 is a hit when it, or any window of it, decodes to exactly 32 or 64 bytes. Hex-only

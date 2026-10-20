@@ -349,7 +349,7 @@ describe("the CI jobs", () => {
   });
 
   it("app's script passes exactly the runs it should", () => {
-    const success = { "app-typecheck": "success", "app-build": "success", "app-test": "success", "app-postgres": "success", "solana-paths": "success", "solana-test": "success", "solana-rebuild": "success" };
+    const success = { "app-typecheck": "success", "app-build": "success", "app-test": "success", "app-postgres": "success", "solana-paths": "success", "solana-test": "success", "solana-rebuild": "success", brain: "success" };
     const a = "a".repeat(64), b = "b".repeat(64);
     const cases = [
       ["the vault built, tested and rebuilt to the same bytes", {}, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 0],
@@ -363,6 +363,8 @@ describe("the CI jobs", () => {
       ["solana · test skipped", { "solana-test": "skipped" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
       ["solana · rebuild cancelled", { "solana-rebuild": "cancelled" }, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
       ["an app part failed on a docs-only run", { "app-test": "failure" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
+      // Brain's Python suite (the Python half of the shared on-chain id cases) is a required part too.
+      ["brain failed", { brain: "failure" }, { SOLANA_BUILD: "false", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, 1],
       // A program change before its new Linux manifest is committed: the
       // TypeScript manifest test and solana · test's comparison both fail.
       ["a program change with its manifest not yet committed", { "app-test": "failure", "solana-test": "failure" }, { SOLANA_BUILD: "true", VAULT_TESTED_SHA256: a, VAULT_REBUILT_SHA256: a }, 1],
