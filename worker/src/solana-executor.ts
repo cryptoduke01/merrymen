@@ -15,7 +15,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import { validateJupiterCpi, type JupiterCpiRoute, type SolanaCpiBuildRequest } from "./solana-live-market";
 import { readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
-import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaReferenceBound } from "./solana-reference-price";
+import { solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
 import { isSolanaTransactionError, settleSolanaReceipt, type SolanaVaultEvidence } from "./solana-settlement";
 
 export interface SolanaLiveIntent {
@@ -250,6 +250,8 @@ export interface SolanaExecutorOptions {
     slot: number; observedAtMs: number }): Promise<SolanaLiveRiskEvidence>;
   now?: () => number;
   signal?: AbortSignal;
+  /** The Pyth generation `assessRisk`'s reference must come from: the app runtime's MERRYMEN_SOLANA_PYTH_GENERATION. Default: SOLANA_PYTH_DEFAULT_GENERATION. */
+  pythGeneration?: SolanaPythGeneration;
 }
 const UPGRADEABLE_LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const LOOKUP_PROGRAM = "AddressLookupTab1e1111111111111111111111111";
@@ -690,7 +692,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       // The guaranteed output must clear the independent price floor; a bad,
       // buggy or manipulated build quote cannot sign a sale for dust.
       let reference: SolanaReferenceBound;
-      try { reference = verifySolanaReferenceBound(risk.reference, intent, preparedAtMs); } catch { return fail("risk"); }
+      try { reference = verifySolanaReferenceBound(risk.reference, intent, preparedAtMs, options.pythGeneration); } catch { return fail("risk"); }
       if (reference.reference.slot < prepared.slot || BigInt(route.quote.minOutAmount) < BigInt(reference.minOutFloor)) return fail("risk");
       if (integer(risk.observedAtMs) > preparedAtMs || preparedAtMs - risk.observedAtMs >= 30_000 ||
           integer(risk.slot) < prepared.slot || risk.cashUsdg !== (intent.inputMint === SOLANA_USDG_MINT ? snapshot.inputBalance : snapshot.outputBalance).toString() ||
