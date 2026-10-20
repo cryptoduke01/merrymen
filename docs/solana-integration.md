@@ -817,6 +817,14 @@ npm run solana:hold -- list
 npm run solana:hold -- release 0xTENANT                      # or: release all
 ```
 
+**Turning Solana off.** Hold trading first (`npm run solana:hold -- set all
+--reason "…"`): trades stop within a tick and owners keep revoke, withdraw and
+strategy-off in the app. Then stop the Solana worker service (or unset its
+`MERRYMEN_SOLANA`, which keeps it from starting again). Unset the web's
+`MERRYMEN_SOLANA` last, and only once no owner needs the app's owner controls:
+with it unset every `/api/solana` route answers 404, so an owner's only in-app
+stop left would be "Kill all agents", which also deletes their Robinhood grant.
+
 **Find what is stuck.** `npm run solana:resolve -- pending` lists every live
 trade and signed owner transaction (both owner slots) pending over 3 minutes:
 tenant, what, id, age, vault sequence and the command that shows its evidence.
@@ -974,7 +982,7 @@ redacted errors and no redirects.
 
 | Setting | Where | Default and range | Effect of a bad value |
 |---|---|---|---|
-| `MERRYMEN_SOLANA` | web | unset (off); `1` on | — |
+| `MERRYMEN_SOLANA` | web and Solana worker | unset (off); `1` on | — |
 | `NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT` | web build ARG | empty (off); exactly `1` on | anything else is off |
 | `MERRYMEN_SOLANA_RPC_MAINNET` | web, worker | required; HTTPS | refused |
 | `MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK` | web, worker | required for live; HTTPS, different hostname | live refused |
@@ -1006,7 +1014,11 @@ node --env-file=.env.solana.local node_modules/next/dist/bin/next dev web -H 127
 ```
 
 The web surface is off unless the web server has `MERRYMEN_SOLANA=1`
-([`solana-enabled.ts`](../web/src/lib/solana-enabled.ts)). Without it the
+([`solana-enabled.ts`](../web/src/lib/solana-enabled.ts)), and the Solana
+worker (`start:solana`, `merrymen solana-agent`) refuses to start (exit 78,
+before it opens any storage) unless its own service has it too
+(`solanaWorkerSwitchRefusal`), so the flag means "Solana on" wherever it is
+read. The operator CLIs and `solana:recover` run without it. Without it the
 network switch, the `/solana` screen and Privy's Solana wallets are not
 rendered, `/solana` answers 404, and every `/api/solana` route answers 404
 before sign-in, body parsing or any database read. A page opened at

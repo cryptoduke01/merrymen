@@ -392,3 +392,22 @@ if (childPoint) {
       } finally { raw.close(); }
     });
 }
+
+test("the Solana worker starts only with MERRYMEN_SOLANA=1: unset, it refuses before it opens any storage (review finalise)", async (t) => {
+  const { solanaWorkerSwitchRefusal } = await import("./solana-agent-cli");
+  assert.equal(solanaWorkerSwitchRefusal({ MERRYMEN_SOLANA: "1" }), null);
+  assert.equal(solanaWorkerSwitchRefusal({ MERRYMEN_SOLANA: " 1\n" }), null);
+  for (const value of [undefined, "", "0", "true", "yes"]) assert.match(solanaWorkerSwitchRefusal({ MERRYMEN_SOLANA: value })!, /MERRYMEN_SOLANA is not 1/, String(value));
+  const home = mkdtempSync(path.join(tmpdir(), "solana-worker-off-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, MERRYMEN_HOME: home };
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./solana-agent-cli.ts", import.meta.url))],
+    { cwd: fileURLToPath(new URL("../../", import.meta.url)), env, stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const [code] = await once(child, "exit") as [number | null];
+  assert.equal(code, 78, stderr);
+  assert.match(stderr, /\[solana-worker\] refused: MERRYMEN_SOLANA is not 1/);
+  const { existsSync } = await import("node:fs");
+  assert.equal(existsSync(path.join(home, "solana-accounts.sqlite")), false, "no Solana storage was opened");
+});

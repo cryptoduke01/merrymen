@@ -109,7 +109,7 @@ net.Socket.prototype.connect = function (...args) {
 syncBuiltinESMExports();
 `);
   const env = {
-    MERRYMEN_HOME: home, NO_COLOR: "1", NODE_OPTIONS: `--import=${pathToFileURL(guard).href}`,
+    MERRYMEN_HOME: home, NO_COLOR: "1", NODE_OPTIONS: `--import=${pathToFileURL(guard).href}`, MERRYMEN_SOLANA: "1",
     // Configured but never contacted: the worker has no bindings to trade.
     MERRYMEN_SOLANA_RPC_MAINNET: "https://rpc.example.invalid/",
   };

@@ -18,6 +18,19 @@ function forcedExitCode(signal: unknown): number {
   const known = (STOP_SIGNALS as readonly unknown[]).includes(signal) ? signal as StopSignal : "SIGINT";
   return 128 + constants.signals[known];
 }
+/**
+ * MERRYMEN_SOLANA IS THE ONE SWITCH (review finalise). The web serves Solana
+ * only with MERRYMEN_SOLANA=1 (web/src/lib/solana-enabled.ts); the worker now
+ * starts only with it too, on its own service, so the flag means "Solana on"
+ * wherever it is read and an install that never turned Solana on never runs
+ * strategies. Turning Solana off during an incident is still two steps
+ * (docs/solana-integration.md "Turning Solana off"): `npm run solana:hold --
+ * all` first, which keeps owner controls, never the web flag alone.
+ */
+export function solanaWorkerSwitchRefusal(env: NodeJS.ProcessEnv): string | null {
+  return env.MERRYMEN_SOLANA?.trim() === "1" ? null
+    : "MERRYMEN_SOLANA is not 1 — Solana is off for this deployment, so the Solana worker does not start. Set MERRYMEN_SOLANA=1 for this worker to run it.";
+}
 /** IPC message from `merrymen solana-agent`: one per stop request (press) the command itself received. */
 export const SOLANA_WORKER_STOP_MESSAGE = "merrymen-solana-worker-stop";
 /** After the parent command is gone, how long the current tick may still run before the worker exits anyway. */
@@ -169,13 +182,14 @@ async function main(): Promise<void> {
   guardStdio();
   const args = process.argv.slice(2);
   if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
-    process.stdout.write("merrymen solana-agent\nRuns explicitly enabled Solana rebalancing strategies in each account's selected paper or live mode. Configure the authenticated app, private RPC/Jupiter settings and shared storage first. Live mode additionally requires a verified immutable vault deployment and an owner-approved session.\n"
+    process.stdout.write("merrymen solana-agent\nRuns explicitly enabled Solana rebalancing strategies in each account's selected paper or live mode. It starts only with MERRYMEN_SOLANA=1. Configure the authenticated app, private RPC/Jupiter settings and shared storage first. Live mode additionally requires a verified immutable vault deployment and an owner-approved session.\n"
       + `Stopping: Ctrl+C (or SIGTERM/SIGHUP) stops after the current tick; press it again more than ${SOLANA_WORKER_REPEAT_MS / 1000} s later to force a stop, which the trading store recovers from like a crash. `
       + "If the merrymen command that started the worker is killed, the worker stops after its tick and exits within 60 s.\n");
     return;
   }
   if (args.length) { process.stderr.write("Unsupported Solana worker arguments. Use --help.\n"); process.exitCode = 2; return; }
-  const refusals = hostedSolanaRefusals(process.env);
+  const off = solanaWorkerSwitchRefusal(process.env);
+  const refusals = [...(off === null ? [] : [off]), ...hostedSolanaRefusals(process.env)];
   if (refusals.length) {
     for (const reason of refusals) process.stderr.write(`[solana-worker] refused: ${reason}\n`);
     process.exitCode = EX_CONFIG;
