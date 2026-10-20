@@ -23,8 +23,8 @@ import {
 } from "../../packages/core/src/solana-live";
 import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
-  readSolanaOwnerKey, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust, solanaRecoveryRevokeInstructions,
-  solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
+  isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust,
+  solanaRecoveryRevokeInstructions, solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
 import type { SolanaLiveRpc } from "./solana-live-rpc";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
@@ -527,13 +527,42 @@ describe("solana-recover", () => {
     const noKey = await run(fake, [...base, "--owner", OWNER, "--send"]);
     assert.match((noKey.error as Error).message, /--send needs --key-file/);
     const mismatch = await run(fake, [...base, "--owner", OTHER_OWNER, "--key-file", keyFile(SECRET_BASE58), "--send"]);
-    assert.match((mismatch.error as Error).message, new RegExp(`The key belongs to ${OWNER}, not to --owner ${OTHER_OWNER}`));
+    assert.match((mismatch.error as Error).message, new RegExp(`The key belongs to ${OWNER}, not to the --owner address given`));
+    assert.ok(!(mismatch.error as Error).message.includes(OTHER_OWNER), "the --owner value is not repeated");
     for (const args of [["--rpc", RPC, "--owner", OWNER], ["--program", PROGRAM, "--owner", OWNER], [...base], [...base, "--owner", OWNER, "--program-sha256", "ABC"]]) {
       assert.ok((await run(fake, args)).error instanceof SolanaRecoverError, args.join(" "));
     }
     const insecure = await run(fake, ["--program", PROGRAM, "--rpc", "http://rpc.example.test/", "--owner", OWNER]);
     assert.ok(insecure.error instanceof SolanaRpcError);
     assert.deepEqual(fake.calls, []);
+  });
+
+  it("refuses an --owner that is not a wallet address (a pasted seed, a vault address) without showing or sending it", async () => {
+    // About half of all random 32-byte seeds are not curve points; take the first such one.
+    let seed = "";
+    for (let i = 0; !seed; i++) {
+      const bytes = new Uint8Array(createHash("sha256").update(`pasted-seed-${i}`).digest());
+      try { ed25519.Point.fromBytes(bytes); } catch { seed = base58Encode(bytes); }
+    }
+    const fake = await chain();
+    assert.equal(isSolanaWalletAddress(OWNER), true);
+    assert.equal(isSolanaWalletAddress(fake.vault), false, "a vault is a program-derived address, off the curve");
+    assert.equal(isSolanaWalletAddress(`${OWNER}1`), false);
+    for (const [value, extra] of [[seed, []], [seed, ["--key-file", keyFile(SECRET_BASE58), "--send"]], [fake.vault, []]] as const) {
+      const { error, out, warnings } = await run(fake, [...base, "--owner", value, ...extra]);
+      assert.ok(error instanceof SolanaRecoverError, String(error));
+      assert.match(error.message, /--owner must be your Solana wallet address \(its public key\), and the value given is not one\. It was not used, shown or sent anywhere/);
+      assert.match(error.message, /clear it from your shell history/);
+      for (const text of [error.message, out, warnings, String(error.stack)]) assert.ok(!text.includes(value), "the value was shown");
+      assert.deepEqual(fake.calls, [], "refused before any network call");
+      assert.equal(fake.sent.length, 0);
+    }
+    // The tool's own entry point refuses it as well, before any RPC call.
+    let reads = 0;
+    const counting = { read: async () => { reads++; throw new Error("no RPC"); }, send: async () => { reads++; return ""; } } as unknown as SolanaLiveRpc;
+    await assert.rejects(runSolanaRecovery({ rpc: counting, programId: PROGRAM, owner: seed, send: false, releases: RELEASED }, { log: () => {}, sleep: async () => {} }),
+      (error: unknown) => error instanceof SolanaRecoverError && /must be a Solana wallet address/.test(error.message) && !error.message.includes(seed));
+    assert.equal(reads, 0);
   });
 
   it("warns about a key file other users can read", { skip: process.platform === "win32" }, async () => {

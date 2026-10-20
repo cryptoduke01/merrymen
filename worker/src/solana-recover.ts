@@ -31,6 +31,7 @@ import {
   getBase64EncodedWireTransaction, getSignatureFromTransaction, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, signTransaction, type Blockhash, type Instruction,
 } from "@solana/kit";
+import { ed25519 } from "@noble/curves/ed25519";
 import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
@@ -103,6 +104,19 @@ function canonical(value: string, what: string): string {
   const bytes = base58Decode(value);
   if (!bytes || bytes.length !== 32 || base58Encode(bytes) !== value) fail(`The ${what} must be a canonical Solana public key.`);
   return value;
+}
+
+/**
+ * True for a canonical base58 Solana address that is a point on the ed25519
+ * curve: every wallet that can sign (and so own a vault) has one. Program
+ * derived addresses are off the curve, and so are about half of all random
+ * 32-byte strings, such as a pasted secret seed.
+ */
+export function isSolanaWalletAddress(value: string): boolean {
+  const bytes = base58Decode(value);
+  if (!bytes || bytes.length !== 32 || base58Encode(bytes) !== value) return false;
+  // Strict RFC 8032 decoding (no ZIP-215 leniency): the y coordinate must be canonical.
+  try { ed25519.Point.fromBytes(bytes, false); return true; } catch { return false; }
 }
 
 /**
@@ -467,7 +481,9 @@ export interface SolanaRecoveryResult {
 
 export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: SolanaRecoveryIo): Promise<SolanaRecoveryResult> {
   const { rpc, programId, owner } = options;
-  canonical(programId, "program ID"); canonical(owner, "owner");
+  canonical(programId, "program ID");
+  // Before any RPC call, and never echoed: a value that is not a wallet address may be a pasted secret.
+  if (!isSolanaWalletAddress(owner)) fail("The owner must be a Solana wallet address (an ed25519 public key). Nothing was sent.");
   if (options.send && !options.keyPair) fail("Sending needs the owner's key (--key-file).");
   // Before any RPC call: nothing is signed for a program that is not verified.
   const trust = solanaRecoveryProgramTrust(options);

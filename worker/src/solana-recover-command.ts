@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { base58Decode } from "../../packages/core/src/ids";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import {
-  readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
+  isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
   type SolanaRecoveryResult, type SolanaVaultRelease,
 } from "./solana-recover";
 
@@ -40,6 +40,7 @@ re-reads the chain first.
 The key is your exported Solana wallet secret key (base58, or a
 solana-keygen JSON file). It is read only from the file or standard input,
 never from the command line, and is never printed, logged or sent anywhere.
+--owner takes the wallet's address (its public key), never a secret.
 Delete the key file when you are done. PROGRAM_ID is the program shown
 next to your vault in Merrymen (the owner of the vault account). The RPC
 must be a mainnet-beta HTTPS endpoint you trust; the owner pays the fees.`;
@@ -126,6 +127,12 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   if (!rpcUrl) throw new SolanaRecoverError("--rpc is required: a mainnet-beta HTTPS RPC endpoint you trust.");
   if (send && !keyFile) throw new SolanaRecoverError("--send needs --key-file PATH (or --key-file - for standard input).");
   if (!keyFile && !expectedOwner) throw new SolanaRecoverError("Give --owner PUBLIC_KEY for a plan, or --key-file to derive it from your key.");
+  // Checked before anything is read or contacted, and never echoed: a value
+  // that is not a wallet address may be a pasted 32-byte secret seed.
+  if (expectedOwner !== undefined && !isSolanaWalletAddress(expectedOwner)) {
+    throw new SolanaRecoverError("--owner must be your Solana wallet address (its public key), and the value given is not one. It was not used, "
+      + "shown or sent anywhere. If you pasted a secret key or seed there, clear it from your shell history and treat that key as exposed.");
+  }
   const sha = text("program-sha256");
   if (sha !== undefined && !/^[a-f0-9]{64}$/.test(sha)) throw new SolanaRecoverError("--program-sha256 must be 64 lowercase hex characters.");
   const allowUnlistedProgram = flags["unlisted-program"] === true;
@@ -139,7 +146,8 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   if (keyFile) {
     key = await readSolanaOwnerKey(await readKeyText(keyFile, deps));
     if (expectedOwner !== undefined && expectedOwner !== key.owner) {
-      throw new SolanaRecoverError(`The key belongs to ${key.owner}, not to --owner ${expectedOwner}. Nothing was sent.`);
+      // The key's own address only: the --owner value is not repeated.
+      throw new SolanaRecoverError(`The key belongs to ${key.owner}, not to the --owner address given. Nothing was sent.`);
     }
   }
   const log = deps.log ?? ((line: string) => console.log(line));
