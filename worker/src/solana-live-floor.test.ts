@@ -52,9 +52,7 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
-async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
-  /** Serve the chain as two agreeing providers (readEach), as reconciling a recorded trade requires. */
-  quorum?: boolean }) {
+async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -124,7 +122,6 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     switch (method) {
       case "getSlot": return SLOT;
       case "getBlockHeight": return 900;
-      case "getEpochInfo": return { absoluteSlot: SLOT, blockHeight: 900 };
       case "getAccountInfo": {
         const [k, cfg] = params as [string, { dataSlice?: { offset: number; length: number } }];
         if (k === PROGRAM) return response(rpcAccount(program, LOADER, true));
@@ -151,8 +148,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
       default: return assert.fail(`unexpected live RPC ${method}`);
     }
   };
-  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => { sends.push(wire); return "sent"; },
-    ...(opts.quorum ? { readEach: async <T>(fn: (rpc: SolanaLiveRead) => Promise<T>) => [await fn(read), await fn(read)] } : {}) };
+  const rpc: SolanaLiveRpc = { read: fn => fn(read), send: async wire => { sends.push(wire); return "sent"; } };
   const quote = async (i: { inputMint: string; outputMint: string; amountRaw: string; slippageBps: number }) => {
     const out = opts.mark === "dust" ? 1n : fairOut(i.inputMint, BigInt(i.amountRaw));
     return { source: "jupiter" as const, inputMint: i.inputMint, outputMint: i.outputMint, inAmount: i.amountRaw, outAmount: out.toString(),
@@ -178,8 +174,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     hwmRaw: (opts.cash + basis).toString(), cashRaw: opts.cash.toString(), wsolRaw: opts.wsol.toString(), costBasisUsdgRaw: basis.toString(),
     realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: NOW - 5000 }));
   if (opts.strategy) { const b = (await bindings.get(TENANT))!; await bindings.strategy(TENANT, owner, b.revision, opts.strategy as never); }
-  // `runtime(more)`: an app runtime on the same database, chain and clock whose env adds `more`.
-  const runtime = (more: Record<string, string> = {}) => createSolanaAppRuntime({ db, rpc, market, env: { ...env, ...more }, now: () => clock.now }), app = runtime();
+  // `runtime(more, via)`: an app runtime on the same database, chain and clock whose env adds `more`, reading through `via` (default: the chain itself).
+  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc) => createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app) => createSolanaAgent({ db, runtime, market, now: () => clock.now });
@@ -435,9 +431,13 @@ test("a signed trade whose bound came from one generation is refused at admissio
 
 test("a retry of an admitted live trade returns it before any reference setting is checked: a bad or switched setting never blocks the replay", async t => {
   processGeneration(t, undefined);
-  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, quorum: true });
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  // Reconciling a recorded trade asks two agreeing providers (readEach), each for its finalized epoch too.
+  const one: SolanaLiveRpc["read"] = fn => f.rpc.read(read => fn(async (method, params) =>
+    method === "getEpochInfo" ? { absoluteSlot: SLOT, blockHeight: 900 } : read(method, params)));
+  const two: SolanaLiveRpc = { ...f.rpc, read: one, readEach: async fn => [await one(fn), await one(fn)] };
   const input = { mode: "live" as const, intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "admitted-then-retried") };
-  const placed = await f.app.trade(f.scope, input);
+  const placed = await f.runtime({}, two).trade(f.scope, input);
   assert.ok("status" in placed && placed.status === "pending");
   const [admitted] = await f.submissions();
   assert.equal(admitted!.submission.risk.reference.reference.account, CURRENT.account);
@@ -449,7 +449,7 @@ test("a retry of an admitted live trade returns it before any reference setting 
     const label = JSON.stringify(more), sendsBefore = f.sends.length;
     await clearReferenceAlerts();
     let again: Awaited<ReturnType<typeof f.app.trade>> | undefined;
-    const said = await referenceAlerts(t, async () => { again = await f.runtime(more).trade(f.scope, input); });
+    const said = await referenceAlerts(t, async () => { again = await f.runtime(more, two).trade(f.scope, input); });
     // The prior trade, reconciled and returned: the setting is never consulted, so nothing is said either.
     assert.ok(again && "signature" in again, label);
     assert.deepEqual([again.signature, again.status, again.requestId], [placed.signature, "pending", "admitted-then-retried"], label);
