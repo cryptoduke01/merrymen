@@ -138,15 +138,42 @@ export class SqlSolanaBindingStore implements SolanaBindingStore {
     if (saved.changes !== 1) throw new SolanaBindingError("stale");
     return (await this.get(tenant))!;
   }
+  /**
+   * THE KILL PATHS' DATABASE, or null when Solana was never used here.
+   *
+   * Robinhood's "kill all agents" and Telegram /kill call the two methods
+   * below for every tenant, MERRYMEN_SOLANA on or off. database() writes the
+   * schema (under an advisory lock on Postgres), so a kill would create Solana
+   * tables in a production database that never ran Solana, and a fault there
+   * would report a Robinhood kill incomplete. So the table is looked up first,
+   * read-only, with no lock and no DDL (to_regclass on Postgres, which resolves
+   * the unqualified name on this connection's search path as every query here
+   * does; sqlite_master on SQLite). Absent, no strategy can exist and there is
+   * nothing to stop. Present (or already set up by this process), database()
+   * runs as before, and a failure still fails the kill.
+   */
+  private async killDb(): Promise<Db | null> {
+    if (!this.ready) {
+      const db = await this.connect();
+      const row = await db.prepare(this.dialect === "postgres"
+        ? "SELECT to_regclass('solana_wallet_bindings') IS NOT NULL AS found"
+        : "SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'solana_wallet_bindings'").get() as { found?: unknown } | undefined;
+      if (row?.found !== true && row?.found !== 1) return null;
+    }
+    return this.database();
+  }
   async strategyTenants(): Promise<`0x${string}`[]> {
-    const rows = await (await this.database()).prepare("SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL ORDER BY tenant").all() as Array<{ tenant: string }>;
+    const db = await this.killDb();
+    if (!db) return [];
+    const rows = await db.prepare("SELECT tenant FROM solana_wallet_bindings WHERE strategy_json IS NOT NULL ORDER BY tenant").all() as Array<{ tenant: string }>;
     return rows.map((row) => { tenantKey(row.tenant); return row.tenant; });
   }
   async disableForKill(tenant: `0x${string}`): Promise<boolean> {
     tenantKey(tenant);
     const nowMs = this.now();
     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new SolanaBindingError("invalid");
-    const db = await this.database();
+    const db = await this.killDb();
+    if (!db) return false;
     return db.tx(async (tx) => {
       // The same row lock trade admission takes. The revision bump below fences
       // any autonomous admission already in flight, whatever revision it read.
