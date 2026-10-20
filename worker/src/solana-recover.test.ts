@@ -82,7 +82,7 @@ function tokenData(mint: string, authority: string, amount: bigint, options: { n
 /** A fake mainnet that executes recovery transactions with the program's constraints. */
 /** Blocks the finalized commitment trails the tip by. */
 const FINALITY_LAG = 32;
-type Behavior = "land" | "drop" | "fail" | "reject" | "late";
+type Behavior = "land" | "drop" | "fail" | "reject" | "late" | "hidden";
 class FakeChain {
   accounts = new Map<string, Account>();
   slot = 1_000; height = 5_000;
@@ -96,9 +96,16 @@ class FakeChain {
    * Per transaction, in the order first submitted: land (default, at once), drop
    * (accepted, never lands), fail (lands with an error), reject (refused every
    * time, as by a failed simulation) or late (accepted, lands one block before
-   * its blockhash expires). Rebroadcasts of identical bytes are the same transaction.
+   * its blockhash expires) or hidden (lands at once, but every status read
+   * answers null until the finalized block height is past its last valid block
+   * height, like an RPC whose status index lags). Rebroadcasts of identical
+   * bytes are the same transaction.
    */
   behaviors: Behavior[] = [];
+  /** Last valid block height of each transaction, by signature, from its first submission. */
+  lastValidOf = new Map<string, number>();
+  /** Hidden transactions: their status reads answer null while the finalized height is at or below this. */
+  hiddenUntil = new Map<string, number>();
   behaviorOf = new Map<string, Behavior>();
   pending = new Map<string, { instructions: Decoded[]; landAt: number; lastValid: number }>();
   /** Last valid block height of every blockhash handed out. */
@@ -205,6 +212,8 @@ class FakeChain {
         return reply({ context: { slot: this.slot }, value: { blockhash, lastValidBlockHeight: this.height + 150 } });
       }
       case "getSignatureStatuses": {
+        const hidden = this.hiddenUntil.get(p[0][0]);
+        if (hidden !== undefined && this.height - FINALITY_LAG <= hidden) return reply({ context: { slot: this.slot }, value: [null] });
         const status = this.statuses.get(p[0][0]);
         if (!status) return reply({ context: { slot: this.slot }, value: [null] });
         // Only the owner tool's polls (with history search) count; the transport's rebroadcast checks do not.
@@ -230,7 +239,9 @@ class FakeChain {
         // whose blockhash expired, is refused.
         if (this.statuses.has(signature)) return error();
         const lastValid = this.blockhashes.get(blockhash);
+        if (lastValid !== undefined && !this.lastValidOf.has(signature)) this.lastValidOf.set(signature, lastValid);
         if (lastValid === undefined || this.height > lastValid) return error();
+        if (behavior === "hidden") this.hiddenUntil.set(signature, lastValid);
         if (behavior === "reject") return error();
         if (behavior === "drop") return reply(signature);
         if (behavior === "late") {
@@ -242,7 +253,7 @@ class FakeChain {
         try { for (const ix of instructions) this.execute(ix); }
         catch { this.accounts = snapshot; return error(); }
         this.accounts = snapshot;
-        this.land(signature, instructions, behavior);
+        this.land(signature, instructions, behavior === "fail" ? "fail" : "land");
         return reply(signature);
       }
       default: throw new Error(`unexpected RPC method ${body.method}`);
@@ -620,6 +631,32 @@ describe("solana-recover", () => {
     const pending = await run(slow, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
     assert.match((pending.error as Error).message, /Step 1 \(revoke_all\) is not finalized yet .* re-reads the chain first/);
     assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
+  });
+
+  it("keeps waiting on a null status until the finalized height is past the blockhash's last valid height", async () => {
+    // The revoke lands at once, but every status read answers null until the
+    // finalized height passes its lifetime: a null status with the finalized
+    // height at or below lastValidBlockHeight proves nothing, so it must wait.
+    const fake = await chain();
+    fake.behaviors = ["hidden"];
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { pollMs: 400 });
+    assert.equal(error, null, String(error));
+    assert.match(out, /Step 1 \(revoke_all\): finalized/);
+    assert.doesNotMatch(out, /expired/);
+    assert.equal(fake.sent.length, 4, "the withdrawals followed the revoke");
+    const revoke = fake.sent[0]!.signature;
+    assert.ok(fake.height - FINALITY_LAG > fake.lastValidOf.get(revoke)!, "it waited until the finalized height passed the lifetime");
+  });
+
+  it("calls a transaction expired only on a null status once the finalized height is past its last valid height", async () => {
+    const fake = await chain();
+    fake.behaviors = ["drop"];
+    const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { pollMs: 400 });
+    assert.match((error as Error).message, /Step 1 \(revoke_all\) expired without landing/);
+    const lastValid = fake.lastValidOf.get(fake.sent[0]!.signature)!;
+    // Nothing advanced the chain after the deciding poll: its finalized height is the current one.
+    assert.equal(fake.height - FINALITY_LAG, lastValid + 1, "expired at the first finalized height past the lifetime, not before");
+    assert.equal(fake.sent.length, 1);
   });
 
   it("skips USDG when the owner's own USDG account is frozen, and still recovers WSOL and SOL", async () => {
