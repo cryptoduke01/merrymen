@@ -565,7 +565,9 @@ export function secretScanBudget(opts: { windows?: boolean } = {}): SecretScanBu
  * secrets are, as offsets, under the SHA-256 of its UTF-16 code units, so the
  * memo holds neither the text nor any secret in it. A scan handed a budget is
  * never remembered (its answer depends on what the budget had left), nor is
- * a scan that threw. The oldest of SECRET_MEMO_ENTRIES goes first.
+ * a scan that threw, nor a text with no base58 run of 64 characters (prose,
+ * byte arrays alone), which costs less to scan than to digest. The oldest of
+ * SECRET_MEMO_ENTRIES goes first.
  */
 const SECRET_MEMO_CHARS = 4_096;
 const SECRET_MEMO_ENTRIES = 1_024;
@@ -712,8 +714,9 @@ function shortestKeypairIn(run: string): number {
 export function solanaSecretsIn(text: unknown, budget?: SecretScanBudget): string[] {
   if (typeof text !== "string" || text.length < 64) return [];
   try {
-    // A fresh scan of a short text is remembered (SECRET_MEMO_CHARS): the same answer, without the work.
-    const key = budget === undefined && text.length <= SECRET_MEMO_CHARS ? secretMemoKey(text) : null;
+    // A fresh scan of a short text is remembered (SECRET_MEMO_CHARS): the same answer, without the work. Not a
+    // text with no base58 run long enough to hold a key: its scan costs less than the digest.
+    const key = budget === undefined && text.length <= SECRET_MEMO_CHARS && !base58Runs(text, 64).next().done ? secretMemoKey(text) : null;
     let spans = key === null ? undefined : secretMemo.get(key);
     if (spans) {
       secretMemo.delete(key!);
