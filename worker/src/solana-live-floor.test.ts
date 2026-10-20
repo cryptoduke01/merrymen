@@ -833,7 +833,7 @@ test("a first live book's balances and slot come from both providers: a phantom 
   }
 });
 
-test("a live trade reads the vault no earlier than the book and the latest finalized owner transaction, so a lagging provider signs nothing", async t => {
+test("a live trade reads the vault no earlier than the book and the latest finalized owner transaction, and every provider must show its sequence, so a lagging provider signs nothing", async t => {
   // The fixture's providers answer at SLOT. A native SOL withdrawal finalized past it (withdraw-sol moves no book slot).
   for (const [finalizedSlot, admitted] of [[SLOT + 500, false], [SLOT - 1, true]] as const) {
     const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
@@ -847,6 +847,30 @@ test("a live trade reads the vault no earlier than the book and the latest final
     await assert.rejects(trade, /refused: invalid-state/);
     assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
   }
+  // The owner then prepares another owner transaction and abandons it: the setup row, the only record of the withdrawal's
+  // slot, is replaced. The withdrawal consumed sequence 0, so the vault is at sequence 1; the primary still lags behind it
+  // (sequence 0 at SLOT) and the fallback has it. Every provider is asked for the vault's sequence at the prepared slot,
+  // so the lagging primary's snapshot signs nothing.
+  const replaced = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const abandoned = { kind: "resume-buys", transactionBase64: "dGVzdA==", messageBase64: "dGVzdA==", blockhash: "11111111111111111111111111111111", lastValidBlockHeight: "800",
+    programId: PROGRAM, vault: replaced.vault, session: "11111111111111111111111111111111", limits, preparedAtMs: NOW - 1_000, expiresAtMs: NOW + 59_000,
+    priorVaultExisted: true, priorSequence: "1", priorSessionEpoch: "1" };
+  await replaced.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, replaced.scope.owner, JSON.stringify(abandoned));
+  const current = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) =>
+    method === "getAccountInfo" && params[0] === replaced.vault ? { context: { slot: SLOT }, value: rpcAccount(replaced.vaultState(1n), PROGRAM) } : read(method, params);
+  await assert.rejects(replaced.runtime({}, split(replaced, undefined, current)).trade(replaced.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-abandoned-prepare") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await replaced.submissions(), []); assert.equal(replaced.sends.length, 0);
+  // So does a provider showing the session revoked meanwhile (a later epoch at the same sequence).
+  const revokedEpoch = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  const revoked = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    if (method !== "getAccountInfo" || params[0] !== revokedEpoch.vault) return read(method, params);
+    const bytes = revokedEpoch.vaultState(0n); bytes.writeBigUInt64LE(2n, 74); // discriminator, version, bump, owner, session: the epoch follows
+    return { context: { slot: SLOT }, value: rpcAccount(bytes, PROGRAM) };
+  };
+  await assert.rejects(revokedEpoch.runtime({}, split(revokedEpoch, undefined, revoked)).trade(revokedEpoch.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "after-revoke") }),
+    /refused: invalid-state/);
+  assert.deepEqual(await revokedEpoch.submissions(), []); assert.equal(revokedEpoch.sends.length, 0);
   // The book's own slot is a floor too.
   const ahead = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   const row = await ahead.db.prepare("SELECT book_json FROM solana_runtime_live_books").get() as { book_json: string };

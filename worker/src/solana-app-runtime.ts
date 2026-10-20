@@ -17,7 +17,7 @@ import {
 } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultBalancesQuorum, readSolanaVaultBalancesWith,
-  readSolanaVaultState, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaQuorumSlot, verifySolanaVaultDeployment,
+  readSolanaVaultState, readSolanaVaultStateWith, reconcileSolanaSubmission, SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, solanaQuorumSlot, verifySolanaVaultDeployment,
   type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
 import { createSolanaLiveMarket } from "./solana-live-market";
 import { createSolanaLiveRpc, readSolanaEachProvider, readSolanaPriorityFee, readSolanaQuorum, type SolanaLiveRead, type SolanaLiveRpc } from "./solana-live-rpc";
@@ -993,28 +993,36 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner), liveRpc = rpc(), quotes = market();
       // The vault is read no earlier than the book and the latest owner transaction seen to finalize: a lagging
       // provider cannot hand the executor a sequence a withdrawal already consumed (withdraw-sol moves no book slot).
+      // That setup is the only record of its slot, and the owner's next prepare replaces it; assessRisk below
+      // therefore also asks every provider for the vault's sequence, so one lagging provider alone signs nothing.
       const bookNow = await s.liveBook(), ownerNow = await s.setup();
       const minSnapshotSlot = Math.max(bookNow?.slot ?? 1, ownerNow?.status === "finalized" && Number.isSafeInteger(ownerNow.finalizedSlot) && ownerNow.finalizedSlot! > 0 ? ownerNow.finalizedSlot! : 1);
       const executor = createSolanaExecutor({ programId: cfg.programId, programBinarySha256: cfg.hash, pythGeneration, referenceToleranceBps: toleranceBps, minSnapshotSlot,
         sessionKeyPair, feePayerKeyPair: await payer(), rpc: liveRpc, market: createSolanaLiveMarket({ env, rpc: liveRpc, now }),
         journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
-        assessRisk: async ({ intent: current, quote, slot }) => {
+        assessRisk: async ({ intent: current, quote, slot, vaultState }) => {
           const observedAtMs = now();
           // Every provider, each at or after the prepared slot, in one session apiece: the vault's balances,
           // which must agree (one provider cannot show a phantom balance), the slot admission may persist
           // (the lowest any answered at, never one provider's own: solanaQuorumSlot), and the Pyth price that
           // bounds this trade, of which the stricter is used. Either provider's refusal refuses the trade.
-          let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice }>;
+          let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice; seq: bigint; sessionEpoch: bigint }>;
           try {
             views = await readSolanaEachProvider(liveRpc, read => caughtUp(async () => {
               const held = await readSolanaVaultBalancesWith(read, vault, slot);
+              const { seq, sessionEpoch } = await readSolanaVaultStateWith(read, cfg.programId, vault, scope.owner, slot);
               const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
-              return { ...held, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
+              return { ...held, seq, sessionEpoch, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
             }));
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           if (views.some(view => view.cashUsdg !== views[0]!.cashUsdg || view.wsolRaw !== views[0]!.wsolRaw)) throw new SolanaExecutionError("invalid-state");
+          // The swap is signed against the snapshot's sequence and session epoch, read from one provider. Any provider
+          // showing the vault otherwise at or after the prepared slot means that read was stale (an owner withdrawal
+          // consumed the sequence, audit live-M1 trigger b) or the vault moved since: the signed bytes could never
+          // run and would sit pending for an operator. Refused before anything is signed; the next attempt reads afresh.
+          if (views.some(view => view.seq !== vaultState.seq || view.sessionEpoch !== vaultState.sessionEpoch)) throw new SolanaExecutionError("invalid-state");
           const balances = { slot: solanaQuorumSlot(views), cashUsdg: views[0]!.cashUsdg, wsolRaw: views[0]!.wsolRaw };
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,
             mode: "paper", requestId, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: current.slippageBps });

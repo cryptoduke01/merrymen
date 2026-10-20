@@ -279,7 +279,8 @@ export interface SolanaExecutorOptions {
    * transaction finalized at. A provider whose bank is behind it errors instead
    * of answering with the vault from before them, so nothing is signed against
    * a sequence an owner withdrawal already consumed (audit live-M1, trigger b).
-   * Default 1.
+   * The app runtime's assessRisk also refuses unless every provider shows the
+   * snapshot's sequence and session epoch at the prepared slot. Default 1.
    */
   minSnapshotSlot?: number;
 }
@@ -385,6 +386,15 @@ export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string
     if (state.owner !== owner) return fail();
     return { vault, slot: raw.slot, state };
   });
+}
+/** One provider's confirmed state of `owner`'s vault at or after `minContextSlot`, in its own read session. */
+export async function readSolanaVaultStateWith(read: SolanaLiveRead, programId: string, vault: string, owner: string, minContextSlot: number): Promise<SolanaVaultState> {
+  const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
+  const data = account(raw.value);
+  if (data.owner !== programId || data.executable) return fail();
+  const state = decodeSolanaVaultAccount(data.data);
+  if (state.owner !== owner) return fail();
+  return state;
 }
 export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
   return rpc.read(read => readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment));
