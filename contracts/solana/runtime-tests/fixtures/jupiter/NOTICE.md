@@ -35,11 +35,12 @@ Before this directory was first pushed, option (c) was chosen of the three
 considered: keep the Apache-2.0 SPL programs here and supply Jupiter's and
 Whirlpool's out of band. (Option (a) would have published Jupiter's binary, for which
 no licence is granted, and Whirlpool's, whose licence was not checked; option (b)
-would have moved the SPL copies out too.) Neither third-party file was ever committed:
-deleting one later would have left it in git history.
+would have moved the SPL copies out too.) Neither third-party file is in this
+repository's history: deleting one later would have left it there.
 
-`programs.json` stays here and pins every byte, wherever the copies live: a missing
-or different file fails the test, never skips it. The test reads all five ELFs from
+`programs.json` stays here and pins every byte, wherever the copies live: once the
+fork test runs, a missing or different file fails it, never skips it (only `test.sh`
+decides whether it runs, below). The test reads all five ELFs from
 the directory `MERRYMEN_JUPITER_FORK_PROGRAMS` names, or from this one when it is
 unset or empty. To supply them, either:
 
