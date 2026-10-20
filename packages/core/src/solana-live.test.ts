@@ -866,3 +866,41 @@ describe("Solana custody build manifest", () => {
     assert.equal(run.stdout.trim(), contractSourceDigest());
   });
 });
+
+describe("Solana vault release pin", () => {
+  it("lists only well-formed releases, one per program, never the local test program", () => {
+    assert.ok(Object.isFrozen(live.SOLANA_VAULT_RELEASES));
+    const seen = new Set<string>();
+    for (const release of live.SOLANA_VAULT_RELEASES) {
+      const bytes = base58Decode(release.programId);
+      assert.ok(
+        bytes && bytes.length === 32 && base58Encode(bytes) === release.programId,
+        release.programId,
+      );
+      assert.notEqual(release.programId, live.SOLANA_VAULT_LOCAL_TEST_PROGRAM);
+      assert.match(release.sha256, /^[0-9a-f]{64}$/);
+      assert.ok(!seen.has(release.programId), `${release.programId} listed twice`);
+      seen.add(release.programId);
+    }
+  });
+  it("accepts only a listed program with its released hash, and checks nothing before a release", () => {
+    const listed = base58Encode(new Uint8Array(32).fill(8));
+    const other = base58Encode(new Uint8Array(32).fill(9));
+    const pin = [{ programId: listed, sha256: "1".repeat(64) }];
+    assert.equal(live.solanaVaultReleaseRefusal(listed, "1".repeat(64), pin), null);
+    assert.match(
+      live.solanaVaultReleaseRefusal(other, "1".repeat(64), pin) ?? "",
+      /^The configured Solana vault program is not a released Merrymen vault program\.$/,
+    );
+    assert.match(
+      live.solanaVaultReleaseRefusal(listed, "2".repeat(64), pin) ?? "",
+      /^The configured Solana vault binary hash is not the released hash of that program\.$/,
+    );
+    assert.equal(live.solanaVaultReleaseRefusal(other, "2".repeat(64), []), null);
+    // The shipped pin is the default.
+    assert.equal(
+      live.solanaVaultReleaseRefusal(other, "2".repeat(64)) === null,
+      live.SOLANA_VAULT_RELEASES.length === 0,
+    );
+  });
+});

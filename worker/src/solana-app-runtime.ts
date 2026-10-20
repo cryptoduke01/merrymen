@@ -15,6 +15,7 @@ import {
   SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_LOCAL_TEST_PROGRAM,
   SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
+import { solanaVaultReleaseRefusal } from "../../packages/core/src/solana-live";
 import type { Db } from "./db";
 import { createSolanaExecutor, parseSolanaLiveIntent, readSolanaOwnerRefundBlocks, type SolanaOwnerRefundBlock, readSolanaVaultBalances, readSolanaVaultState, reconcileSolanaSubmission,
   SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE, solanaComputeBudgetInstructions, SolanaExecutionError, verifySolanaVaultDeployment, type SolanaLiveJournal, type SolanaLiveRecord } from "./solana-executor";
@@ -250,6 +251,8 @@ export interface SolanaAppRuntimeOptions {
    * getSolanaAppRuntime() always runs the full checks.
    */
   localTestDeployment?: boolean;
+  /** Test harnesses only: the released vault programs config() holds a live deployment to. Default SOLANA_VAULT_RELEASES. */
+  vaultReleases?: readonly { readonly programId: string; readonly sha256: string }[];
   /** How long an owner transaction waits for its best-effort priority-fee reads. Default SOLANA_OWNER_FEE_READ_MS. */
   ownerFeeReadMs?: number;
 }
@@ -271,6 +274,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     try { address(programId); } catch { fail("The configured Solana vault program is invalid.", "configuration"); }
     // The local test build's id is never a live deployment.
     if (programId === SOLANA_VAULT_LOCAL_TEST_PROGRAM && !localTest) fail("The configured Solana vault program is the local test id, which is never used for live trading.", "configuration");
+    // Once a release is pinned (SOLANA_VAULT_RELEASES), only a listed program with its released
+    // binary hash, the one the owner recovery tool trusts, is a live deployment. Before any RPC.
+    const unreleased = localTest ? null : solanaVaultReleaseRefusal(programId, hash, options.vaultReleases);
+    if (unreleased) fail(unreleased, "configuration");
     return { programId, hash };
   }
   /**

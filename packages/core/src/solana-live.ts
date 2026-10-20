@@ -18,9 +18,32 @@ export const SOLANA_VAULT_LOCAL_TEST_PROGRAM =
  * (merrymen solana-recover) signs by default only for a program listed here,
  * after checking that its immutable binary matches. Empty until a release: a
  * release adds one frozen entry, reviewed, and it must match the deployment's
- * MERRYMEN_SOLANA_VAULT_PROGRAM and MERRYMEN_SOLANA_VAULT_PROGRAM_SHA256.
+ * MERRYMEN_SOLANA_VAULT_PROGRAM and MERRYMEN_SOLANA_VAULT_SHA256. Once any entry
+ * is listed, the live runtime refuses a configured program or SHA-256 that is
+ * not one listed pair (solanaVaultReleaseRefusal), so the app and the recovery
+ * tool trust the same program. Never the local test program.
  */
 export const SOLANA_VAULT_RELEASES: readonly { readonly programId: string; readonly sha256: string }[] = Object.freeze([]);
+/**
+ * Why a configured live deployment (program id and binary SHA-256, lowercase
+ * hex) is not a released vault, or null when it is listed together with that
+ * hash. While `releases` is empty nothing is released yet and every pair
+ * passes here: the deployment checks (immutable, hash-matching, built for its
+ * id, never the local test id) still apply.
+ */
+export function solanaVaultReleaseRefusal(
+  programId: string,
+  sha256: string,
+  releases: readonly { readonly programId: string; readonly sha256: string }[] = SOLANA_VAULT_RELEASES,
+): string | null {
+  if (releases.length === 0) return null;
+  const release = releases.find((r) => r.programId === programId);
+  if (!release)
+    return "The configured Solana vault program is not a released Merrymen vault program.";
+  if (release.sha256 !== sha256)
+    return "The configured Solana vault binary hash is not the released hash of that program.";
+  return null;
+}
 export const SOLANA_JUPITER_PROGRAM =
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 export const SOLANA_ASSOCIATED_TOKEN_PROGRAM =
