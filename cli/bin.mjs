@@ -1661,20 +1661,39 @@ switch (cmd) {
     // solana-recover reads the owner's key from a file or the inherited stdin,
     // never from these arguments.
     const entry = { "solana-agent": "solana-agent-cli.ts", "solana-paper": "solana-paper-cli.ts", "solana-recover": "solana-recover-cli.ts" }[cmd];
+    const agent = cmd === "solana-agent";
     const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", entry), ...rest], {
       cwd: ROOT,
-      stdio: "inherit",
+      // The worker's IPC channel closes when this process dies for any reason,
+      // SIGKILL and the OOM killer included, so the worker never trades as an orphan.
+      stdio: agent ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
       shell: false,
     });
-    // A pid-based stop (kill, a supervisor, nohup) reaches only this process.
-    // Forward it, and exit only from the child's exit, so a stopped command
-    // never leaves the worker trading as an orphan. Windows has no POSIX
+    const running = () => child.exitCode === null && child.signalCode === null;
+    // A pid-based stop (kill, a supervisor, nohup) reaches only this process,
+    // and exit happens only from the child's exit. Windows has no POSIX
     // signals: its console delivers Ctrl+C to the child directly, while
     // child.kill there would terminate the child abruptly instead.
     if (process.platform !== "win32") {
+      let presses = 0;
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
         process.on(signal, () => {
-          if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+          if (!running()) return;
+          presses++;
+          if (!agent) { child.kill(signal); return; }
+          // One message per signal this command received, instead of a second
+          // signal: a terminal Ctrl+C already reached the worker itself, so a
+          // forwarded copy would look like a second press. The second press
+          // forces the stop; a worker too wedged to read it is killed. A
+          // closed channel means the worker already finished and is exiting.
+          const force = presses >= 2;
+          if (child.connected) {
+            try { child.send({ type: "merrymen-solana-worker-stop", force, signal }, () => {}); } catch { /* exiting */ }
+          }
+          if (force) {
+            bad("Forcing the Solana worker to stop.");
+            setTimeout(() => { if (running()) child.kill("SIGKILL"); }, 3_000).unref();
+          }
         });
       }
     }
