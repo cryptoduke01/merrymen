@@ -5,17 +5,18 @@
 #     Downloads agave's release (it carries cargo-build-sbf) and the
 #     platform-tools it compiles with, checks each against the pins in
 #     solana-toolchain.env before unpacking, and unpacks agave into <dir> and
-#     platform-tools where cargo-build-sbf looks for them
-#     (~/.cache/solana/<version>/platform-tools). cargo-build-sbf therefore never
-#     downloads its compiler itself; its own download is checked against
-#     nothing. Then installs the pinned host Rust for test.sh's cargo test runs.
+#     platform-tools and the Criterion library where cargo-build-sbf looks for
+#     them (~/.cache/solana/<version>/platform-tools and
+#     ~/.cache/solana/<criterion version>/criterion). cargo-build-sbf therefore
+#     downloads neither itself; its own downloads are checked against nothing. Then installs the pinned host Rust for test.sh's cargo test runs.
 #     On GitHub Actions it puts cargo-build-sbf on PATH and selects that Rust
 #     for the steps that follow.
 #
 #   solana-toolchain.sh check
 #     After a build: ~/.cache/solana still holds exactly the verified
-#     platform-tools, so nothing fetched or reinstalled an unchecked toolchain
-#     (another --tools-version, --force-tools-install, a criterion download).
+#     platform-tools and Criterion, so nothing fetched or reinstalled an
+#     unchecked toolchain (another --tools-version, --force-tools-install,
+#     another Criterion).
 #
 # Linux x86_64 only, because those are the assets the pins describe. It
 # refuses to run where ~/.cache/solana already exists: it cannot vouch for a
@@ -29,6 +30,8 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cache_root="$HOME/.cache/solana"
 tools_dir="$cache_root/$PLATFORM_TOOLS_VERSION/platform-tools"
 marker="$tools_dir/.merrymen-ci-verified-sha256"
+criterion_dir="$cache_root/$CRITERION_VERSION/criterion"
+criterion_marker="$criterion_dir/.merrymen-ci-verified-sha256"
 
 die() { echo "::error::$*" >&2; exit 1; }
 
@@ -49,12 +52,20 @@ install() {
   "$here/fetch-verified.sh" \
     "https://github.com/anza-xyz/platform-tools/releases/download/$PLATFORM_TOOLS_VERSION/$PLATFORM_TOOLS_ASSET" \
     "$PLATFORM_TOOLS_BYTES" "$PLATFORM_TOOLS_SHA256" "$downloads/$PLATFORM_TOOLS_ASSET"
+  "$here/fetch-verified.sh" \
+    "https://github.com/Snaipe/Criterion/releases/download/$CRITERION_VERSION/$CRITERION_ASSET" \
+    "$CRITERION_BYTES" "$CRITERION_SHA256" "$downloads/$CRITERION_ASSET"
 
   tar -xjf "$downloads/$AGAVE_ASSET" -C "$dest"
   # The layout cargo-build-sbf itself unpacks to: llvm/, rust/, version.md.
   mkdir -p -- "$tools_dir"
   tar -xjf "$downloads/$PLATFORM_TOOLS_ASSET" -C "$tools_dir"
   printf '%s\n' "$PLATFORM_TOOLS_SHA256" > "$marker"
+  # The layout cargo-build-sbf unpacks Criterion to: include/, lib/, share/
+  # directly under criterion/, without the archive's top directory.
+  mkdir -p -- "$criterion_dir"
+  tar -xjf "$downloads/$CRITERION_ASSET" -C "$criterion_dir" --strip-components=1
+  printf '%s\n' "$CRITERION_SHA256" > "$criterion_marker"
   rm -rf -- "$downloads"
 
   local bin="$dest/solana-release/bin"
@@ -79,11 +90,14 @@ install() {
 check() {
   [ -f "$marker" ] && [ "$(cat -- "$marker")" = "$PLATFORM_TOOLS_SHA256" ] \
     || die "the verified platform-tools at $tools_dir were removed or reinstalled"
-  local found
+  [ -f "$criterion_marker" ] && [ "$(cat -- "$criterion_marker")" = "$CRITERION_SHA256" ] \
+    || die "the verified Criterion at $criterion_dir was removed or reinstalled"
+  local found expected
   found="$(cd -- "$cache_root" && find . -mindepth 1 -maxdepth 2 | LC_ALL=C sort | tr '\n' ' ')"
-  [ "$found" = "./$PLATFORM_TOOLS_VERSION ./$PLATFORM_TOOLS_VERSION/platform-tools " ] \
+  expected="$(printf '%s\n' "./$PLATFORM_TOOLS_VERSION" "./$PLATFORM_TOOLS_VERSION/platform-tools" "./$CRITERION_VERSION" "./$CRITERION_VERSION/criterion" | LC_ALL=C sort -u | tr '\n' ' ')"
+  [ "$found" = "$expected" ] \
     || die "$cache_root holds downloads this script did not verify: $found"
-  echo "only the verified platform-tools $PLATFORM_TOOLS_VERSION are in $cache_root"
+  echo "only the verified platform-tools $PLATFORM_TOOLS_VERSION and Criterion $CRITERION_VERSION are in $cache_root"
 }
 
 case "${1:-}" in

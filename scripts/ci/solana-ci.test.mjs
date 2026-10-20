@@ -476,8 +476,11 @@ describe("the toolchain pins", () => {
     assert.equal(pins.PLATFORM_TOOLS_ASSET, "platform-tools-linux-x86_64.tar.bz2");
     assert.equal(pins.PLATFORM_TOOLS_RUSTC, "1.84.1");
     assert.equal(pins.SBF_ARCH, "v0");
-    for (const k of ["AGAVE_SHA256", "PLATFORM_TOOLS_SHA256"]) assert.match(pins[k], /^[0-9a-f]{64}$/, k);
+    assert.equal(pins.CRITERION_VERSION, "v2.3.3");
+    assert.equal(pins.CRITERION_ASSET, `criterion-${pins.CRITERION_VERSION}-linux-x86_64.tar.bz2`);
+    for (const k of ["AGAVE_SHA256", "PLATFORM_TOOLS_SHA256", "CRITERION_SHA256"]) assert.match(pins[k], /^[0-9a-f]{64}$/, k);
     for (const k of ["AGAVE_BYTES", "PLATFORM_TOOLS_BYTES"]) assert.match(pins[k], /^[1-9][0-9]{6,}$/, k);
+    assert.match(pins.CRITERION_BYTES, /^[1-9][0-9]{5,}$/);
     assert.match(pins.HOST_RUST, /^1\.\d+\.\d+$/);
   });
 
@@ -1102,10 +1105,13 @@ describe("solana-toolchain.sh", () => {
     const tools = join(home, ".cache/solana/v1.48/platform-tools");
     mkdirSync(join(tools, "rust/bin"), { recursive: true });
     writeFileSync(join(tools, ".merrymen-ci-verified-sha256"), `${pins.PLATFORM_TOOLS_SHA256}\n`);
+    const criterion = join(home, `.cache/solana/${pins.CRITERION_VERSION}/criterion`);
+    mkdirSync(join(criterion, "include"), { recursive: true });
+    writeFileSync(join(criterion, ".merrymen-ci-verified-sha256"), `${pins.CRITERION_SHA256}\n`);
     return home;
   };
 
-  it("check passes when only the verified platform-tools are present", () => {
+  it("check passes when only the verified platform-tools and Criterion are present", () => {
     const r = run("bash", [script, "check"], { HOME: verifiedHome() });
     assert.equal(r.status, 0, r.stderr);
   });
@@ -1114,6 +1120,9 @@ describe("solana-toolchain.sh", () => {
     const cases = {
       "another platform-tools version": h => mkdirSync(join(h, ".cache/solana/v1.51/platform-tools"), { recursive: true }),
       "a criterion download": h => mkdirSync(join(h, ".cache/solana/v1.48/criterion"), { recursive: true }),
+      "another Criterion version": h => mkdirSync(join(h, ".cache/solana/v2.3.2/criterion"), { recursive: true }),
+      "Criterion reinstalled without the marker": h => rmSync(join(h, `.cache/solana/${pins.CRITERION_VERSION}/criterion/.merrymen-ci-verified-sha256`)),
+      "a Criterion marker for other bytes": h => writeFileSync(join(h, `.cache/solana/${pins.CRITERION_VERSION}/criterion/.merrymen-ci-verified-sha256`), `${"2".repeat(64)}\n`),
       "a reinstall that dropped the marker": h => rmSync(join(h, ".cache/solana/v1.48/platform-tools/.merrymen-ci-verified-sha256")),
       "a marker for other bytes": h => writeFileSync(join(h, ".cache/solana/v1.48/platform-tools/.merrymen-ci-verified-sha256"), `${"1".repeat(64)}\n`),
     };
