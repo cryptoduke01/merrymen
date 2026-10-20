@@ -27,7 +27,7 @@ import { pythAccount } from "./solana-reference-price-fixture";
 import { address as kitAddress, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, type Blockhash } from "@solana/kit";
 import { buildWithdrawSolanaVaultInstruction } from "../../packages/core/src/solana-live";
-import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
+import { SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -1208,6 +1208,32 @@ test("a long worker tick keeps its heartbeat fresh (audit agent-deploy F3)", asy
 
 /** A live account the worker could trade: registered session, live binding, initialized vault. */
 async function readyLive(f: Awaited<ReturnType<typeof fixture>>) { await f.live(); f.controls.initialized = true; await f.registered(); }
+
+test("status says trading and exits are paused while the market refuses the USDG mint the vault refuses, and a mint it cannot read adds nothing", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f);
+    const reads: string[] = [];
+    const refusing = (error: Error): SolanaPaperMarket => ({ quote: f.market.quote, readMint: async mint => {
+      reads.push(mint); if (mint === SOLANA_USDG_MINT) throw error; return f.market.readMint(mint);
+    } });
+    assert.equal((await f.app.status(f.scope)).live.ready, true);
+    // check_mint fails every swap, exits included, on such a mint: a full blocker, not an exit-safe one.
+    const refused = await f.runtime({ market: refusing(new SolanaMarketError("invalid-mint")) }).status(f.scope);
+    assert.deepEqual(reads, [SOLANA_USDG_MINT]);
+    assert.ok(refused.live.blockers.includes(SOLANA_STATUS_USDG_MINT_REFUSED), refused.live.blockers.join(" | "));
+    assert.equal(refused.live.ready, false); assert.equal(refused.live.canExit, false);
+    // A read that fails for any other reason is not a refusal: the executor reads the mint again before signing.
+    for (const error of [new SolanaRpcError("network"), new SolanaMarketError("invalid-address"), new Error("down")]) {
+      const unread = await f.runtime({ market: refusing(error) }).status(f.scope);
+      assert.equal(unread.live.ready, true, `${error.message}: ${unread.live.blockers.join(" | ")}`);
+    }
+    // Paper reads take no live mint read.
+    reads.length = 0;
+    await f.runtime({ market: refusing(new SolanaMarketError("invalid-mint")) }).status(f.scope, { liveReads: false });
+    assert.deepEqual(reads, []);
+  } finally { f.raw.close(); }
+});
 
 test("a shared fee payer below the per-transaction fee cap still lets every tenant trade and exit; operators get one alert (audit G2-4)", async () => {
   const f = await fixture(), lines: string[] = [];

@@ -135,7 +135,11 @@ Live assets are deliberately pinned to:
 
 USDG's known issuer authorities are an explicit cash-token trust assumption.
 Active or scheduled nonzero transfer fees, configured transfer hooks and unknown
-extensions fail closed. Other token issuers do not inherit that exception. The
+extensions fail closed: the vault's check_mint refuses every swap, exits
+included, on such a USDG mint, so the worker refuses the mint itself
+(invalid-mint) before signing anything, and live status shows the blocker
+"The USDG mint carries a fee, hook or extension the vault refuses; trading and
+exits are paused." Other token issuers do not inherit that exception. The
 broader paper mint screen refuses new buys with unsafe mint authorities or
 extensions; exits still require valid data, a route, balances and policy limits.
 

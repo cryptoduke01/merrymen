@@ -113,6 +113,14 @@ export const SOLANA_STATUS_FEE_PAYER_THRESHOLD_MISCONFIGURED = "The fee payer wa
  */
 export const SOLANA_STATUS_BEHIND_BOOK = "Vault balances were read from before the latest recorded trade; trading waits for a current read.";
 /**
+ * The status blocker while the USDG mint carries a transfer fee, a transfer hook
+ * program or another extension the vault's check_mint refuses: the vault then
+ * fails every swap, exits included, and the market refuses the mint as
+ * invalid-mint (solanaVaultUsdgMintRefusal), so nothing would be signed. A full
+ * blocker, not an exit-safe one.
+ */
+export const SOLANA_STATUS_USDG_MINT_REFUSED = "The USDG mint carries a fee, hook or extension the vault refuses; trading and exits are paused.";
+/**
  * A failed live status read as the owner sees it. This module's own refusals,
  * and the two RPC problems only an operator can fix (no independent fallback
  * provider, or a transport without two providers), are shown by fixed text
@@ -925,6 +933,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
           if ([scope.owner, vault, session?.session].includes(feePayer)) fail("The network fee payer must be separate from the owner, vault and session.", "configuration");
           await verifyDeployment(cfg);
+          // The executor reads the USDG mint before signing and refuses one the vault refuses (invalid-mint),
+          // buys and exits alike; say so here rather than show ready. Any other failure to read it adds nothing:
+          // the executor's own read refuses before signing.
+          try { await market().readMint(SOLANA_USDG_MINT); } catch (error) {
+            if (error instanceof SolanaMarketError && error.code === "invalid-mint") blockers.push(SOLANA_STATUS_USDG_MINT_REFUSED);
+          }
           const vaultCash = await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
           const ownerCash = await deriveSolanaAta(scope.owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), ownerWsol = await deriveSolanaAta(scope.owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
           const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
