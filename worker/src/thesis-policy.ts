@@ -693,9 +693,10 @@ export function markFigures(d: string): string {
  * (audit regressions F3), as X and social takes use it: a model post ending
  * "CA<mint>" or "<mint>is" names the mint as surely as one with a space
  * before it. The cost is a run of 43 or more base58 characters with no break
- * (a long camelCase hashtag, "commit<sha>"), which may read as an id glued to
- * its neighbours: the post is withheld, which is the failure this gate is
- * allowed. Prose, tickers, URLs and short hashtags never do.
+ * (a long camelCase hashtag, "commit<sha>", a long number glued to a word as
+ * in "<digits>tokens"), which may read as an id glued to its neighbours: the
+ * post is withheld, which is the failure this gate is allowed. Prose, tickers,
+ * URLs and short hashtags never do.
  */
 const ADDRESSY = /\b(?:0x[0-9a-fA-F]{6,}|rh:[A-Za-z0-9-]{1,64})\b/;
 const GLUED = { glued: true } as const;

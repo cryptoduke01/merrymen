@@ -135,6 +135,8 @@ const LINK_OR_SECRET = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|dev|app|xy
  * (public-wallet.ts). The scan's one cost elsewhere, an unbroken base58 run of
  * 43 or more characters such as a long camelCase hashtag, hardly reaches here:
  * both paths refuse "#" as unsafe-text first, and the comment path any digit.
+ * A long number glued to a word ("<digits>tokens") can reach a tag, and may
+ * cost it: the tag is refused, as fail closed as any refusal here.
  */
 const GLUED = { glued: true } as const;
 const linkOrSecret = (text: string): boolean => LINK_OR_SECRET.test(text) || onchainIdIn(text, GLUED);

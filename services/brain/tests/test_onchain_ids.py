@@ -245,7 +245,7 @@ def test_the_desk_policy_cannot_carry_a_solana_id():
     "[ref:d3fa91cr2c1] reports two tracked wallets added",
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "supercalifragilisticexpialidociousandmorewordsjoined",
-    # Hex split at its zeros, and long numbers, are never an id glued to anything.
+    # Hex split at its zeros, and long numbers standing alone, are never an id glued to anything.
     "6fde6ce70efd0bc3e0c60538ccf57431cf76c354a617bd6c5a1f8198d4342cfa",
     "02D20BBD7E394AD5999A4CEBABAC9619732C343A4CAC99470C03E23BA2BDC2BC",
     "supply 63971511409728546707420640415976470808777281049430980144558505433936508649475518010444363585908687133263558897911835323323191563463575735092780586118530448",

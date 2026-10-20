@@ -21,12 +21,16 @@ const TOKEN_MARKER = " CA (";
  * scan: "CA<mint>" or "<mint>is" is an id too (audit regressions F3).
  *
  * ITS ACCEPTED COST, measured 2026-10-19 over a corpus of prose, tickers,
- * URLs, hashtags, digests and numbers: prose, tickers, URLs and hashtags under
- * 43 characters are never read as an id. An unbroken base58 run of 43 or more
+ * URLs, hashtags, digests and numbers (re-measured 2026-10-20): prose,
+ * tickers, URLs and hashtags under 43 characters are never read as an id, nor
+ * is a long number standing alone. An unbroken base58 run of 43 or more
  * characters can be (about 11% of 43-59-character camelCase hashtags, 22% of
- * longer ones, 1% of "commit<sha>" strings; a run of exactly 43 or 44 that
- * decodes to 32 bytes already was, by the default scan). Such a post is
- * withheld, never published with an id in it. The test pins both sides.
+ * longer ones, 1% of "commit<sha>" strings, and about 1.7% of 10-200-digit
+ * numbers glued to a word, "<digits>tokens": 0.3% of a corpus of long numbers
+ * written every way; a zero breaks a run, so it is the digits after the last
+ * zero, with the word, that are read; a run of exactly 43 or 44 that decodes
+ * to 32 bytes already was, by the default scan). Such a post is withheld,
+ * never published with an id in it. The test pins both sides.
  */
 function idInText(text: string): boolean {
   return ADDRESS_IN_TEXT.test(text) || onchainIdIn(text, { glued: true });

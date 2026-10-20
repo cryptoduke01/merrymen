@@ -114,4 +114,11 @@ test("the glued scan's accepted cost: a hashtag of 43 or more unbroken base58 ch
   for (const tag of ["#BuyTheDip", "#WAGMI", "#SolanaSummer", "#BuyTheDipAndHoldForeverBecauseSolanaIsTheFuture"]) {
     assert.equal(hasPublicWallet(`${prose} ${tag}`), false, tag);
   }
+  // A long number glued to a word (review GE, round 2): the digits after its last zero and the word are one
+  // run of 44, a window of which decodes to 32 bytes, so the post is withheld. With a space, or alone, never.
+  const supply = "265654884413917023635351473145263899433813526181161187";
+  assert.equal(hasPublicWallet(`supply ${supply}tokens ok`), true);
+  assert.equal(onchainIdIn(`supply ${supply}tokens ok`), false, "the default scan's answer");
+  assert.equal(hasPublicWallet(`supply ${supply} tokens ok`), false);
+  assert.equal(hasPublicWallet(`supply ${supply} ok`), false);
 });

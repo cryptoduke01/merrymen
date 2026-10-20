@@ -950,8 +950,9 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
  * the same way and is replaced too, inside an explorer link as well, and glued
  * to the words around it ("CA<mint>", "<mint>is": core's glued scan, audit
  * regressions F3). Redaction takes the glued scan because its one cost, an
- * unbroken base58 run of 43 or more characters (a long camelCase hashtag) read
- * as an id, is a word shown to a model as "[address]", never text withheld.
+ * unbroken base58 run of 43 or more characters (a long camelCase hashtag, or a
+ * long number glued to a word as in "<digits>tokens") read as an id, is a word
+ * shown to a model as "[address]", never text withheld.
  * A Solana signature, standing alone or in a link, is replaced too, by
  * "[signature]", where a 0x tx hash is left: a base58 run that decodes to 64
  * bytes cannot be told apart from two keys written together ("<mint><mint>")

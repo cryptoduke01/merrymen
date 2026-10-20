@@ -217,7 +217,9 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     }
   });
 
-  it("never reads hex split at its zeros, a long number or filler as an id glued to anything", () => {
+  it("never reads hex split at its zeros, a long number standing alone or filler as an id glued to anything", () => {
+    // A long number glued to a word ("<digits>tokens") is not in this list: the digits after its last zero
+    // and the word are one run that can be read (worker/src/xpost/public-wallet.ts states that cost).
     // Each run between zeros is hex alone, and some are 43 or 44 characters that decode to 32 bytes:
     // read as glued ids, every digest, EVM hash and long number like these was withheld.
     for (const text of [
