@@ -1590,6 +1590,35 @@ test("a reviewed owner transaction not signed in time is discarded without openi
   } finally { mock.timers.reset(); }
 });
 
+test("a click on Sign with my wallet after the review's deadline, before its timer has run, opens no wallet and sends nothing", () => onTestClock(async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "owner-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Withdraw to my wallet");
+  assert.match(ui.container.textContent!, /Review before your wallet opens/);
+  // One millisecond before the deadline the review can still be signed: the check is the deadline itself.
+  const shownAt = Date.now();
+  mock.timers.setTime(shownAt + 44_999);
+  signedBytes = () => Promise.reject(new Error("The owner closed the wallet."));
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1);
+  assert.match(ui.container.textContent!, /Review before your wallet opens/);
+  // At the deadline the clock has passed it but the review's timer has not run (setTime fires no timer), so the button is still there.
+  mock.timers.setTime(shownAt + 45_000);
+  signedBytes = () => Uint8Array.from([1, 2, 3]);
+  await press("Sign with my wallet");
+  assert.equal(signCount, 1, "the wallet never opened");
+  assert.equal(calls.some((call) => call.body?.stage === "submit"), false);
+  assert.match(ui.container.querySelector('[role="alert"]')!.textContent!, /^This prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\. Start it again to prepare a new one\.$/);
+  assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/);
+  assert.match(ui.container.textContent!, /The prepared withdrawal was not signed in time, so it was discarded\. Nothing was signed\./);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Sign with my wallet"), false);
+}));
+
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
   state.runtime.live.programId = PROGRAM;
   const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER), stranger = base58Encode(new Uint8Array(32).fill(9));
