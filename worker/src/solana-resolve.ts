@@ -58,7 +58,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { CHAINS } from "../../packages/core/src/ids";
 import type { Db } from "./db";
 import { SOLANA_PENDING_STUCK_MS } from "./solana-agent";
-import { observationKey, observeSolanaSubmission, solanaAgreedSettlement, SolanaExecutionError, type SolanaLiveRecord, type SolanaLiveSettlement,
+import { observationKey, observeSolanaSubmission, solanaAgreedSettlement, SolanaExecutionError, solanaQuorumSlot, type SolanaLiveRecord, type SolanaLiveSettlement,
   type SolanaObservation } from "./solana-executor";
 import { createSolanaLiveRpc, type SolanaLiveRead } from "./solana-live-rpc";
 import { readSolanaMainnetRpcConfig, SolanaRpcError } from "./solana-rpc";
@@ -519,7 +519,7 @@ type SolanaOwnerObserve = (read: SolanaLiveRead, owner: string, setup: SolanaPre
 export type SolanaOwnerView =
   | { outcome: "pending"; seen: boolean; canLand: boolean; evidence?: Omit<SolanaOwnerExpiryProof, "reason"> }
   | { outcome: "finalized" | "failed"; slot: number; err: string }
-  | { outcome: "expired"; proof: SolanaOwnerExpiryProof };
+  | { outcome: "expired"; proof: SolanaOwnerExpiryProof; fresh?: number };
 export type SolanaOwnerResolveView = { label: string; hostId: string; excluded?: true } & ({ observation: SolanaOwnerView } | { error: string });
 export type SolanaOwnerResolveDecision =
   | { book: true; status: "finalized" | "failed"; slot: number; basis: "receipt" | "expiry" | "no-receipt"; proof?: Omit<SolanaOwnerExpiryProof, "resolution">; agreed: string[] }
@@ -564,9 +564,16 @@ export function solanaOwnerResolveDecision(views: readonly SolanaOwnerResolveVie
     return { book: false, reason: "Two providers on their own hostnames must each show the transaction's last valid block height passed, with the vault read at or after that bank. "
       + "Nothing is booked; consult another provider with --third-rpc." };
   }
-  // Every counted provider proves "never ran" the app's way: book that proof (the first provider's, as the app does).
+  // Every counted provider proves "never ran" the app's way: book the proof read at the lowest slot, as the app
+  // does (solanaQuorumSlot), never one provider's own; one whose slot runs far past another's fresh slot books nothing.
   if (expiredCounted.length === counted.length) {
-    const proof = (counted[0]!.observation as Extract<SolanaOwnerView, { outcome: "expired" }>).proof;
+    const proofs = counted.map(view => view.observation as Extract<SolanaOwnerView, { outcome: "expired" }>);
+    let lowest: number;
+    try { lowest = solanaQuorumSlot(proofs.map(item => ({ slot: item.proof.slot, fresh: item.fresh }))); } catch {
+      return { book: false, reason: "One provider's expiry proof was read far past another provider's current finalized slot. Nothing is booked: "
+        + "its slot would become the floor of every later owner read. Find out which provider is wrong, or try again shortly." };
+    }
+    const proof = proofs.find(item => item.proof.slot === lowest)!.proof;
     return { book: true, status: "failed", slot: proof.slot, basis: "expiry", proof, agreed: counted.map(view => view.label) };
   }
   // Otherwise the operator's no-receipt proof, from the earliest bank any counted provider read.

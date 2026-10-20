@@ -385,8 +385,10 @@ the withdrawal cap's finalized read, and the status display (including the
 below-book check). Jupiter quotes come from Jupiter.
 
 **Slots.** A slot persisted from several providers (an inflow's book slot, a
-first book's risk slot, an expiry's settlement slot) is the lowest context slot
-any of them answered at. A reading is refused when one provider's slot runs more
+first book's risk slot, a trade expiry's settlement slot, an owner transaction's
+expiry proof, in the app and in `solana:resolve owner`) is the lowest context slot
+any of them answered at; an owner expiry books the whole proof read at that slot,
+so its slot and height come from one bank. A reading is refused when one provider's slot runs more
 than 150 slots (`SOLANA_PROVIDER_SLOT_SKEW`, about a minute) past another
 provider's fresh slot at the same commitment. A provider a slot or two behind
 the prepared slot is asked again up to 5 times, 400 ms apart. The executor

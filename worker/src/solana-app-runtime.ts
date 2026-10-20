@@ -564,7 +564,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   type OwnerView =
     | { outcome: "pending"; seen: boolean; canLand: boolean; evidence?: Omit<SolanaOwnerExpiryProof, "reason"> }
     | { outcome: "finalized" | "failed"; slot: number; err: string }
-    | { outcome: "expired"; proof: SolanaOwnerExpiryProof };
+    | { outcome: "expired"; proof: SolanaOwnerExpiryProof; fresh?: number };
   /** A successful owner transaction always leaves this mark on the vault. Without it the receipt is not believed. */
   async function requireOwnerEffect(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, slot: number) {
     const mismatch = (): never => fail("Owner confirmation does not match the vault state.");
@@ -610,7 +610,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     // proven by its epoch alone, never wedged by a trade that landed meanwhile.
     // A linked record in the other slot that ran moved the epoch once (solanaOwnerEpochOffset).
     if (!solanaOwnerExpiryProven(setup, sequence, epoch, epochOffset)) return { ...pending, evidence };
-    return { outcome: "expired", proof: { reason: "blockhash-expired", ...evidence } };
+    // This provider's fresh finalized slot, read after its answer: the lowest-slot rule (solanaQuorumSlot)
+    // refuses a reading whose proof slot runs far past another provider's.
+    return { outcome: "expired", proof: { reason: "blockhash-expired", ...evidence }, fresh: integer(await read("getSlot", [{ commitment: "finalized" }])) };
   }
   /** One provider's view of a submitted owner transaction. */
   async function observeOwner(read: SolanaLiveRead, owner: string, setup: SolanaPreparedSetup, signature: string, epochOffset = 0): Promise<OwnerView> {
@@ -663,7 +665,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const quorum = await readSolanaQuorum(live, read => observeOwner(read, s.scope.owner, setup, signature, epochOffset), ownerViewKey).catch(unknown);
     if (quorum.agreed && quorum.value.outcome !== "pending") {
       const view = quorum.value;
-      if (view.outcome === "expired") { await s.finishSetup(signature, "failed", view.proof.slot, view.proof).catch(unknown); return { signature, status: "failed" }; }
+      if (view.outcome === "expired") {
+        // The lowest-slot rule, as for trades, inflows and shortfalls: the proof booked is the one read at the
+        // lowest slot (its slot and height from one bank), and a reading where one provider's slot runs far
+        // past another's fresh slot stays pending. The booked slot becomes the owner read floor, so one
+        // provider's inflated slot would otherwise refuse every later owner action, revoke included.
+        const proofs = quorum.values.flatMap(item => item.outcome === "expired" ? [item] : []);
+        let lowest: number;
+        try { lowest = solanaQuorumSlot(proofs.map(item => ({ slot: item.proof.slot, fresh: item.fresh }))); } catch { return { signature, status: "pending" }; }
+        const proof = proofs.find(item => item.proof.slot === lowest)!.proof;
+        await s.finishSetup(signature, "failed", proof.slot, proof).catch(unknown); return { signature, status: "failed" };
+      }
       await s.finishSetup(signature, view.outcome, view.slot).catch(unknown);
       return { signature, status: view.outcome };
     }

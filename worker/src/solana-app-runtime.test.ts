@@ -522,7 +522,7 @@ test("a dropped withdrawal whose sequence moved off-server stays pending in the 
     // With the sequence unchanged it is the app's own proof, as before.
     f.controls.sequence = 3n;
     assert.deepEqual(await f.app.observeOwnerTransaction(f.read, f.owner, setup),
-      { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: "5001", vaultSequence: "3", sessionEpoch: "1", slot: 1000 } });
+      { outcome: "expired", proof: { reason: "blockhash-expired", blockHeight: "5001", vaultSequence: "3", sessionEpoch: "1", slot: 1000 }, fresh: 1000 });
   } finally { f.raw.close(); }
 });
 
@@ -897,6 +897,34 @@ test("a dropped withdrawal resolves on an unchanged sequence, and no trade can m
     g.controls.height = 5001; g.controls.sequence = 4n; // a moved sequence may be this withdrawal
     assert.equal((await g.app.submitOwnerAction(g.scope, { signedTransactionBase64 })).status, "pending");
   } finally { g.raw.close(); }
+});
+
+test("an owner expiry is booked at the lowest provider slot: one provider's inflated slot never becomes the owner read floor that refuses revoke", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.sequence = 2n;
+    const prepared = await f.app.prepareOwnerAction(f.scope, { action: "resume-buys" });
+    const signedTransactionBase64 = await f.sign(prepared.transactionBase64);
+    await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 });
+    f.controls.height = 5001;
+    // The primary answers its finalized vault read at an inflated context slot; everything else is honest.
+    let inflated = 1_000_000_000;
+    f.providers.primary = async (method, params = []) => {
+      const answer = await f.read(method, params);
+      return method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "finalized"
+        ? { ...(answer as object), context: { slot: inflated } } : answer;
+    };
+    // Far past the other provider's fresh finalized slot: not booked.
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.status, "pending");
+    // Within the skew: booked, at the honest provider's lower slot.
+    inflated = 1100;
+    assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "failed");
+    assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.expiryProof!.slot, 1000);
+    // With both providers honest again, the emergency revoke still prepares (its read floor is the honest slot).
+    f.providers.primary = null;
+    assert.ok((await f.app.prepareOwnerAction(f.scope, { action: "revoke" })).transactionBase64);
+  } finally { f.raw.close(); }
 });
 
 test("a dropped resume-buys resolves after expiry and leaves the off-chain breaker paused", async () => {

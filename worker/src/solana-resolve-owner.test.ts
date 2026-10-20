@@ -167,8 +167,14 @@ test("nothing is booked unless two counted providers on their own hostnames agre
 test("the decision function: in-app expiry proofs are booked as such, mixed evidence as the operator's from the earliest bank", () => {
   const view = (label: string, observation: SolanaOwnerView, excluded = false): SolanaOwnerResolveView => ({ label, hostId: label, observation, ...(excluded ? { excluded: true as const } : {}) });
   const proof = (slot: number) => ({ reason: "blockhash-expired" as const, blockHeight: "1201", vaultSequence: "1", sessionEpoch: "1", slot });
+  // Both prove it: the proof read at the lower slot is booked, never the first provider's own (the lowest-slot rule).
   const both = solanaOwnerResolveDecision([view("a", { outcome: "expired", proof: proof(1300) }), view("b", { outcome: "expired", proof: proof(1290) })]);
-  assert.deepEqual(both, { book: true, status: "failed", slot: 1300, basis: "expiry", proof: proof(1300), agreed: ["a", "b"] });
+  assert.deepEqual(both, { book: true, status: "failed", slot: 1290, basis: "expiry", proof: proof(1290), agreed: ["a", "b"] });
+  // One provider's proof read far past the other's fresh finalized slot books nothing: its slot would floor every later owner read.
+  const inflated = solanaOwnerResolveDecision([view("a", { outcome: "expired", proof: proof(1_000_000_000), fresh: 1300 }),
+    view("b", { outcome: "expired", proof: proof(1290), fresh: 1300 })]);
+  assert.equal(inflated.book, false);
+  assert.match((inflated as { reason: string }).reason, /far past another provider's current finalized slot/);
   const mixed = solanaOwnerResolveDecision([view("a", { outcome: "expired", proof: proof(1300) }), view("b", moved("1203", 1280))]);
   assert.deepEqual(mixed, { book: true, status: "failed", slot: 1280, basis: "no-receipt", agreed: ["a", "b"],
     proof: { reason: "operator-no-receipt", blockHeight: "1203", vaultSequence: "2", sessionEpoch: "1", slot: 1280 } });
