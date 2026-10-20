@@ -30,7 +30,8 @@ import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
 import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
-import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaOwnerEpochOffset, solanaRegisteredEpoch, solanaRevokedBesideResume } from "./solana-trading-store";
+import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
+  solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 
 /**
@@ -672,7 +673,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * finalized or expiry slot, in either slot). Undefined when nothing is booked.
    */
   async function ownerReadFloor(s: SolanaTradingStore): Promise<number | undefined> {
-    const slots = [(await s.liveBook())?.slot, ...[await s.setup(), await s.revokeSetup()].flatMap(item => [item?.finalizedSlot, item?.expiryProof?.slot])]
+    const revoking = await s.revokeSetup();
+    const slots = [(await s.liveBook())?.slot, ...[await s.setup(), revoking, ...(revoking?.landed ?? [])].flatMap(item => [item?.finalizedSlot, item?.expiryProof?.slot])]
       .filter((slot): slot is number => Number.isSafeInteger(slot) && slot! > 0);
     return slots.length ? Math.max(...slots) : undefined;
   }
@@ -689,8 +691,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     const unresolved = (item: SolanaPreparedSetup | null) => !!item?.signature && item.status !== "failed" && item.status !== "finalized";
     const beside = details.kind === "revoke" && unresolved(previous) && (previous!.kind ?? "session") !== "revoke" && !unresolved(revoking) ? previous!.signature : undefined;
     if ((unresolved(previous) || unresolved(revoking)) && beside === undefined) fail("Refresh the pending owner transaction before preparing another.", "pending");
-    // A revocation beside this same pending record already landed: its record is kept (the store refuses too).
-    if (beside !== undefined && revoking?.status === "finalized" && revoking.beside === beside) fail(SOLANA_REVOKE_ALREADY_LANDED, "pending");
+    // A revocation beside this same pending record already landed: its record is kept, and another is prepared only once the
+    // vault (read at or after that landing: ownerReadFloor) shows a session registered since (the store refuses too).
+    const landed = beside !== undefined ? solanaLandedBeside(previous, revoking) : null;
+    if (landed && !solanaLiveAfterRevoke(landed, { session: details.session, sessionEpoch: details.priorSessionEpoch })) fail(SOLANA_REVOKE_ALREADY_LANDED, "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
       const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
@@ -785,6 +789,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // Blockers that stop buying but leave exits open.
       const exitSafe = new Set<string>();
       const buysOnly = (message: string) => { blockers.push(message); exitSafe.add(message); };
+      // A session registered on Solana after a revocation that landed beside the pending owner transaction: Revoke works again (REVOKE BESIDE...).
+      let revokeAgain = false;
       const liveReads = statusOptions.liveReads ?? (binding.requestedMode === "live" || !!(await s.session()) || !!(await s.liveBook())
         || !!(await s.setup()) || (await s.pending()).length > 0);
       if (liveReads) {
@@ -883,6 +889,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (registering && (registering.kind ?? "session") === "session" && registering.status === "finalized" && registering.session === live.state.session
             && live.state.expiresAt * 1000n > BigInt(now()) && session?.registrationSignature !== registering.signature
             && live.state.sessionEpoch !== solanaRegisteredEpoch(registering.priorSessionEpoch)) blockers.push(SOLANA_STATUS_REGISTERED_AFTER_REVOKE);
+          // Still pending (the providers keep disagreeing about it), with a revocation beside it that landed, while a session
+          // registered after that landing is live: its own landing, or one made outside Merrymen. Never activated; revoke again.
+          const landedBeside = solanaLandedBeside(registering, await s.revokeSetup());
+          if (landedBeside && live.state.expiresAt * 1000n > BigInt(now()) && solanaLiveAfterRevoke(landedBeside, live.state)) {
+            revokeAgain = true; blockers.push(SOLANA_STATUS_REGISTERED_AFTER_REVOKE);
+          }
           const currentBook = await s.liveBook();
           if (currentBook?.buyPaused) buysOnly("The buying drawdown breaker is paused; exits remain available.");
           if (currentBook && shortOfBook(currentBook, balances)) blockers.push(SOLANA_STATUS_BELOW_BOOK);
@@ -926,7 +938,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
           // `revoke`: a revocation signed beside it (the revoke slot), with its own signature and outcome.
           ownerTransaction: ownerTransaction?.signature ? { signature: ownerTransaction.signature, status: ownerTransaction.status, kind: ownerTransaction.kind,
-            ...(revocation?.signature ? { revoke: { signature: revocation.signature, status: revocation.status, kind: "revoke" as const } } : {}) } : null } };
+            ...(revocation?.signature ? { revoke: { signature: revocation.signature, status: revocation.status, kind: "revoke" as const, ...(revokeAgain ? { revokeAgain: true } : {}) } } : {}) } : null } };
     },
     async setupPaper(scope: SolanaAccountScope, input: { initialCashRaw: string; limits: SolanaPaperLimits }) {
       const s = await store(scope), binding = await s.binding();

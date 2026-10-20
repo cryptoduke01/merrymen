@@ -743,6 +743,62 @@ test("Revoke pressed again after the revocation beside a pending registration la
   }
 });
 
+test("a registration that landed after the revocation beside it while the providers keep disagreeing about it is revoked in the app again: status says it is live, Revoke prepares beside it, and the landed revocation is kept", async () => {
+  const f = await fixture();
+  try {
+    await f.live(); f.controls.initialized = true;
+    const chain = ownerChain(f), store = new SolanaTradingStore(f.db, f.scope);
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const setupSigned = await f.sign(setup.transactionBase64);
+    const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const revokeSigned = await f.sign(revoke.transactionBase64);
+    const first = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: revokeSigned });
+    chain.land(first.signature, revokeSigned); f.controls.epoch = 2n;
+    await f.app.status(f.scope);
+    const landed = (await store.revokeSetup())!;
+    assert.equal(landed.status, "finalized");
+    // The registration lands after it (epoch 3, its session set on the vault), but one provider never sees it: it stays pending.
+    chain.land(registration.signature, setupSigned); f.controls.epoch = 3n;
+    const both = f.providers.primary!;
+    f.providers.fallback = async (method, params = []) => method === "getSignatureStatuses" && (params[0] as string[])[0] === registration.signature ? f.response([null])
+      : method === "getTransaction" && params[0] === registration.signature ? null : both(method, params);
+    const live = await f.app.status(f.scope);
+    assert.equal(live.live.ownerTransaction?.status, "pending");
+    assert.deepEqual(live.live.ownerTransaction?.revoke, { signature: first.signature, status: "finalized", kind: "revoke", revokeAgain: true });
+    assert.ok(live.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), live.live.blockers.join(" | "));
+    // Revoke is prepared beside it again; the landed revocation goes with it as history. (A later slot's blockhash: the
+    // same bytes as the landed one are never accepted.)
+    const sameBytes = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    await assert.rejects(f.app.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(sameBytes.transactionBase64) }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "not-saved" && /already landed/.test(error.message));
+    f.providers.primary = async (method, params = []) => method === "getLatestBlockhash" ? f.response({ blockhash: key(44), lastValidBlockHeight: 5000 }) : both(method, params);
+    const again = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    const prepared = (await store.revokeSetup())!;
+    assert.equal(prepared.beside, registration.signature); assert.equal(prepared.priorSessionEpoch, "3");
+    assert.deepEqual(prepared.landed?.map(item => [item.signature, item.status]), [[first.signature, "finalized"]]);
+    const againSigned = await f.sign(again.transactionBase64);
+    const second = await f.app.submitOwnerAction(f.scope, { signedTransactionBase64: againSigned });
+    assert.notEqual(second.signature, first.signature);
+    // It lands: the vault's session is cleared (revoke_all) at epoch 4. Nothing is live, so nothing more to revoke.
+    chain.land(second.signature, againSigned);
+    const cleared = Buffer.from(f.state(4n)); cleared.fill(0, 42, 74);
+    f.extra.set(f.vault, account(cleared, PROGRAM, false, rentExempt(SOLANA_VAULT_ACCOUNT_SIZE)));
+    const revoked = await f.app.status(f.scope);
+    assert.deepEqual([revoked.live.ownerTransaction?.status, revoked.live.ownerTransaction?.revoke?.status, revoked.live.ownerTransaction?.revoke?.revokeAgain], ["pending", "finalized", undefined]);
+    assert.ok(!revoked.live.blockers.includes(SOLANA_STATUS_REGISTERED_AFTER_REVOKE), revoked.live.blockers.join(" | "));
+    await assert.rejects(f.app.prepareOwnerAction(f.scope, { action: "revoke" }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.code === "pending" && error.message === SOLANA_REVOKE_ALREADY_LANDED);
+    assert.deepEqual((await store.revokeSetup())!.landed?.map(item => item.signature), [first.signature], "both landed revocations are on record");
+    // The providers finally agree it landed: it is never activated.
+    f.providers.fallback = both; f.providers.primary = both;
+    assert.equal((await f.app.status(f.scope)).live.ownerTransaction?.status, "finalized");
+    await assert.rejects(f.app.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+      (error: unknown) => error instanceof SolanaAppRuntimeError && error.message === SOLANA_REGISTERED_AFTER_REVOKE);
+    assert.deepEqual(new Set(f.sent), new Set([setupSigned, revokeSigned, againSigned]), "only the three signed transactions ever went out");
+  } finally { f.raw.close(); }
+});
+
 test("activating a permission never deletes a revocation the owner is still signing beside it: activation waits, and once that revocation is submitted the permission is never activated", async () => {
   const f = await fixture();
   try {

@@ -93,6 +93,12 @@ export interface SolanaPreparedSetup {
    * prepared beside. Never set on a main-slot record.
    */
   beside?: string;
+  /**
+   * Revoke slot only: the revocations beside the same pending record that landed
+   * before this one was prepared, oldest first, kept as history instead of
+   * overwritten (REVOKE BESIDE...). Set by the store alone.
+   */
+  landed?: SolanaPreparedSetup[];
 }
 /**
  * REVOKE BESIDE A PENDING OWNER TRANSACTION (owner decision 2026-10-20, option A).
@@ -118,13 +124,16 @@ export interface SolanaPreparedSetup {
  * that is not pending (it belonged beside the record being replaced); a
  * pending one blocks that prepare.
  *
- * Also refused: another revocation beside the same pending record once one
- * beside it landed (SOLANA_REVOKE_ALREADY_LANDED). That landed record is the
- * partner the pending record's "never ran" proof counts and what keeps a
- * registration from being activated, so it is kept, never overwritten, until
- * the pending record resolves. Every session it covered is revoked; once the
- * pending record resolves, a revocation goes in the main slot as usual (needed
- * only when it was a registration that landed after the revocation).
+ * A revocation that landed beside the pending record is the partner that
+ * record's "never ran" proof counts and what keeps a registration from being
+ * activated, so it is kept, never overwritten, until the pending record
+ * resolves. Another revocation beside the same record is refused
+ * (SOLANA_REVOKE_ALREADY_LANDED) while nothing is left to revoke, and prepared
+ * once a session registered on Solana after that landing is live (the pending
+ * registration itself, landing after the revocation while the providers keep
+ * disagreeing about it, or one made outside Merrymen: solanaLiveAfterRevoke).
+ * The landed revocations then go with it as history (`landed`), still counted
+ * by the proof (solanaOwnerEpochOffset) and still fencing the registration.
  *
  * Proofs stay independent: a revocation moves only the session epoch, and a
  * withdrawal or resume-buys never does, so neither can wedge the other's
@@ -141,7 +150,7 @@ export interface SolanaPreparedSetup {
  * wallet; signed and saved, it then fences the registration as above.
  */
 /** Refused: a revocation beside a pending owner transaction once one beside it landed (REVOKE BESIDE...). */
-export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, so every session it covered is revoked. Once the pending owner transaction resolves you can revoke again; that is needed only if it was a trading permission that registered after your revocation.";
+export const SOLANA_REVOKE_ALREADY_LANDED = "Your revocation already landed, and no trading permission has registered on Solana since, so nothing is left to revoke. If one registers later, Revoke works again.";
 /** Refused: signed bytes of an in-app withdrawal the owner already recorded as made outside Merrymen (OWNER WITHDRAWALS MADE OUTSIDE MERRYMEN). */
 export const SOLANA_WITHDRAWAL_RECORDED_OUTSIDE = "This withdrawal is already recorded as made outside Merrymen, so it is not submitted again. Nothing more to do.";
 /** The evidence ids a withdrawal made outside Merrymen is booked under, one per vault token. */
@@ -162,11 +171,34 @@ export function solanaRegisteredEpoch(priorSessionEpoch: string | undefined): bi
  * (it ran). Otherwise 0: an unresolved partner's move is never assumed.
  */
 export function solanaOwnerEpochOffset(setup: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "priorSessionEpoch">,
-  partner: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> | null | undefined): number {
-  if (!partner?.signature || partner.status !== "finalized" || setup.priorSessionEpoch === undefined || partner.priorSessionEpoch !== setup.priorSessionEpoch) return 0;
+  partner: (Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> & { landed?: ReadonlyArray<Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch">> }) | null | undefined): number {
+  // A revocation kept as history in the partner's slot (`landed`) counts as the partner it was.
+  return [partner, ...(partner?.landed ?? [])].some(item => linkedEpochMove(setup, item)) ? 1 : 0;
+}
+function linkedEpochMove(setup: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "priorSessionEpoch">,
+  partner: Pick<SolanaPreparedSetup, "kind" | "signature" | "beside" | "status" | "priorSessionEpoch"> | null | undefined): boolean {
+  if (!partner?.signature || partner.status !== "finalized" || setup.priorSessionEpoch === undefined || partner.priorSessionEpoch !== setup.priorSessionEpoch) return false;
   const linked = setup.beside !== undefined ? setup.beside === partner.signature : !!setup.signature && partner.beside === setup.signature;
   const epochKind = (kind: SolanaPreparedSetup["kind"]) => (kind ?? "session") === "session" || kind === "revoke";
-  return linked && epochKind(setup.kind) && epochKind(partner.kind) ? 1 : 0;
+  return linked && epochKind(setup.kind) && epochKind(partner.kind);
+}
+/**
+ * The latest revocation that landed beside the pending main record `main`: the revoke slot's own record, or the
+ * last kept as history in it, while no revocation beside it is pending. Null otherwise.
+ */
+export function solanaLandedBeside(main: SolanaPreparedSetup | null | undefined, revoke: SolanaPreparedSetup | null | undefined): SolanaPreparedSetup | null {
+  if (!ownerPending(main) || !revoke || revoke.beside !== main!.signature || ownerPending(revoke)) return null;
+  return revoke.signature && revoke.status === "finalized" ? revoke : revoke.landed?.at(-1) ?? null;
+}
+/**
+ * Whether a vault read after `landed`, a revocation that landed beside a pending record, shows a session
+ * registered on Solana since: one is set (revoke_all clears it to the default key) at an epoch past the one that
+ * revocation left. Revoke then works again beside the same record (REVOKE BESIDE...).
+ */
+export function solanaLiveAfterRevoke(landed: Pick<SolanaPreparedSetup, "priorSessionEpoch">, vault: { session: string | undefined; sessionEpoch: string | bigint | undefined }): boolean {
+  const left = solanaRegisteredEpoch(landed.priorSessionEpoch), epoch = typeof vault.sessionEpoch === "bigint" ? vault.sessionEpoch
+    : vault.sessionEpoch !== undefined && /^(0|[1-9][0-9]{0,19})$/.test(vault.sessionEpoch) ? BigInt(vault.sessionEpoch) : null;
+  return left !== null && epoch !== null && epoch > left && !!vault.session && vault.session !== SOLANA_SYSTEM_PROGRAM;
 }
 /**
  * RESUME-BUYS BESIDE A REVOCATION. revoke_all pauses buying on chain and set_breaker(false) unpauses it, each
@@ -758,7 +790,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (setup.priorSessionEpoch !== undefined && session.sessionEpoch !== solanaRegisteredEpoch(setup.priorSessionEpoch)?.toString()) refuse(SOLANA_REGISTERED_AFTER_REVOKE);
       // A revocation the owner signed beside this registration, landed or not yet resolved, was the later word.
       const revoke = await this.revokeIn(tx);
-      if (revoke?.signature && revoke.beside === setup.signature && revoke.status !== "failed") refuse("A revocation was signed after this permission. Prepare a new permission.");
+      if (revoke?.beside === setup.signature && ((revoke.signature && revoke.status !== "failed") || revoke.landed?.length)) refuse("A revocation was signed after this permission. Prepare a new permission.");
       // One prepared beside it and still signable may be open in the owner's wallet: never deleted from under it.
       if (revoke && !revoke.signature && revoke.beside === setup.signature && clock(this.now) < revoke.expiresAtMs) refuse(SOLANA_REVOKE_PREPARED_BESIDE);
       await tx.prepare("DELETE FROM solana_runtime_owner_revokes WHERE tenant=? AND owner=?").run(this.scope.tenant, this.scope.owner);
@@ -981,12 +1013,25 @@ export class SolanaTradingStore implements SolanaLiveJournal {
           }
           if (!revoke || revoke.messageBase64 !== setup.messageBase64 || revoke.preparedAtMs !== setup.preparedAtMs || revoke.beside !== setup.beside) refuse("The prepared owner transaction changed. Review and sign again.");
           if (clock(this.now) >= revoke.expiresAtMs) refuse("The prepared owner transaction expired before submission.");
+          // Identical bytes to one that already landed (a prepare in the same slot reads the same blockhash) can never land again:
+          // saved, they would sit pending with that one's receipt and hold every owner action and trade.
+          if (revoke.landed?.some(item => item.signature === setup.signature)) refuse("That revocation already landed. Prepare the revocation again.");
+          // The history it was prepared with is the store's, whatever the signed copy carries.
+          const { landed: _offered, ...signed } = setup;
+          setup = { ...signed, ...(revoke.landed?.length ? { landed: revoke.landed } : {}) };
         } else {
           // Only beside the main record it names, while that is a pending non-revoke, and never beside another pending revocation.
           if (!ownerPending(main) || main!.signature !== setup.beside || main!.kind === "revoke") refuse("Prepare the revocation again: the pending owner transaction it was prepared beside changed.");
           if (ownerPending(revoke)) refuse("Resolve the previously submitted Solana setup before creating another.");
-          // A landed revocation beside this same record is kept: its proof partner and the registration's fence.
-          if (revoke?.signature && revoke.status === "finalized" && revoke.beside === setup.beside) refuse(SOLANA_REVOKE_ALREADY_LANDED);
+          // A landed revocation beside this same record is kept: its proof partner and the registration's fence. Another
+          // is prepared beside it only once the vault read for this one shows a session registered since that landing.
+          const latest = solanaLandedBeside(main, revoke);
+          if (latest && !solanaLiveAfterRevoke(latest, { session: setup.session, sessionEpoch: setup.priorSessionEpoch })) refuse(SOLANA_REVOKE_ALREADY_LANDED);
+          // Every revocation that landed beside this record so far goes with it, oldest first.
+          const { landed: _offered, ...prepared } = setup;
+          const history = revoke?.beside === setup.beside ? [...(revoke.landed ?? []), ...(revoke.signature && revoke.status === "finalized" ? [(({ landed: _kept, ...item }) => item)(revoke)] : [])] : [];
+          if (history.length > 8) refuse(SOLANA_REVOKE_ALREADY_LANDED);
+          setup = { ...prepared, ...(history.length ? { landed: history } : {}) };
         }
         await tx.prepare(`INSERT INTO solana_runtime_owner_revokes(tenant,owner,setup_json) VALUES(?,?,?)
           ON CONFLICT(tenant,owner) DO UPDATE SET setup_json=excluded.setup_json`).run(this.scope.tenant, this.scope.owner, JSON.stringify(setup));
