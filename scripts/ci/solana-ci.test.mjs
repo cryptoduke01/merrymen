@@ -29,6 +29,7 @@ import {
 } from "./solana-program-record.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
+import { ARTIFACT, checkLinuxManifest, differences, LINUX_HOST, LINUX_MANIFEST } from "./solana-linux-manifest.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
@@ -114,7 +115,7 @@ describe("the CI jobs", () => {
     for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, u);
   });
 
-  it("solana · test installs the checked toolchain, runs test.sh, then proves nothing unchecked was fetched", () => {
+  it("solana · test installs the checked toolchain, runs test.sh, records the Linux manifest, then proves nothing unchecked was fetched", () => {
     assert.ok(test, "ci.yml has no solana-test job");
     const order = [
       "uses: actions/checkout@",
@@ -123,8 +124,11 @@ describe("the CI jobs", () => {
       "uses: actions/cache@",
       "contracts/solana/test.sh 2>&1 | tee \"$RUNNER_TEMP/solana-test.log\"",
       "run: node scripts/ci/solana-runtime-tests.mjs \"$RUNNER_TEMP/solana-test.log\" contracts/solana/runtime-tests",
-      "run: scripts/ci/solana-toolchain.sh check",
       "node scripts/ci/solana-program-record.mjs contracts/solana contracts/solana/target/deploy/merrymen_vault.so ",
+      "contracts/solana/build.sh --record\n",
+      "node scripts/ci/solana-linux-manifest.mjs contracts/solana ",
+      // After every cargo-build-sbf run, --record's second build included.
+      "run: scripts/ci/solana-toolchain.sh check",
       "uses: actions/upload-artifact@",
     ].map(s => [s, test.indexOf(s)]);
     for (const [s, at] of order) assert.ok(at >= 0, `solana-test lacks ${s}`);
@@ -162,14 +166,38 @@ describe("the CI jobs", () => {
     assert.match(record, /case "\$release" in release-candidate\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"/);
   });
 
-  it("uploads only the artifact and its record, never the throwaway keypair beside them", () => {
+  it("uploads only the artifact, its record and the Linux manifest, never the throwaway keypair beside them", () => {
     const upload = /uses: actions\/upload-artifact@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
     assert.match(upload, /if-no-files-found: error/);
     const files = [...upload.matchAll(/^ {12}(\S+)$/gm)].map(m => m[1]);
     assert.deepEqual(files, [
       "contracts/solana/target/deploy/merrymen_vault.so",
       "contracts/solana/target/deploy/merrymen_vault.build.json",
+      "contracts/solana/build-manifests/Linux-x86_64.json",
     ]);
+  });
+
+  it("records the Linux build manifest for the tested artifact and checks it against the committed one", () => {
+    const manifest = steps(test).find(s => s.includes("- name: Linux build manifest")) ?? "";
+    assert.equal(manifest, [
+      "      - name: Linux build manifest",
+      "        if: needs.solana-paths.outputs.run == 'true'",
+      "        run: |",
+      "          contracts/solana/build.sh --record",
+      "          node scripts/ci/solana-linux-manifest.mjs contracts/solana \"$VAULT_TESTED_SHA256\"",
+      "        env:",
+      "          CARGO_INCREMENTAL: \"0\"",
+      "          VAULT_TESTED_SHA256: ${{ steps.record.outputs.sha256 }}",
+    ].join("\n"));
+    // The same environment as the Test step, so --record's in-place build is
+    // the build test.sh made, not a rebuild with other settings.
+    const testStep = steps(test).find(s => s.includes("contracts/solana/test.sh 2>&1")) ?? "";
+    assert.match(testStep, /^ {8}env:\n {10}CARGO_INCREMENTAL: "0"$/m);
+    // The manifest is written where the upload takes it from, for this runner's host.
+    const build = readFileSync(join(repo, "contracts/solana/build.sh"), "utf8");
+    assert.match(build, /^host="\$\(uname -s\)-\$\(uname -m\)"$/m);
+    assert.match(build, /^manifest="\$script_dir\/build-manifests\/\$host\.json"$/m);
+    assert.match(test, /^ {4}runs-on: ubuntu-24\.04$/m);
   });
 
   it("caches crates and the host test build, never the SBF build or its output", () => {
@@ -911,5 +939,135 @@ describe("solana-program-record.mjs", () => {
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /::error::the artifact does not contain the declared program ID/);
     assert.equal(bad.stdout, "");
+  });
+});
+
+describe("solana-linux-manifest.mjs", () => {
+  const script = join(here, "solana-linux-manifest.mjs");
+  const so = Buffer.from("\x7fELF pretend vault bytes");
+  const soSha = sha256(so);
+  /** A Linux manifest in build.sh --record's own format: the committed Darwin one, rehosted. */
+  const darwin = JSON.parse(readFileSync(join(repo, "contracts/solana/build-manifests/Darwin-arm64.json"), "utf8"));
+  const linux = (over = {}) => {
+    const m = structuredClone(darwin);
+    m.toolchain.host = LINUX_HOST;
+    m.artifact.bytes = so.length;
+    m.artifact.sha256 = soSha;
+    for (const [path, value] of Object.entries(over)) {
+      const keys = path.split(".");
+      const last = keys.pop();
+      keys.reduce((o, k) => o[k], m)[last] = value;
+    }
+    return m;
+  };
+  const text = m => `${JSON.stringify(m, null, 2)}\n`;
+
+  it("reads build.sh's manifest format: host, artifact file, digest", () => {
+    assert.equal(darwin.toolchain.host, "Darwin-arm64");
+    assert.equal(darwin.artifact.file, ARTIFACT);
+    assert.equal(LINUX_MANIFEST, "build-manifests/Linux-x86_64.json");
+    const build = readFileSync(join(repo, "contracts/solana/build.sh"), "utf8");
+    assert.ok(build.includes(`printf '    "file": "${ARTIFACT}",\\n'`), "build.sh writes another artifact path");
+  });
+
+  it("passes with no committed Linux manifest, and when the committed one is the same", () => {
+    const recorded = text(linux());
+    assert.equal(checkLinuxManifest({ recorded, committed: null, testedSha256: soSha, artifact: so }).status, "uncommitted");
+    assert.equal(checkLinuxManifest({ recorded, committed: recorded, testedSha256: soSha, artifact: so }).status, "matches");
+    // Same content, other formatting: still the same manifest.
+    assert.equal(checkLinuxManifest({ recorded, committed: JSON.stringify(linux()), testedSha256: soSha, artifact: so }).status, "matches");
+  });
+
+  it("fails when a committed Linux manifest exists and differs in any field", () => {
+    const recorded = text(linux());
+    const cases = {
+      "another artifact": [linux({ "artifact.sha256": "e".repeat(64) }), /artifact\.sha256: committed "e{64}", recorded "[0-9a-f]{64}"/],
+      "another size": [linux({ "artifact.bytes": so.length + 1 }), /artifact\.bytes: committed \d+, recorded \d+/],
+      "stale: other source": [linux({ "source.digest": "d".repeat(64) }), /source\.digest: committed "d{64}"/],
+      "another toolchain": [linux({ "toolchain.cargoBuildSbf": "solana-cargo-build-sbf 2.3.14" }), /toolchain\.cargoBuildSbf/],
+      "another program ID": [linux({ "program.declaredId": "11111111111111111111111111111111" }), /program\.declaredId/],
+      "a field missing": [(() => { const m = linux(); delete m.artifact.reproduced; return m; })(), /artifact\.reproduced: committed \(absent\)/],
+    };
+    for (const [label, [committed, error]] of Object.entries(cases)) {
+      assert.throws(() => checkLinuxManifest({ recorded, committed: text(committed), testedSha256: soSha, artifact: so }), error, label);
+      assert.throws(() => checkLinuxManifest({ recorded, committed: text(committed), testedSha256: soSha, artifact: so }), /differs from the committed build-manifests\/Linux-x86_64\.json/, label);
+    }
+    assert.throws(() => checkLinuxManifest({ recorded, committed: "{ not json", testedSha256: soSha, artifact: so }), /committed build-manifests\/Linux-x86_64\.json is not JSON/);
+    assert.deepEqual(differences({ a: { b: 1 } }, { a: { b: 1 } }), []);
+  });
+
+  it("fails when the recorded manifest is not for the tested artifact, whatever is committed", () => {
+    const cases = {
+      "another host": [{ recorded: text(linux({ "toolchain.host": "Darwin-arm64" })) }, /host "Darwin-arm64", not Linux-x86_64/],
+      "not the tested artifact": [{ recorded: text(linux({ "artifact.sha256": "a".repeat(64) })) }, /is for artifact a{64}, not the tested/],
+      "the .so changed after the tests": [{ artifact: Buffer.concat([so, Buffer.from("x")]) }, /changed after the tests ran/],
+      "no tested hash": [{ testedSha256: "" }, /no tested artifact SHA-256/],
+      "no source digest": [{ recorded: text(linux({ "source.digest": "" })) }, /no source digest/],
+      "another artifact file": [{ recorded: text(linux({ "artifact.file": "../elsewhere.so" })) }, /names "\.\.\/elsewhere\.so"/],
+      "not JSON": [{ recorded: "nope" }, /recorded build-manifests\/Linux-x86_64\.json is not JSON/],
+    };
+    for (const [label, [over, error]] of Object.entries(cases)) {
+      for (const committed of [null, text(linux())]) {
+        assert.throws(() => checkLinuxManifest({ recorded: text(linux()), committed, testedSha256: soSha, artifact: so, ...over }), error, label);
+      }
+    }
+  });
+
+  it("as a command: compares with the manifest committed at HEAD, never the one --record just overwrote", () => {
+    const origin = fresh("manifest-repo");
+    const gitIn = (...args) => {
+      const r = run("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+      }, origin);
+      assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+    };
+    const dir = join(origin, "contracts/solana");
+    mkdirSync(join(dir, "build-manifests"), { recursive: true });
+    mkdirSync(join(dir, "target/deploy"), { recursive: true });
+    writeFileSync(join(dir, ARTIFACT), so);
+    writeFileSync(join(dir, "build-manifests/Darwin-arm64.json"), text(darwin));
+    gitIn("init", "-q");
+    gitIn("add", "contracts/solana/build-manifests");
+    gitIn("commit", "-q", "-m", "no Linux manifest yet");
+    const manifest = join(dir, LINUX_MANIFEST);
+    const call = (args = [dir, soSha], extra = {}) => run(process.execPath, [script, ...args], extra);
+
+    // None committed: passes with a notice, and the summary says how it gets committed.
+    writeFileSync(manifest, text(linux()));
+    const summary = join(origin, "summary.md");
+    const first = call(undefined, { GITHUB_STEP_SUMMARY: summary });
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /^::notice title=Linux build manifest::No build-manifests\/Linux-x86_64\.json is committed/m);
+    assert.match(readFileSync(summary, "utf8"), /Review it and commit it from a run whose app check passed/);
+
+    // Committed and the same: passes.
+    gitIn("add", "contracts/solana/build-manifests/Linux-x86_64.json");
+    gitIn("commit", "-q", "-m", "commit the Linux manifest");
+    const same = call();
+    assert.equal(same.status, 0, same.stderr);
+    assert.match(same.stdout, /matches the committed build-manifests\/Linux-x86_64\.json/);
+
+    // --record wrote another build over the committed file: HEAD's copy is what counts.
+    const other = Buffer.from("\x7fELF other vault bytes");
+    writeFileSync(join(dir, ARTIFACT), other);
+    writeFileSync(manifest, text(linux({ "artifact.sha256": sha256(other), "artifact.bytes": other.length })));
+    const differs = call([dir, sha256(other)]);
+    assert.equal(differs.status, 1);
+    assert.match(differs.stderr, /^::error::this pinned Linux build differs from the committed build-manifests\/Linux-x86_64\.json: artifact\.bytes: .*artifact\.sha256: committed "[0-9a-f]{64}", recorded "[0-9a-f]{64}"/m);
+
+    // Nothing recorded, outside a checkout, or a bad call: exit 1 or 2, never a quiet pass.
+    rmSync(manifest);
+    const missing = call([dir, sha256(other)]);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /::error::no build-manifests\/Linux-x86_64\.json: build\.sh --record did not write one/);
+    const loose = fresh("not-git");
+    mkdirSync(join(loose, "build-manifests"), { recursive: true });
+    mkdirSync(join(loose, "target/deploy"), { recursive: true });
+    writeFileSync(join(loose, ARTIFACT), so);
+    writeFileSync(join(loose, LINUX_MANIFEST), text(linux()));
+    const outside = run(process.execPath, [script, loose, soSha], { GIT_CEILING_DIRECTORIES: dirname(loose) });
+    assert.equal(outside.status, 1);
+    assert.match(outside.stderr, /::error::/);
+    assert.equal(call([dir]).status, 2);
   });
 });

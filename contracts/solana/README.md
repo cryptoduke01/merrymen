@@ -119,6 +119,32 @@ artifact it just built. `build.sh` is the only supported build recipe:
 The deployed ProgramData region hash equals the manifest sha256 only for an exact-size
 allocation; otherwise hash the artifact followed by its zero padding (see above).
 
+## CI and the release artifact
+
+`solana · test` in `.github/workflows/ci.yml` installs agave 2.3.13 and platform-tools
+v1.48, each checked against the size and SHA-256 in `scripts/ci/solana-toolchain.env`
+before it is unpacked, runs `test.sh`, checks that every runtime test ran, and records
+the artifact (`merrymen_vault.build.json`: program ID, SHA-256, toolchain and the run
+that built it). `solana · rebuild` builds the same source again from `git archive` on
+another runner, and `app` requires the two hashes to be equal. Both jobs build only when
+a pull request changes a Solana-relevant path; pushes to main and manual runs always do.
+
+`solana · test` then runs `build.sh --record` and uploads `build-manifests/Linux-x86_64.json`
+with the artifact. The job fails when a committed Linux manifest exists and differs from
+that pinned Linux build; while none is committed it only reports the recorded values. To
+commit it, take the artifact from a run whose `app` check passed, check that the manifest's
+`source.digest` equals `build.sh --source-digest` at that commit and its `artifact.sha256`
+equals the tested and rebuilt hashes in `app`'s log, and commit the file unchanged. From
+then on a program change needs a new Linux manifest as well: its pull request fails until
+the manifest from that run's artifact is committed.
+
+A release artifact is `merrymen-vault-sbf-release-candidate-<commit>-run<id>.<attempt>`,
+from a CI run on `refs/heads/main` (a push to main, or a manual run on main) whose `app`
+check passed. Every other run's artifact, every pull request's included, is named
+`merrymen-vault-sbf-not-a-release-…`. CI never runs on a tag push, and a manual run on a
+tag or another branch is not a release. The name and record are written by the run
+itself, so confirm the run's event, branch and commit on GitHub before using it.
+
 The TypeScript suite also writes `runtime-tests/fixtures/ts-instructions.json` from the
 shared ABI builders (`MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1` rewrites it) and fails while it
 is stale. `custody.rs` executes those exact bytes and account metas against the compiled
