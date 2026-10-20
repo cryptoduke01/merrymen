@@ -279,32 +279,41 @@ describe("glued on-chain id detection (audit regressions F3)", () => {
     assert.ok(keyLike.length > 1_000_000);
     assert.equal(onchainIdIn(keyLike, glued), true);
 
-    // BOUNDED TIME, MEASURED AGAINST THIS MACHINE IN THIS RUN, never a wall clock: a fixed 2-second
-    // budget failed at 4.8 s on a runner with a load average near 100. Each figure is the best of
-    // several runs (load only ever adds time), and both sides of a comparison share the machine.
-    // - Linear: 32 times the text costs at most 4 x 32 times the time (measured 17-19x). A scan
-    //   quadratic in its text costs about 1,000x; an exponential one never returns.
+    // BOUNDED TIME, AGAINST THIS MACHINE IN THIS RUN, never a wall clock. A fixed 2-second budget failed
+    // at 4.8 s on a runner with a load average near 100, and a wall-clock ratio against a 3 ms scan of
+    // 1/32 of the text failed too (225x against 128x, with 40 busy loops): a short scan can still land
+    // in a quiet slice of a loaded machine, a long one cannot. So every figure here is CPU time
+    // (process.cpuUsage, user + system: what this process spent, not what others took from it), each
+    // compared figure covers the same characters, and they are taken in alternation, best of three.
+    // - Linear: the text scanned whole costs at most 4 times the same runs scanned as 32 chunks
+    //   (measured 0.5-0.6x: the whole text spends one decode budget, the chunks one each). A scan
+    //   whose work for each run grows with the text before it costs up to 32 times as much whole
+    //   once that work outweighs its own: a mutant reading every 4th character before each run
+    //   measured 16x and fails, one reading every 32nd measured 3.4x and passes. An exponential
+    //   scan never returns.
     // - A constant of the default scan over the same text, which decodes every standalone run with
-    //   no budget (measured 4.5-6.6x): a glued scan that grew a large constant fails here too.
-    // The 5 ms is timer and scheduling slack on the smaller figure, not a budget.
-    const best = (runs: number, scan: () => unknown): number => {
-      let least = Infinity;
-      for (let i = 0; i < runs; i++) {
-        const started = performance.now();
-        scan();
-        least = Math.min(least, performance.now() - started);
-      }
-      return least;
+    //   no budget (measured 4.5-7x): a glued scan that grew a large constant fails here too.
+    const cpuMs = (scan: () => unknown): number => {
+      const started = process.cpuUsage();
+      scan();
+      const spent = process.cpuUsage(started);
+      return (spent.user + spent.system) / 1_000;
     };
     for (const [name, big, run, count] of [["no key", noKey, noKeyRun, 30_000], ["key-like", keyLike, keyLikeRun, 12_000]] as const) {
-      const small = textOf(Math.ceil(count / 32), run);
-      best(2, () => onchainIdsIn(small, glued));
-      const tSmall = best(5, () => onchainIdsIn(small, glued));
-      const tBig = best(3, () => onchainIdsIn(big, glued));
-      const tDefault = best(3, () => onchainIdsIn(big));
-      const took = `${name}: ${tBig.toFixed(1)} ms for ${big.length} characters, ${tSmall.toFixed(1)} ms for ${small.length}, default scan ${tDefault.toFixed(1)} ms`;
-      assert.ok(tBig < 4 * 32 * tSmall + 5, `not linear in the text: ${took}`);
-      assert.ok(tBig < 50 * tDefault + 5, `far slower than the default scan: ${took}`);
+      const per = Math.ceil(count / 32);
+      const chunks = Array.from({ length: 32 }, (_, k) => textOf(Math.min(per, count - k * per), (i) => run(k * per + i)));
+      assert.equal(chunks.join(" "), big, "the chunks hold exactly the text's runs");
+      let whole = Infinity;
+      let split = Infinity;
+      let byDefault = Infinity;
+      for (let round = 0; round < 3; round++) {
+        whole = Math.min(whole, cpuMs(() => onchainIdsIn(big, glued)));
+        split = Math.min(split, cpuMs(() => chunks.map((chunk) => onchainIdsIn(chunk, glued))));
+        byDefault = Math.min(byDefault, cpuMs(() => onchainIdsIn(big)));
+      }
+      const took = `${name}, CPU time over ${big.length} characters: ${whole.toFixed(1)} ms whole, ${split.toFixed(1)} ms in 32 chunks, default scan ${byDefault.toFixed(1)} ms`;
+      assert.ok(whole < 4 * split, `not linear in the text: ${took}`);
+      assert.ok(whole < 50 * byDefault, `far slower than the default scan: ${took}`);
     }
   });
 });
