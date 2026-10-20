@@ -56,4 +56,23 @@ describe("the core barrel the phone bundles", () => {
   it("exports nothing from either Solana module", () => {
     assert.deepEqual(Object.keys(core).filter((k) => k in solana || k in solanaLive), []);
   });
+
+  it("reaches only packages a mobile/ install installs, and no Node built-in", () => {
+    // An EAS build installs mobile/ only: a package the barrel reaches that mobile/ does not install fails the
+    // release build, and nothing in CI bundles mobile/ to notice (it was proved by hand once). Installed means a
+    // dependency in mobile/package.json, or a production package mobile/package-lock.json puts at the top of
+    // node_modules: @noble/hashes (ids.ts, robinhood-oauth.ts) comes that way, with viem and @noble/curves.
+    const mobile = JSON.parse(readFileSync(join(SRC, "../../../mobile/package.json"), "utf8")) as { dependencies?: Record<string, string> };
+    const lock = JSON.parse(readFileSync(join(SRC, "../../../mobile/package-lock.json"), "utf8")) as { packages?: Record<string, { dev?: boolean; version?: string }> };
+    const installed = (name: string) => Object.hasOwn(mobile.dependencies ?? {}, name)
+      || (lock.packages?.[`node_modules/${name}`] !== undefined && lock.packages[`node_modules/${name}`]!.dev !== true);
+    // The walk reads text, so a comment quoting `"…" from "…"` can look like an import: only a bare package
+    // specifier counts. "@scope/name/sub" and "name/sub" are the packages "@scope/name" and "name".
+    const BARE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:\/\S*)?$/;
+    const packageOf = (spec: string) => spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
+    const reached = [...new Set([...packages].filter((spec) => BARE.test(spec)).map(packageOf))].sort();
+    assert.ok(reached.includes("viem") && reached.includes("@noble/curves"), `the walk sees the barrel's packages: ${reached.join(", ")}`);
+    assert.deepEqual(reached.filter((name) => !installed(name)), [], "not installed by mobile/ (package.json dependencies or its lock's top level)");
+    assert.deepEqual([...packages].filter((spec) => spec.startsWith("node:")), [], "Metro bundles no Node built-in");
+  });
 });
