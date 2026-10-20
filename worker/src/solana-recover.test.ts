@@ -884,23 +884,34 @@ describe("solana-recover program trust", () => {
   });
 
   it("a run verifies the program through that view of the owner's own transport, flags and all", async () => {
-    // On its own this branch reads no transport flag during verification, so the
-    // owner transport counts each time the run's view copies its singleEndpoint.
+    // The object verifySolanaVaultDeployment receives is what matters. Its
+    // first read is `rpc.providerKey`, which the view does not have, so that
+    // read reaches Object.prototype: a getter there, only for this run,
+    // records the receiver. (On this branch nothing reads singleEndpoint
+    // during verification, so a check on the flag's getter alone would pass
+    // with the copy disabled.)
     const fake = await chain();
     const base = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: RPC }, fetch: fake.fetch, timeoutMs: 15_000, singleEndpoint: true,
       sleep: async (ms) => fake.tick(ms) });
-    const copiedAt: number[] = [];
-    const owner = {
-      get singleEndpoint() { copiedAt.push(fake.calls.length); return true; },
-      providerKey: base.providerKey, read: base.read, readEach: base.readEach, send: base.send,
-    } as unknown as SolanaLiveRpc;
+    const owner = { singleEndpoint: true, laterFlag: 7, providerKey: "owner-cache-key", read: base.read, readEach: base.readEach, send: base.send } as unknown as SolanaLiveRpc;
+    const received: object[] = [];
+    Object.defineProperty(Object.prototype, "providerKey", { configurable: true, get() { received.push(this as object); return undefined; } });
     const out: string[] = [];
-    const result = await runSolanaRecovery({ rpc: owner, programId: PROGRAM, owner: OWNER, send: false, releases: RELEASED },
-      { log: (line) => out.push(line), sleep: async () => {} });
+    let result: SolanaRecoveryResult;
+    try {
+      result = await runSolanaRecovery({ rpc: owner, programId: PROGRAM, owner: OWNER, send: false, releases: RELEASED },
+        { log: (line) => out.push(line), sleep: async () => {} });
+    } finally { delete (Object.prototype as Record<string, unknown>).providerKey; }
     assert.equal(result.sent, false);
     assert.match(out.join("\n"), /Program binary verified: the released Merrymen vault program/);
-    assert.deepEqual(copiedAt, [0], "the view was built from the owner's transport, flag included, before any RPC call");
-    assert.ok(fake.calls.includes("getAccountInfo"), "and the program was read through it");
+    assert.equal(received.length, 1, "verification read providerKey from one object without its own");
+    const view = received[0] as SolanaLiveRpc & Record<string, unknown>;
+    assert.notEqual(view, owner, "verification received the view, not the owner's transport");
+    assert.equal(Object.hasOwn(view, "singleEndpoint") && view.singleEndpoint, true, "the object verification received carries singleEndpoint");
+    assert.equal(view.laterFlag, 7, "and every other transport flag");
+    assert.equal(Object.hasOwn(view, "providerKey"), false, "but no cache key");
+    assert.throws(() => view.send("AA==", 1), /never sends a transaction/);
+    assert.ok(fake.calls.includes("getAccountInfo"), "and the program was read through the owner's transport");
   });
 
   it("pins releases in packages/core: the tool's default list is the shared one, frozen and well formed", () => {
