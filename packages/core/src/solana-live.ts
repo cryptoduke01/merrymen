@@ -10,6 +10,17 @@ import { base58Decode, base58Encode } from "./ids";
 /** Local test identity only. Production MUST supply an explicitly verified immutable program. */
 export const SOLANA_VAULT_LOCAL_TEST_PROGRAM =
   "EUzYVniKtgNNgFweMtRA9vciTWtE8MDTRfh6ai6VvXoU";
+/**
+ * Released Merrymen vault programs: the program ID and the SHA-256 of its
+ * deployed binary, i.e. the ProgramData account's bytes after its 45-byte
+ * header up to the account's full size (it equals the .so file's hash only
+ * when deployed without extra --max-len space). The owner recovery tool
+ * (merrymen solana-recover) signs by default only for a program listed here,
+ * after checking that its immutable binary matches. Empty until a release: a
+ * release adds one frozen entry, reviewed, and it must match the deployment's
+ * MERRYMEN_SOLANA_VAULT_PROGRAM and MERRYMEN_SOLANA_VAULT_PROGRAM_SHA256.
+ */
+export const SOLANA_VAULT_RELEASES: readonly { readonly programId: string; readonly sha256: string }[] = Object.freeze([]);
 export const SOLANA_JUPITER_PROGRAM =
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
 export const SOLANA_ASSOCIATED_TOKEN_PROGRAM =

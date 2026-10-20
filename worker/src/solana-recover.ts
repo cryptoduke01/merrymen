@@ -7,11 +7,13 @@
  * The procedure is the one the program allows (contracts/solana, lib.rs):
  *   1. revoke_all alone, finalized before anything else. A session still
  *      trading would otherwise race the withdrawal and roll it back.
- *   2. From finalized balances: create the owner's token accounts if missing,
- *      sync the vault's native WSOL, withdraw all USDG, all WSOL and the vault
- *      account's SOL above its rent reserve.
+ *   2. From finalized balances, one transaction per asset, so a blocked asset
+ *      (a frozen, memo-required or paused account) stops only its own leg:
+ *      the vault account's SOL above its rent reserve first, then all USDG,
+ *      then all WSOL (creating the owner's token account if missing and
+ *      syncing the vault's native WSOL).
  * Funds can only move vault -> owner. A repeated or overlapping run cannot
- * move more than the vault holds: a stale amount fails the whole transaction.
+ * move more than the vault holds: a stale amount fails that leg.
  * About 0.0165 SOL of vault and vault token account rent stays locked, since
  * the program has no close instruction.
  *
@@ -29,21 +31,28 @@ import {
   getBase64EncodedWireTransaction, getSignatureFromTransaction, setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash, signTransaction, type Blockhash, type Instruction,
 } from "@solana/kit";
+import { ed25519 } from "@noble/curves/ed25519";
 import { base58Decode, base58Encode, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
 import {
   buildRevokeSolanaSessionsInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
   decodeSolanaVaultAccount, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
-  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
+  SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_RELEASES, SOLANA_WRAPPED_SOL_MINT, type SolanaVaultState,
 } from "../../packages/core/src/solana-live";
 import { verifySolanaVaultDeployment } from "./solana-executor";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import { SolanaRpcError } from "./solana-rpc";
 
+/**
+ * Whether a transaction that failed to finish can still land: "no" once it is
+ * provably out (failed on chain, or expired), "unknown" once its bytes may have
+ * reached the network without a final answer. Unset: nothing was sent.
+ */
+export type SolanaRecoveryLanding = "no" | "unknown";
 /** Fixed messages only: never key material, RPC URLs or provider text. */
 export class SolanaRecoverError extends Error {
-  constructor(message: string) { super(message); this.name = "SolanaRecoverError"; }
+  constructor(message: string, readonly landing?: SolanaRecoveryLanding) { super(message); this.name = "SolanaRecoverError"; }
 }
-function fail(message: string): never { throw new SolanaRecoverError(message); }
+function fail(message: string, landing?: SolanaRecoveryLanding): never { throw new SolanaRecoverError(message, landing); }
 
 /** Pubkey::default(), which revoke_all writes as the session. */
 const NO_SESSION = SOLANA_SYSTEM_PROGRAM;
@@ -52,13 +61,14 @@ const CREATE_IDEMPOTENT = 1;
 export const SOLANA_RECOVER_KEY_MAX_BYTES = 4096;
 
 /** A released Merrymen vault program and the SHA-256 of its deployed binary (ProgramData bytes after the 45-byte header). */
-export interface SolanaVaultRelease { readonly programId: string; readonly sha256: string }
+export type SolanaVaultRelease = (typeof SOLANA_VAULT_RELEASES)[number];
 /**
- * Released vault programs, verified by default. Empty until the program is
- * deployed: until then --send needs --program-sha256 and --unlisted-program.
- * A release adds its program ID and reviewed binary hash here.
+ * Released vault programs, verified by default: the shared pin in
+ * packages/core, so the app and this raw-key tool trust the same program.
+ * Empty until the program is released: until then --send needs
+ * --program-sha256 and --unlisted-program.
  */
-export const SOLANA_VAULT_RELEASES: readonly SolanaVaultRelease[] = Object.freeze([]);
+export { SOLANA_VAULT_RELEASES };
 /** Pause after the unlisted-program warning, before anything is signed. */
 export const SOLANA_RECOVER_UNLISTED_DELAY_MS = 15_000;
 
@@ -100,6 +110,19 @@ function canonical(value: string, what: string): string {
   const bytes = base58Decode(value);
   if (!bytes || bytes.length !== 32 || base58Encode(bytes) !== value) fail(`The ${what} must be a canonical Solana public key.`);
   return value;
+}
+
+/**
+ * True for a canonical base58 Solana address that is a point on the ed25519
+ * curve: every wallet that can sign (and so own a vault) has one. Program
+ * derived addresses are off the curve, and so are about half of all random
+ * 32-byte strings, such as a pasted secret seed.
+ */
+export function isSolanaWalletAddress(value: string): boolean {
+  const bytes = base58Decode(value);
+  if (!bytes || bytes.length !== 32 || base58Encode(bytes) !== value) return false;
+  // Strict RFC 8032 decoding (no ZIP-215 leniency): the y coordinate must be canonical.
+  try { ed25519.Point.fromBytes(bytes, false); return true; } catch { return false; }
 }
 
 /**
@@ -255,18 +278,35 @@ export function solanaRecoveryWithdrawal(state: SolanaRecoveryState): SolanaReco
   };
 }
 
-/** Step 2 instructions, built only from packages/core vault builders plus ATA and SyncNative. */
-export function solanaRecoveryWithdrawInstructions(state: SolanaRecoveryState): Instruction[] {
+export type SolanaRecoveryAsset = "SOL" | "USDG" | "WSOL";
+const DECIMALS: Record<SolanaRecoveryAsset, number> = { SOL: 9, USDG: 6, WSOL: 9 };
+/** One step 2 transaction: everything one asset needs, and nothing of another asset. */
+export interface SolanaRecoveryLeg { asset: SolanaRecoveryAsset; amountRaw: bigint; instructions: Instruction[] }
+/**
+ * Step 2 as one transaction per asset, built only from packages/core vault
+ * builders plus ATA and SyncNative. Legs are independent: a leg that cannot
+ * pass (a frozen, memo-required or paused account the read did not reveal)
+ * fails alone, and the other assets still reach the owner. SOL goes first,
+ * so the vault's spare SOL is in the owner wallet before the token legs pay
+ * for any new owner token account.
+ */
+export function solanaRecoveryWithdrawLegs(state: SolanaRecoveryState): SolanaRecoveryLeg[] {
   const plan = solanaRecoveryWithdrawal(state);
   const { programId, vault, owner } = state;
-  const instructions: Instruction[] = [];
+  const legs: SolanaRecoveryLeg[] = [];
+  if (plan.solLamports > 0n) {
+    legs.push({ asset: "SOL", amountRaw: plan.solLamports,
+      instructions: [buildWithdrawSolanaNativeInstruction({ programAddress: programId, vault, owner, amount: plan.solLamports })] });
+  }
   if (plan.usdgRaw > 0n) {
-    instructions.push(createOwnerAta(owner, state.usdg.ownerAccount, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
+    legs.push({ asset: "USDG", amountRaw: plan.usdgRaw, instructions: [
+      createOwnerAta(owner, state.usdg.ownerAccount, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
       buildWithdrawSolanaVaultInstruction({ programAddress: programId, vault, owner, mint: SOLANA_USDG_MINT,
-        vaultToken: state.usdg.vaultAccount, ownerToken: state.usdg.ownerAccount, tokenProgram: TOKEN_2022_PROGRAM, amount: plan.usdgRaw }));
+        vaultToken: state.usdg.vaultAccount, ownerToken: state.usdg.ownerAccount, tokenProgram: TOKEN_2022_PROGRAM, amount: plan.usdgRaw }),
+    ] });
   }
   if (plan.wsolRaw > 0n) {
-    instructions.push(createOwnerAta(owner, state.wsol.ownerAccount, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM));
+    const instructions: Instruction[] = [createOwnerAta(owner, state.wsol.ownerAccount, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM)];
     // Anyone may sync a native account: lamports sent to it become its token amount.
     if (state.wsol.unsyncedRaw > 0n) {
       instructions.push({ programAddress: address(SOLANA_CLASSIC_TOKEN_PROGRAM), data: Uint8Array.of(SYNC_NATIVE),
@@ -274,9 +314,9 @@ export function solanaRecoveryWithdrawInstructions(state: SolanaRecoveryState): 
     }
     instructions.push(buildWithdrawSolanaVaultInstruction({ programAddress: programId, vault, owner, mint: SOLANA_WRAPPED_SOL_MINT,
       vaultToken: state.wsol.vaultAccount, ownerToken: state.wsol.ownerAccount, tokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, amount: plan.wsolRaw }));
+    legs.push({ asset: "WSOL", amountRaw: plan.wsolRaw, instructions });
   }
-  if (plan.solLamports > 0n) instructions.push(buildWithdrawSolanaNativeInstruction({ programAddress: programId, vault, owner, amount: plan.solLamports }));
-  return instructions;
+  return legs;
 }
 
 export function formatSolanaUnits(raw: bigint, decimals: number): string {
@@ -314,7 +354,10 @@ export function describeSolanaRecovery(state: SolanaRecoveryState, sending: bool
     plan.solLamports > 0n && `${formatSolanaUnits(plan.solLamports, 9)} SOL`].filter(Boolean);
   lines.push(parts.length ? `  2. withdraw ${parts.join(", ")} to the owner${state.sessionActive ? " (re-read from finalized balances after step 1)" : ""}.`
     : "  2. nothing to withdraw.");
-  if (parts.length) lines.push(`     Destinations: owner ${state.owner}, USDG account ${state.usdg.ownerAccount}, WSOL account ${state.wsol.ownerAccount}.`);
+  if (parts.length) {
+    lines.push("     One transaction per asset (SOL, then USDG, then WSOL): an asset that cannot move does not stop the others.");
+    lines.push(`     Destinations: owner ${state.owner}, USDG account ${state.usdg.ownerAccount}, WSOL account ${state.wsol.ownerAccount}.`);
+  }
   if (plan.wsolRaw > 0n) lines.push("     WSOL arrives wrapped. Keep the owner WSOL account open if an agent may sell to it again.");
   for (const note of plan.skipped) lines.push(`  Note: ${note}`);
   if (state.ownerLamports < 10_000_000n) lines.push("  Note: the owner wallet holds under 0.01 SOL. Fees and any new token account (about 0.002 SOL each) are paid from it.");
@@ -341,8 +384,23 @@ export interface SolanaRecoveryIo {
 }
 type Outcome = { signature: string; status: "finalized"; slot: number };
 
-/** Sign one owner transaction, send it once, and wait until it is finalized or provably expired. */
-async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner: string, instructions: Instruction[], label: string, io: SolanaRecoveryIo): Promise<Outcome> {
+/**
+ * Sign one owner transaction once, submit it, and wait until it is finalized
+ * or provably expired. Only these signed bytes are ever sent: a rebroadcast of
+ * identical bytes can land at most once, and nothing is signed again here.
+ *
+ * A failure says whether the transaction can still land (SolanaRecoverError's
+ * `landing`): "no" only when it failed on chain or provably expired; "unknown"
+ * for everything after the first submission began, the RPC errors of the
+ * status polls included. A first submission the RPC did not confirm is
+ * "unknown" too: the transport cannot tell a refusal from an answer lost after
+ * the node received the bytes (a timeout, a dropped connection, and a JSON-RPC
+ * error object all reach here as the same SolanaRpcError). Errors before the
+ * first submission leave `landing` unset: nothing left this process.
+ */
+async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner: string, instructions: Instruction[], label: string, io: SolanaRecoveryIo,
+  /** What a failure means for the rest of the run, appended to its message. */
+  consequence: string): Promise<Outcome> {
   const block = await latestBlock(rpc);
   const compiled = compileTransaction(setTransactionMessageLifetimeUsingBlockhash(
     { blockhash: block.blockhash, lastValidBlockHeight: block.lastValidBlockHeight },
@@ -351,18 +409,37 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
   const signature = getSignatureFromTransaction(signed);
   const wire = getBase64EncodedWireTransaction(signed);
   if (Buffer.from(wire, "base64").length > 1232) fail("The recovery transaction is too large.");
+  const deadline = Date.now() + (io.maxWaitMs ?? 150_000);
   io.log(`${label}: sending ${signature}`);
-  // Sent once, with preflight simulation. No automatic resend: an unknown
-  // outcome is resolved by reading the chain, never by signing again here.
+  // First a single round with preflight simulation, so a refusal is reported
+  // at once instead of after the blockhash's whole lifetime.
   let sent: string;
-  try { sent = await rpc.send(wire, block.slot); }
+  try { sent = await rpc.send(wire, block.slot, undefined, { untilMs: 0 }); }
   catch (error) {
     if (!(error instanceof SolanaRpcError)) throw error;
     fail(`${label} was not confirmed as submitted (${signature}): the RPC refused it, for example in its simulation, or its answer `
-      + "could not be read. Nothing after it was sent. Wait about two minutes, then run the command again: it re-reads the chain before sending anything.");
+      + `could not be read. ${consequence}Wait about two minutes, then run the command again: it re-reads the chain before sending anything.`, "unknown");
   }
-  if (sent !== signature) fail("The Solana RPC answered with a different signature. Check an explorer before running again.");
-  const deadline = Date.now() + (io.maxWaitMs ?? 150_000);
+  if (sent !== signature) fail(`The Solana RPC answered ${label} with a different signature than ${signature}. Check an explorer before running again.`, "unknown");
+  // Accepted: rebroadcast the same bytes until the RPC sees them confirmed or
+  // the blockhash expires, which helps them land under congestion. Whatever
+  // this phase reports, the outcome is decided below from the chain alone.
+  try { await rpc.send(wire, block.slot, undefined, { untilMs: deadline }); }
+  catch (error) { if (!(error instanceof SolanaRpcError)) throw error; }
+  try { return await finalizeOrExpire(rpc, signature, block, label, io, consequence, deadline); }
+  catch (error) {
+    // Sent, so it may still land: an RPC error or an unreadable status while
+    // polling is never "not landed". Name the signature the owner can look up.
+    if (error instanceof SolanaRecoverError && error.landing !== undefined) throw error;
+    if (!(error instanceof SolanaRpcError) && !(error instanceof SolanaRecoverError)) throw error;
+    fail(`${label} was sent (${signature}) but its status could not be read. ${consequence}`
+      + "Check an explorer, wait about two minutes, then run the command again; it re-reads the chain first.", "unknown");
+  }
+}
+
+/** Polls a sent transaction until it is finalized, failed or provably expired, or the deadline passes. */
+async function finalizeOrExpire(rpc: SolanaLiveRpc, signature: string, block: Block, label: string, io: SolanaRecoveryIo, consequence: string,
+  deadline: number): Promise<Outcome> {
   for (;;) {
     type Status = { kind: "failed" } | { kind: "finalized"; slot: number } | { kind: "waiting"; expired: boolean };
     const status = await rpc.read(async (read): Promise<Status> => {
@@ -378,12 +455,34 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
       if (state && state.confirmationStatus === "finalized") return { kind: "finalized", slot: integer(state.slot) };
       return { kind: "waiting", expired: state === null && height > block.lastValidBlockHeight };
     });
-    if (status.kind === "failed") fail(`${label} failed on chain (${signature}). Nothing after it was sent. Review the plan and run again.`);
+    if (status.kind === "failed") fail(`${label} failed on chain (${signature}). ${consequence}Review the plan and run again.`, "no");
     if (status.kind === "finalized") { io.log(`${label}: finalized in slot ${status.slot}.`); return { signature, status: "finalized", slot: status.slot }; }
-    if (status.expired) fail(`${label} expired without landing (${signature}). Nothing after it was sent. Run the command again.`);
-    if (Date.now() > deadline) fail(`${label} is not finalized yet (${signature}). Check an explorer, then run the command again; it re-reads the chain first.`);
+    if (status.expired) fail(`${label} expired without landing (${signature}). ${consequence}Run the command again.`, "no");
+    if (Date.now() > deadline) fail(`${label} is not finalized yet (${signature}). ${consequence}Check an explorer, then run the command again; it re-reads the chain first.`, "unknown");
     await io.sleep(io.pollMs ?? 2_000);
   }
+}
+
+/**
+ * The transport program verification reads through. It keeps every transport
+ * flag of the owner's transport, above all singleEndpoint: an every-provider
+ * check refuses a one-provider transport that does not carry it, so dropping
+ * it would make every verified recovery fail with "no-quorum". It drops only
+ * providerKey: a transport without one never consults the executor's
+ * in-process success cache, so an earlier verification in this process cannot
+ * vouch for this run. It reads through the same transport and cannot send.
+ */
+export function solanaRecoveryVerificationRpc(rpc: SolanaLiveRpc): SolanaLiveRpc {
+  const flags: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(rpc)) {
+    if (name !== "providerKey" && typeof value !== "function") flags[name] = value;
+  }
+  const methods: SolanaLiveRpc = {
+    read: (operation) => rpc.read(operation),
+    ...(typeof rpc.readEach === "function" ? { readEach: (operation) => rpc.readEach!(operation) } : {}),
+    send: () => fail("Program verification never sends a transaction."),
+  };
+  return Object.assign(flags, methods) as SolanaLiveRpc;
 }
 
 export interface SolanaRecoveryOptions {
@@ -404,19 +503,28 @@ export interface SolanaRecoveryResult {
   sent: boolean;
   plan: SolanaRecoveryState;
   revoke?: Outcome;
-  withdraw?: Outcome;
+  /**
+   * Step 2, one entry per asset leg sent: its outcome, or the fixed message it
+   * failed with. `state` is "withdrawn" (finalized), "not-withdrawn" (nothing
+   * was sent, or it failed on chain or provably expired) or "unknown" (it was
+   * submitted, or may have been, and can still land).
+   */
+  withdrawals?: { asset: SolanaRecoveryAsset; amountRaw: bigint; state: "withdrawn" | "not-withdrawn" | "unknown"; outcome?: Outcome; error?: string }[];
   final?: SolanaRecoveryState;
 }
 
 export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: SolanaRecoveryIo): Promise<SolanaRecoveryResult> {
   const { rpc, programId, owner } = options;
-  canonical(programId, "program ID"); canonical(owner, "owner");
+  canonical(programId, "program ID");
+  // Before any RPC call, and never echoed: a value that is not a wallet address may be a pasted secret.
+  if (!isSolanaWalletAddress(owner)) fail("The owner must be a Solana wallet address (an ed25519 public key). Nothing was sent.");
   if (options.send && !options.keyPair) fail("Sending needs the owner's key (--key-file).");
   // Before any RPC call: nothing is signed for a program that is not verified.
   const trust = solanaRecoveryProgramTrust(options);
   if (trust.sha256 !== undefined) {
-    // Immutable (no upgrade authority) and hash-matched, so it cannot change before the sends.
-    try { await verifySolanaVaultDeployment(rpc, programId, trust.sha256); }
+    // Immutable (no upgrade authority) and hash-matched, so it cannot change
+    // before the sends. Read fresh on every run (see solanaRecoveryVerificationRpc).
+    try { await verifySolanaVaultDeployment(solanaRecoveryVerificationRpc(rpc), programId, trust.sha256); }
     catch (error) {
       if (error instanceof SolanaRpcError) throw error;
       fail(trust.listed ? "The program at that address is not the immutable released binary. Nothing was signed or sent."
@@ -446,22 +554,43 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   let minSlot = 1;
   const revoke = solanaRecoveryRevokeInstructions(plan);
   if (revoke.length) {
-    result.revoke = await sendAndFinalize(rpc, options.keyPair!, owner, revoke, "Step 1 (revoke_all)", io);
+    result.revoke = await sendAndFinalize(rpc, options.keyPair!, owner, revoke, "Step 1 (revoke_all)", io, "Nothing after it was sent. ");
     minSlot = result.revoke.slot;
   }
   // Amounts come only from finalized state after the revoke: no session can
   // move funds any more, and balances can only grow from here.
   const settled = await readSolanaRecoveryState(rpc, programId, owner, "finalized", minSlot);
   if (settled.sessionActive) fail("A session key is still set after revoke_all finalized. Nothing was withdrawn; run the command again.");
-  const withdraw = solanaRecoveryWithdrawInstructions(settled);
-  if (withdraw.length) {
+  const legs = solanaRecoveryWithdrawLegs(settled);
+  result.withdrawals = [];
+  if (legs.length) {
     const amounts = solanaRecoveryWithdrawal(settled);
-    io.log(`Step 2 (withdraw): ${formatSolanaUnits(amounts.usdgRaw, 6)} USDG, ${formatSolanaUnits(amounts.wsolRaw, 9)} WSOL, ${formatSolanaUnits(amounts.solLamports, 9)} SOL, from finalized slot ${settled.slot}.`);
-    result.withdraw = await sendAndFinalize(rpc, options.keyPair!, owner, withdraw, "Step 2 (withdraw)", io);
-    minSlot = result.withdraw.slot;
+    io.log(`Step 2 (withdraw): ${formatSolanaUnits(amounts.usdgRaw, 6)} USDG, ${formatSolanaUnits(amounts.wsolRaw, 9)} WSOL, ${formatSolanaUnits(amounts.solLamports, 9)} SOL, from finalized slot ${settled.slot}, one transaction per asset.`);
   } else io.log("Step 2 (withdraw): nothing left to withdraw.");
+  for (const leg of legs) {
+    const label = `Step 2 (${leg.asset})`;
+    try {
+      const outcome = await sendAndFinalize(rpc, options.keyPair!, owner, leg.instructions, label, io, "The other assets are sent separately. ");
+      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, state: "withdrawn", outcome });
+      minSlot = Math.max(minSlot, outcome.slot);
+    } catch (error) {
+      // Fixed messages only. A leg that did not finish never blocks the next asset.
+      if (!(error instanceof SolanaRecoverError) && !(error instanceof SolanaRpcError)) throw error;
+      // "NOT withdrawn" only when it cannot land; a leg that may still land says so.
+      const unknown = error instanceof SolanaRecoverError && error.landing === "unknown";
+      io.log(unknown ? `${label}: outcome unknown, it may still land. ${error.message}` : `${label}: NOT withdrawn. ${error.message}`);
+      result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, state: unknown ? "unknown" : "not-withdrawn", error: error.message });
+    }
+  }
   result.final = await readSolanaRecoveryState(rpc, programId, owner, "finalized", minSlot);
   const left = solanaRecoveryWithdrawal(result.final);
   io.log(`Done. Left in the vault: ${formatSolanaUnits(left.usdgRaw, 6)} USDG, ${formatSolanaUnits(left.wsolRaw, 9)} WSOL, ${formatSolanaUnits(left.solLamports, 9)} SOL above rent.`);
+  const unfinished = result.withdrawals.filter((w) => w.state !== "withdrawn");
+  if (unfinished.length) {
+    const named = unfinished.map((w) => `${formatSolanaUnits(w.amountRaw, DECIMALS[w.asset])} ${w.asset}`
+      + (w.state === "unknown" ? " (outcome unknown: it may still land; look up its signature above)" : ""));
+    fail(`Step 2 did not finish for ${named.join(" and ")}; `
+      + "every other asset was withdrawn. See the messages above, wait about two minutes, then run the command again: it re-reads the chain and retries only what is left.");
+  }
   return result;
 }

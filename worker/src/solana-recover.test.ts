@@ -21,9 +21,12 @@ import {
   deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM,
   SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_WRAPPED_SOL_MINT,
 } from "../../packages/core/src/solana-live";
+import { SOLANA_VAULT_RELEASES as CORE_SOLANA_VAULT_RELEASES } from "../../packages/core/src/solana-live";
 import {
-  readSolanaOwnerKey, SolanaRecoverError, solanaRecoveryRevokeInstructions, solanaRecoveryWithdrawInstructions, type SolanaRecoveryResult,
+  isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_VAULT_RELEASES, SolanaRecoverError, solanaRecoveryProgramTrust,
+  solanaRecoveryRevokeInstructions, solanaRecoveryVerificationRpc, solanaRecoveryWithdrawLegs, type SolanaRecoveryResult,
 } from "./solana-recover";
+import { createSolanaLiveRpc, type SolanaLiveRpc } from "./solana-live-rpc";
 import { runSolanaRecoverCommand, type SolanaRecoverCommandDeps } from "./solana-recover-command";
 import { SOLANA_MAINNET_GENESIS_HASH, SolanaRpcError } from "./solana-rpc";
 
@@ -77,19 +80,42 @@ function tokenData(mint: string, authority: string, amount: bigint, options: { n
 }
 
 /** A fake mainnet that executes recovery transactions with the program's constraints. */
+/** Blocks the finalized commitment trails the tip by. */
+const FINALITY_LAG = 32;
+type Behavior = "land" | "drop" | "fail" | "reject" | "late" | "hidden";
 class FakeChain {
   accounts = new Map<string, Account>();
   slot = 1_000; height = 5_000;
   genesis = SOLANA_MAINNET_GENESIS_HASH;
+  /** Distinct transactions, in the order first submitted. Rebroadcasts of the same bytes are counted in `broadcasts`. */
   sent: { signature: string; instructions: Decoded[]; wire: string }[] = [];
+  broadcasts = 0;
   calls: string[] = [];
   statuses = new Map<string, { slot: number; err: unknown; polls: number }>();
-  /** Per-send behavior, in order: land (default), drop (never lands) or fail (lands with an error). */
-  behaviors: ("land" | "drop" | "fail" | "reject")[] = [];
-  /** Runs before each send executes, e.g. a session trade racing the revoke. */
+  /**
+   * Per transaction, in the order first submitted: land (default, at once), drop
+   * (accepted, never lands), fail (lands with an error), reject (refused every
+   * time, as by a failed simulation) or late (accepted, lands one block before
+   * its blockhash expires) or hidden (lands at once, but every status read
+   * answers null until the finalized block height is past its last valid block
+   * height, like an RPC whose status index lags). Rebroadcasts of identical
+   * bytes are the same transaction.
+   */
+  behaviors: Behavior[] = [];
+  /** Last valid block height of each transaction, by signature, from its first submission. */
+  lastValidOf = new Map<string, number>();
+  /** Hidden transactions: their status reads answer null while the finalized height is at or below this. */
+  hiddenUntil = new Map<string, number>();
+  behaviorOf = new Map<string, Behavior>();
+  pending = new Map<string, { instructions: Decoded[]; landAt: number; lastValid: number }>();
+  /** Last valid block height of every blockhash handed out. */
+  blockhashes = new Map<string, number>();
+  /** Runs before each new transaction executes, e.g. a session trade racing the revoke. */
   beforeSend?: (index: number) => void;
-  /** Statuses report "confirmed" this many times before "finalized". */
+  /** Statuses report "confirmed" to this many owner polls before "finalized". */
   confirmedPolls = 1;
+  /** Never report "finalized". */
+  holdFinality = false;
   vault = "";
   constructor(readonly program: string = PROGRAM) {}
 
@@ -126,6 +152,28 @@ class FakeChain {
     this.accounts.set(dataAddress, { owner: LOADER, lamports: 1n, data: Buffer.concat([header, binary]) });
   }
   token(address: string) { const a = this.accounts.get(address); return a ? a.data.readBigUInt64LE(64) : null; }
+  /** Time passes: about one block per 400 ms, at least one block per wait. Late transactions land when their block comes. */
+  tick(ms: number) {
+    for (let blocks = Math.max(1, Math.ceil(ms / 400)); blocks > 0; blocks--) {
+      this.slot++; this.height++;
+      for (const [signature, tx] of this.pending) {
+        if (this.height > tx.lastValid) { this.pending.delete(signature); continue; }
+        if (this.height >= tx.landAt) { this.pending.delete(signature); this.land(signature, tx.instructions, "land"); }
+      }
+    }
+  }
+  /** Executes a transaction in a block. Returns false when it cannot pass simulation. */
+  land(signature: string, instructions: Decoded[], behavior: "land" | "fail"): boolean {
+    const snapshot = new Map([...this.accounts].map(([k, v]) => [k, { ...v, data: Buffer.from(v.data) }]));
+    let err: unknown = null;
+    try { for (const ix of instructions) this.execute(ix); }
+    catch { this.accounts = snapshot; err = { InstructionError: [0, { Custom: 1 }] }; }
+    if (behavior === "fail") { this.accounts = snapshot; err = { InstructionError: [0, { Custom: 6000 }] }; }
+    if (err === null) this.accounts.get(OWNER)!.lamports -= 5_000n;
+    this.statuses.set(signature, { slot: ++this.slot, err, polls: 0 });
+    this.height++;
+    return true;
+  }
   vaultField() { const d = this.accounts.get(this.vault)!.data; return { session: base58Encode(d.subarray(42, 74)), epoch: d.readBigUInt64LE(74), paused: d[132] === 1, expiresAt: d.readBigInt64LE(90), seq: d.readBigUInt64LE(82) }; }
 
   fetch: typeof fetch = async (input, init) => {
@@ -146,7 +194,11 @@ class FakeChain {
         if ((options?.minContextSlot ?? 0) > current) return error();
         return reply(current);
       }
-      case "getBlockHeight": return reply(this.height);
+      case "getBlockHeight": return reply((p[0] as { commitment?: string } | undefined)?.commitment === "finalized" ? this.height - FINALITY_LAG : this.height);
+      case "isBlockhashValid": {
+        const lastValid = this.blockhashes.get(String(p[0]));
+        return reply({ context: { slot: this.slot }, value: lastValid !== undefined && this.height <= lastValid });
+      }
       case "getMinimumBalanceForRentExemption": return reply(Number(rent(p[0])));
       case "getMultipleAccounts": return reply({ context: { slot: this.slot }, value: (p[0] as string[]).map((k) => encode(this.accounts.get(k))) });
       case "getAccountInfo": {
@@ -154,40 +206,61 @@ class FakeChain {
         const value = encode(account && slice ? { ...account, data: account.data.subarray(slice.offset, slice.offset + slice.length) } : account);
         return reply({ context: { slot: this.slot }, value: value && account ? { ...value, space: account.data.length } : value });
       }
-      case "getLatestBlockhash": return reply({ context: { slot: this.slot }, value: { blockhash: key(90 + this.sent.length), lastValidBlockHeight: this.height + 150 } });
+      case "getLatestBlockhash": {
+        const blockhash = key(90 + this.sent.length);
+        this.blockhashes.set(blockhash, this.height + 150);
+        return reply({ context: { slot: this.slot }, value: { blockhash, lastValidBlockHeight: this.height + 150 } });
+      }
       case "getSignatureStatuses": {
+        const hidden = this.hiddenUntil.get(p[0][0]);
+        if (hidden !== undefined && this.height - FINALITY_LAG <= hidden) return reply({ context: { slot: this.slot }, value: [null] });
         const status = this.statuses.get(p[0][0]);
-        if (!status) { this.height += 200; this.slot += 200; return reply({ context: { slot: this.slot }, value: [null] }); }
-        const finalized = status.polls++ >= this.confirmedPolls;
+        if (!status) return reply({ context: { slot: this.slot }, value: [null] });
+        // Only the owner tool's polls (with history search) count; the transport's rebroadcast checks do not.
+        const polls = p[1]?.searchTransactionHistory === true ? status.polls++ : status.polls;
+        const finalized = !this.holdFinality && polls >= this.confirmedPolls;
         // Once a slot is reported finalized, the finalized tip has reached it.
         if (finalized) this.slot = Math.max(this.slot, status.slot + 32);
         return reply({ context: { slot: this.slot }, value: [{ slot: status.slot, confirmations: finalized ? null : 1, err: status.err,
           confirmationStatus: finalized ? "finalized" : "confirmed" }] });
       }
       case "sendTransaction": {
-        const index = this.sent.length;
-        this.beforeSend?.(index);
-        const { signature, instructions } = this.decode(String(p[0]));
-        this.sent.push({ signature, instructions, wire: String(p[0]) });
-        const behavior = this.behaviors[index] ?? "land";
-        if (behavior === "drop") return reply(signature);
+        this.broadcasts++;
+        const wire = String(p[0]);
+        const { signature, instructions, blockhash } = this.decode(wire);
+        if (!this.behaviorOf.has(signature)) {
+          const index = this.sent.length;
+          this.beforeSend?.(index);
+          this.sent.push({ signature, instructions, wire });
+          this.behaviorOf.set(signature, this.behaviors[index] ?? "land");
+        }
+        const behavior = this.behaviorOf.get(signature)!;
+        // Like a real RPC with preflight: a copy that already landed, or one
+        // whose blockhash expired, is refused.
+        if (this.statuses.has(signature)) return error();
+        const lastValid = this.blockhashes.get(blockhash);
+        if (lastValid !== undefined && !this.lastValidOf.has(signature)) this.lastValidOf.set(signature, lastValid);
+        if (lastValid === undefined || this.height > lastValid) return error();
+        if (behavior === "hidden") this.hiddenUntil.set(signature, lastValid);
         if (behavior === "reject") return error();
+        if (behavior === "drop") return reply(signature);
+        if (behavior === "late") {
+          if (!this.pending.has(signature)) this.pending.set(signature, { instructions, landAt: lastValid - 1, lastValid });
+          return reply(signature);
+        }
+        // Simulation first: a transaction that would fail is refused, not landed.
         const snapshot = new Map([...this.accounts].map(([k, v]) => [k, { ...v, data: Buffer.from(v.data) }]));
         try { for (const ix of instructions) this.execute(ix); }
         catch { this.accounts = snapshot; return error(); }
-        if (behavior === "fail") { this.accounts = snapshot; this.statuses.set(signature, { slot: ++this.slot, err: { InstructionError: [0, { Custom: 6000 }] }, polls: 0 }); }
-        else {
-          this.accounts.get(OWNER)!.lamports -= 5_000n;
-          this.statuses.set(signature, { slot: ++this.slot, err: null, polls: 0 });
-        }
-        this.height += 2;
+        this.accounts = snapshot;
+        this.land(signature, instructions, behavior === "fail" ? "fail" : "land");
         return reply(signature);
       }
       default: throw new Error(`unexpected RPC method ${body.method}`);
     }
   };
 
-  decode(wire: string): { signature: string; instructions: Decoded[] } {
+  decode(wire: string): { signature: string; instructions: Decoded[]; blockhash: string } {
     const tx = getTransactionDecoder().decode(Buffer.from(wire, "base64"));
     const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
     const { numSignerAccounts, numReadonlySignerAccounts, numReadonlyNonSignerAccounts } = message.header;
@@ -204,7 +277,7 @@ class FakeChain {
     const instructions = message.instructions.map((ix) => ({ program: keys[ix.programAddressIndex]!,
       accounts: (ix.accountIndices ?? []).map((i) => ({ address: keys[i]!, ...role(i) })), data: Buffer.from(ix.data ?? []) }));
     const first = tx.signatures[keys[0] as keyof typeof tx.signatures]!;
-    return { signature: base58Encode(new Uint8Array(first)), instructions };
+    return { signature: base58Encode(new Uint8Array(first)), instructions, blockhash: String(message.lifetimeToken) };
   }
 
   /** Program semantics, failing like the real programs would. */
@@ -295,8 +368,9 @@ async function chain(options: Parameters<FakeChain["setup"]>[0] = {}) {
 }
 async function run(fake: FakeChain, args: string[], extra: Partial<SolanaRecoverCommandDeps> = {}) {
   const out: string[] = [], warnings: string[] = [];
-  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async () => {}, pollMs: 0,
-    releases: RELEASED, ...extra };
+  // Waits are fake time: they advance the chain instead of the clock.
+  const deps: SolanaRecoverCommandDeps = { fetch: fake.fetch, log: (l) => out.push(l), warn: (l) => warnings.push(l), sleep: async (ms) => fake.tick(ms),
+    pollMs: 2_000, releases: RELEASED, ...extra };
   try {
     const result = await runSolanaRecoverCommand(args, deps);
     return { result: result as SolanaRecoveryResult, out: out.join("\n"), warnings: warnings.join("\n"), error: null as unknown };
@@ -367,9 +441,9 @@ describe("solana-recover", () => {
     const file = keyFile(`${SECRET_BASE58}\n`);
     const { result, out, warnings, error } = await run(fake, [...base, "--key-file", file, "--send"]);
     assert.equal(error, null, String(error));
-    assert.equal(fake.sent.length, 2, "exactly two transactions");
+    assert.equal(fake.sent.length, 4, "the revoke, then one transaction per asset");
 
-    const [revoke, withdraw] = fake.sent;
+    const [revoke, solLeg, usdgLeg, wsolLeg] = fake.sent;
     const expectedRevoke = buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER });
     assert.equal(revoke!.instructions.length, 1, "revoke_all is sent alone");
     assert.deepEqual([...revoke!.instructions[0]!.data], [...expectedRevoke.data!]);
@@ -380,17 +454,22 @@ describe("solana-recover", () => {
     const ownerWsol = await deriveSolanaAta(OWNER, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
     const vaultUsdg = await deriveSolanaAta(fake.vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
     const vaultWsol = await deriveSolanaAta(fake.vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
-    assert.deepEqual(withdraw!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM,
-      SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM]);
+    // SOL first, then USDG, then WSOL; no transaction touches two assets.
+    assert.deepEqual(solLeg!.instructions.map((ix) => ix.program), [PROGRAM]);
+    assert.deepEqual(usdgLeg!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM]);
+    assert.deepEqual(wsolLeg!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM]);
     const usdgIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_USDG_MINT,
       vaultToken: vaultUsdg, ownerToken: ownerUsdg, tokenProgram: TOKEN_2022_PROGRAM, amount: 2_345_678n });
     const wsolIx = buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, mint: SOLANA_WRAPPED_SOL_MINT,
       vaultToken: vaultWsol, ownerToken: ownerWsol, tokenProgram: SOLANA_CLASSIC_TOKEN_PROGRAM, amount: 600_000_000n });
     const solIx = buildWithdrawSolanaNativeInstruction({ programAddress: PROGRAM, vault: fake.vault, owner: OWNER, amount: 3_000_000n });
-    for (const [index, built] of [[1, usdgIx], [4, wsolIx], [5, solIx]] as const) {
-      assert.deepEqual([...withdraw!.instructions[index]!.data], [...built.data!], `instruction ${index} matches the packages/core builder`);
-      assert.deepEqual(withdraw!.instructions[index]!.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
+    for (const [sentIx, built] of [[usdgLeg!.instructions[1]!, usdgIx], [wsolLeg!.instructions[2]!, wsolIx], [solLeg!.instructions[0]!, solIx]] as const) {
+      assert.deepEqual([...sentIx.data], [...built.data!], "the instruction matches the packages/core builder");
+      assert.deepEqual(sentIx.accounts.map((a) => a.address), built.accounts!.map((a) => String(a.address)));
     }
+    assert.deepEqual(result!.withdrawals!.map((w) => [w.asset, w.amountRaw, w.state, w.outcome?.status, w.error]),
+      [["SOL", 3_000_000n, "withdrawn", "finalized", undefined], ["USDG", 2_345_678n, "withdrawn", "finalized", undefined],
+        ["WSOL", 600_000_000n, "withdrawn", "finalized", undefined]]);
 
     // Everything moved to the owner; only rent stays.
     assert.equal(fake.token(vaultUsdg), 0n);
@@ -401,7 +480,8 @@ describe("solana-recover", () => {
     assert.equal(fake.token(ownerWsol), 600_000_000n);
     assert.deepEqual({ session: fake.vaultField().session, paused: fake.vaultField().paused, expiresAt: fake.vaultField().expiresAt },
       { session: SOLANA_SYSTEM_PROGRAM, paused: true, expiresAt: 0n });
-    assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot/);
+    assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot \d+, one transaction per asset/);
+    assert.match(out, /One transaction per asset \(SOL, then USDG, then WSOL\)/);
     assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
     assert.match(out, /Delete the exported key file now/);
     assert.equal(warnings, "");
@@ -410,7 +490,7 @@ describe("solana-recover", () => {
     // Running again finds nothing to do and sends nothing.
     const again = await run(fake, [...base, "--key-file", file, "--send"]);
     assert.equal(again.error, null, String(again.error));
-    assert.equal(fake.sent.length, 2);
+    assert.equal(fake.sent.length, 4);
     assert.match(again.out, /revoke_all: not needed/);
     assert.match(again.out, /nothing left to withdraw/);
   });
@@ -419,7 +499,7 @@ describe("solana-recover", () => {
     const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, ownerAtas: true });
     const piped = await run(fake, [...base, "--key-file", "-", "--send"], { stdin: Readable.from([Buffer.from(SECRET_JSON)]) });
     assert.equal(piped.error, null, String(piped.error));
-    assert.equal(fake.sent.length, 1, "no revoke is needed without a session; one withdrawal");
+    assert.equal(fake.sent.length, 3, "no revoke is needed without a session; one withdrawal per asset");
     assert.doesNotMatch(piped.out, /Delete the exported key file/);
     noSecrets(piped.out);
     const terminal = Object.assign(Readable.from([]), { isTTY: true });
@@ -448,13 +528,42 @@ describe("solana-recover", () => {
     const noKey = await run(fake, [...base, "--owner", OWNER, "--send"]);
     assert.match((noKey.error as Error).message, /--send needs --key-file/);
     const mismatch = await run(fake, [...base, "--owner", OTHER_OWNER, "--key-file", keyFile(SECRET_BASE58), "--send"]);
-    assert.match((mismatch.error as Error).message, new RegExp(`The key belongs to ${OWNER}, not to --owner ${OTHER_OWNER}`));
+    assert.match((mismatch.error as Error).message, new RegExp(`The key belongs to ${OWNER}, not to the --owner address given`));
+    assert.ok(!(mismatch.error as Error).message.includes(OTHER_OWNER), "the --owner value is not repeated");
     for (const args of [["--rpc", RPC, "--owner", OWNER], ["--program", PROGRAM, "--owner", OWNER], [...base], [...base, "--owner", OWNER, "--program-sha256", "ABC"]]) {
       assert.ok((await run(fake, args)).error instanceof SolanaRecoverError, args.join(" "));
     }
     const insecure = await run(fake, ["--program", PROGRAM, "--rpc", "http://rpc.example.test/", "--owner", OWNER]);
     assert.ok(insecure.error instanceof SolanaRpcError);
     assert.deepEqual(fake.calls, []);
+  });
+
+  it("refuses an --owner that is not a wallet address (a pasted seed, a vault address) without showing or sending it", async () => {
+    // About half of all random 32-byte seeds are not curve points; take the first such one.
+    let seed = "";
+    for (let i = 0; !seed; i++) {
+      const bytes = new Uint8Array(createHash("sha256").update(`pasted-seed-${i}`).digest());
+      try { ed25519.Point.fromBytes(bytes); } catch { seed = base58Encode(bytes); }
+    }
+    const fake = await chain();
+    assert.equal(isSolanaWalletAddress(OWNER), true);
+    assert.equal(isSolanaWalletAddress(fake.vault), false, "a vault is a program-derived address, off the curve");
+    assert.equal(isSolanaWalletAddress(`${OWNER}1`), false);
+    for (const [value, extra] of [[seed, []], [seed, ["--key-file", keyFile(SECRET_BASE58), "--send"]], [fake.vault, []]] as const) {
+      const { error, out, warnings } = await run(fake, [...base, "--owner", value, ...extra]);
+      assert.ok(error instanceof SolanaRecoverError, String(error));
+      assert.match(error.message, /--owner must be your Solana wallet address \(its public key\), and the value given is not one\. It was not used, shown or sent anywhere/);
+      assert.match(error.message, /clear it from your shell history/);
+      for (const text of [error.message, out, warnings, String(error.stack)]) assert.ok(!text.includes(value), "the value was shown");
+      assert.deepEqual(fake.calls, [], "refused before any network call");
+      assert.equal(fake.sent.length, 0);
+    }
+    // The tool's own entry point refuses it as well, before any RPC call.
+    let reads = 0;
+    const counting = { read: async () => { reads++; throw new Error("no RPC"); }, send: async () => { reads++; return ""; } } as unknown as SolanaLiveRpc;
+    await assert.rejects(runSolanaRecovery({ rpc: counting, programId: PROGRAM, owner: seed, send: false, releases: RELEASED }, { log: () => {}, sleep: async () => {} }),
+      (error: unknown) => error instanceof SolanaRecoverError && /must be a Solana wallet address/.test(error.message) && !error.message.includes(seed));
+    assert.equal(reads, 0);
   });
 
   it("warns about a key file other users can read", { skip: process.platform === "win32" }, async () => {
@@ -473,9 +582,30 @@ describe("solana-recover", () => {
       assert.ok(error instanceof SolanaRecoverError, String(error));
       assert.match(error.message, behavior === "drop" ? /expired without landing.*Nothing after it was sent/ : /failed on chain.*Nothing after it was sent/);
       assert.equal(fake.sent.length, 1, "the withdrawal was not sent");
+      if (behavior === "drop") assert.ok(fake.broadcasts > 2, "the same signed revoke was rebroadcast until its blockhash expired");
       assert.equal(fake.token(fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!), before);
       noSecrets(out, error.message);
     }
+  });
+
+  it("rebroadcasts the same signed bytes until they land, and never signs a step twice", async () => {
+    const fake = await chain();
+    fake.behaviors = ["late", "late"];
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(error, null, String(error));
+    assert.equal(fake.sent.length, 4, "one revoke and three asset withdrawals, each signed once");
+    assert.ok(fake.broadcasts > 4, "both were rebroadcast while pending");
+    assert.match(out, /Step 1 \(revoke_all\): finalized/);
+    assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
+  });
+
+  it("reports a refusal from the first broadcast at once, without rebroadcasting it", async () => {
+    const fake = await chain();
+    fake.behaviors = ["reject"];
+    const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.match((error as Error).message, /Step 1 \(revoke_all\) was not confirmed as submitted/);
+    assert.equal(fake.sent.length, 1);
+    assert.equal(fake.broadcasts, 1);
   });
 
   it("refuses a missing vault, a foreign program account, a non-mainnet RPC and an owner with no SOL", async () => {
@@ -496,19 +626,115 @@ describe("solana-recover", () => {
     assert.equal(broke.sent.length, 0);
   });
 
-  it("reports a transaction the RPC refuses, or one that does not finalize in time, and sends nothing after it", async () => {
-    const refused = await chain();
-    refused.behaviors = ["land", "reject"];
-    const vaultUsdg = refused.atas.get(`${refused.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
-    const rejected = await run(refused, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
-    assert.match((rejected.error as Error).message, /Step 2 \(withdraw\) was not confirmed as submitted .* run the command again/);
-    assert.equal(refused.sent.length, 2);
-    assert.equal(refused.token(vaultUsdg), 12_345_678n, "a refused withdrawal moves nothing");
+  it("one asset that cannot move, refused or failed on chain, does not stop the others", async () => {
+    for (const behavior of ["reject", "fail", "drop"] as const) {
+      const fake = await chain();
+      // The revoke and the SOL leg land; the USDG leg is blocked; the WSOL leg lands.
+      fake.behaviors = ["land", "land", behavior];
+      const vaultUsdg = fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+      const vaultWsol = fake.atas.get(`${fake.vault}:${SOLANA_WRAPPED_SOL_MINT}:${SOLANA_CLASSIC_TOKEN_PROGRAM}`)!;
+      const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+      assert.ok(error instanceof SolanaRecoverError, behavior);
+      // Failed on chain or expired cannot land: NOT withdrawn. A first send the
+      // RPC did not confirm may have reached the network (the transport cannot
+      // tell a refusal from a lost answer), so its outcome is unknown.
+      assert.match(error.message, behavior === "reject"
+        ? /Step 2 did not finish for 12\.345678 USDG \(outcome unknown: it may still land; look up its signature above\); every other asset was withdrawn\..*run the command again/
+        : /Step 2 did not finish for 12\.345678 USDG; every other asset was withdrawn\..*run the command again/);
+      assert.match(out, behavior === "reject" ? /Step 2 \(USDG\): outcome unknown, it may still land\. Step 2 \(USDG\) was not confirmed as submitted .*The other assets are sent separately/
+        : behavior === "fail" ? /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) failed on chain .*The other assets are sent separately/
+          : /Step 2 \(USDG\): NOT withdrawn\. Step 2 \(USDG\) expired without landing/);
+      if (behavior !== "reject") assert.doesNotMatch(out, /outcome unknown/);
+      assert.equal(fake.sent.length, 4, "the WSOL leg was still sent");
+      assert.equal(fake.token(vaultUsdg), 12_345_678n, "the blocked USDG stays in the vault");
+      assert.equal(fake.token(vaultWsol), 0n, "WSOL was withdrawn");
+      assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE), "spare SOL was withdrawn");
+      assert.match(out, /Left in the vault: 12\.345678 USDG, 0 WSOL, 0 SOL above rent/);
+      noSecrets(out, error.message);
+      // A rerun retries only what is left.
+      fake.behaviors = [];
+      const again = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+      assert.equal(again.error, null, String(again.error));
+      assert.equal(fake.sent.length, 5);
+      assert.deepEqual(fake.sent[4]!.instructions.map((ix) => ix.program), [SOLANA_ASSOCIATED_TOKEN_PROGRAM, PROGRAM]);
+      assert.equal(fake.token(vaultUsdg), 0n);
+    }
+  });
+
+  it("a leg sent but whose status cannot be read is 'outcome unknown', never 'NOT withdrawn', and names its signature", async () => {
+    const fake = await chain();
+    // The USDG leg (the third transaction) is accepted and lands, but every
+    // status poll of the owner tool for it fails at the network.
+    const fetchPollFails: typeof fetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.method === "getSignatureStatuses" && body.params?.[1]?.searchTransactionHistory === true && body.params[0][0] === fake.sent[2]?.signature) {
+        throw new TypeError("fetch failed");
+      }
+      return fake.fetch(input, init);
+    };
+    const vaultUsdg = fake.atas.get(`${fake.vault}:${SOLANA_USDG_MINT}:${TOKEN_2022_PROGRAM}`)!;
+    const { error, out, result } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { fetch: fetchPollFails });
+    assert.ok(error instanceof SolanaRecoverError, String(error));
+    const usdg = fake.sent[2]!.signature;
+    assert.equal(fake.token(vaultUsdg), 0n, "the USDG leg did land: 'NOT withdrawn' would have been false");
+    assert.match(out, new RegExp(`Step 2 \\(USDG\\): outcome unknown, it may still land\\. Step 2 \\(USDG\\) was sent \\(${usdg}\\) but its status could not be read\\.`));
+    assert.doesNotMatch(out, /USDG\): NOT withdrawn/);
+    assert.match(error.message, /Step 2 did not finish for 12\.345678 USDG \(outcome unknown: it may still land; look up its signature above\)/);
+    assert.equal(result, null);
+    assert.equal(fake.sent.length, 4, "the WSOL leg was still sent");
+    // A rerun re-reads finalized state: the landed USDG is not sent again.
+    const again = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"]);
+    assert.equal(again.error, null, String(again.error));
+    assert.equal(fake.sent.length, 4);
+    assert.match(again.out, /nothing left to withdraw/);
+  });
+
+  it("a leg that does not finalize before the deadline is 'outcome unknown', never 'NOT withdrawn'", async () => {
+    // No revoke needed; SOL and USDG legs. Both are accepted and confirmed, but never finalized in time.
+    const fake = await chain({ session: SOLANA_SYSTEM_PROGRAM, noWsolAccount: true });
+    fake.holdFinality = true;
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
+    assert.ok(error instanceof SolanaRecoverError, String(error));
+    assert.equal(fake.sent.length, 2);
+    for (const [index, asset] of [[0, "SOL"], [1, "USDG"]] as const) {
+      assert.match(out, new RegExp(`Step 2 \\(${asset}\\): outcome unknown, it may still land\\. Step 2 \\(${asset}\\) is not finalized yet \\(${fake.sent[index]!.signature}\\)`));
+    }
+    assert.doesNotMatch(out, /NOT withdrawn/);
+    assert.match(error.message, /Step 2 did not finish for 0\.003 SOL \(outcome unknown: [^)]*\) and 12\.345678 USDG \(outcome unknown: [^)]*\); every other asset/);
+  });
+
+  it("reports a revoke that does not finalize in time, and sends nothing after it", async () => {
     const slow = await chain();
-    slow.confirmedPolls = 1_000;
+    slow.holdFinality = true;
     const pending = await run(slow, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { maxWaitMs: 0 });
     assert.match((pending.error as Error).message, /Step 1 \(revoke_all\) is not finalized yet .* re-reads the chain first/);
     assert.equal(slow.sent.length, 1, "nothing is sent while the revoke is unconfirmed");
+  });
+
+  it("keeps waiting on a null status until the finalized height is past the blockhash's last valid height", async () => {
+    // The revoke lands at once, but every status read answers null until the
+    // finalized height passes its lifetime: a null status with the finalized
+    // height at or below lastValidBlockHeight proves nothing, so it must wait.
+    const fake = await chain();
+    fake.behaviors = ["hidden"];
+    const { error, out } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { pollMs: 400 });
+    assert.equal(error, null, String(error));
+    assert.match(out, /Step 1 \(revoke_all\): finalized/);
+    assert.doesNotMatch(out, /expired/);
+    assert.equal(fake.sent.length, 4, "the withdrawals followed the revoke");
+    const revoke = fake.sent[0]!.signature;
+    assert.ok(fake.height - FINALITY_LAG > fake.lastValidOf.get(revoke)!, "it waited until the finalized height passed the lifetime");
+  });
+
+  it("calls a transaction expired only on a null status once the finalized height is past its last valid height", async () => {
+    const fake = await chain();
+    fake.behaviors = ["drop"];
+    const { error } = await run(fake, [...base, "--key-file", keyFile(SECRET_BASE58), "--send"], { pollMs: 400 });
+    assert.match((error as Error).message, /Step 1 \(revoke_all\) expired without landing/);
+    const lastValid = fake.lastValidOf.get(fake.sent[0]!.signature)!;
+    // Nothing advanced the chain after the deciding poll: its finalized height is the current one.
+    assert.equal(fake.height - FINALITY_LAG, lastValid + 1, "expired at the first finalized height past the lifetime, not before");
+    assert.equal(fake.sent.length, 1);
   });
 
   it("skips USDG when the owner's own USDG account is frozen, and still recovers WSOL and SOL", async () => {
@@ -521,9 +747,9 @@ describe("solana-recover", () => {
     assert.equal(error, null, String(error));
     assert.match(out, new RegExp(`Note: USDG: your USDG account ${ownerUsdg} is frozen by the issuer`));
     assert.match(out, /2\. withdraw 0\.6 WSOL, 0\.003 SOL to the owner/);
-    assert.equal(fake.sent.length, 1);
-    assert.deepEqual(fake.sent[0]!.instructions.map((ix) => ix.program),
-      [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM, PROGRAM], "no USDG transfer into the frozen account");
+    assert.equal(fake.sent.length, 2);
+    assert.deepEqual(fake.sent.map((tx) => tx.instructions.map((ix) => ix.program)),
+      [[PROGRAM], [SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, PROGRAM]], "no USDG transfer into the frozen account");
     assert.equal(fake.token(vaultUsdg), 12_345_678n, "USDG stays in the vault");
     assert.equal(fake.token(vaultWsol), 0n);
     assert.equal(fake.accounts.get(fake.vault)!.lamports, rent(SOLANA_VAULT_ACCOUNT_SIZE));
@@ -586,7 +812,7 @@ describe("solana-recover program trust", () => {
     const { error, out } = await run(fake, [...send(), "--program-sha256", BINARY_SHA, "--unlisted-program"],
       { releases: [], sleep: async (ms) => { pauses.push({ ms, callsBefore: [...fake.calls] }); } });
     assert.equal(error, null, String(error));
-    assert.equal(fake.sent.length, 2);
+    assert.equal(fake.sent.length, 4);
     assert.match(out, /verified against the given SHA-256 \(immutable\)\. It is NOT a released Merrymen vault program/);
     assert.match(out, new RegExp(`WARNING: ${PROGRAM} is not a released Merrymen vault program`));
     assert.match(out, /Merrymen support never asks you to\nuse --unlisted-program/);
@@ -614,6 +840,96 @@ describe("solana-recover program trust", () => {
       assert.equal(swapped.sent.length, 0);
       assert.ok(!swapped.calls.includes("getLatestBlockhash"));
     }
+  });
+
+  it("verifies the binary afresh on every run, even after a success through the same RPC in this process", async () => {
+    const good = await chain();
+    assert.equal((await run(good, send())).error, null);
+    for (const options of [{ deployment: "upgradeable" as const }, { binary: Buffer.from("look-alike program") }, { deployment: "none" as const }]) {
+      const swapped = await chain(options);
+      const { error } = await run(swapped, send());
+      assert.match((error as Error).message, /not the immutable released binary\. Nothing was signed or sent/, JSON.stringify(options));
+      assert.equal(swapped.sent.length, 0);
+      assert.ok(swapped.calls.includes("getAccountInfo"), "the program account was read again");
+    }
+  });
+
+  it("verifies through a view that keeps singleEndpoint and every other transport flag, and drops only the cache key", async () => {
+    const calls: string[] = [];
+    const transport = (flags: Record<string, unknown>) => ({
+      ...flags,
+      read: async <T>(operation: (read: never) => Promise<T>) => { calls.push("read"); return operation((async () => 1) as never); },
+      readEach: async <T>(operation: (read: never) => Promise<T>) => { calls.push("readEach"); return [await operation((async () => 2) as never)]; },
+      send: async () => { calls.push("send"); return "sent"; },
+    }) as unknown as SolanaLiveRpc;
+    // The owner's single endpoint: an every-provider check accepts one provider only with this flag.
+    const owner = solanaRecoveryVerificationRpc(transport({ singleEndpoint: true, providerKey: "cache-key", laterFlag: 7 }));
+    const flags = owner as unknown as Record<string, unknown>;
+    assert.equal(flags.singleEndpoint, true, "the view kept singleEndpoint");
+    assert.equal(flags.laterFlag, 7, "the view keeps transport flags it does not know about");
+    assert.equal("providerKey" in owner, false, "no cache key: the executor's success cache is never consulted");
+    assert.equal(await owner.read(async () => "a"), "a");
+    assert.deepEqual(await owner.readEach!(async () => "b"), ["b"]);
+    assert.throws(() => owner.send("AA==", 1), /never sends a transaction/);
+    assert.deepEqual(calls, ["read", "readEach"], "reads go to the owner's transport; nothing is sent");
+    // A view never invents the flag: a live transport stays a two-provider one.
+    const live = solanaRecoveryVerificationRpc(transport({ providerKey: "cache-key" }));
+    assert.equal("singleEndpoint" in live, false);
+    assert.equal("providerKey" in live, false);
+    // A hand-built transport without readEach gets none.
+    const narrow = solanaRecoveryVerificationRpc({ singleEndpoint: true, read: async (operation: (read: never) => Promise<unknown>) => operation((async () => 3) as never),
+      send: async () => "x" } as unknown as SolanaLiveRpc);
+    assert.equal(narrow.readEach, undefined);
+    assert.equal((narrow as unknown as Record<string, unknown>).singleEndpoint, true);
+  });
+
+  it("a run verifies the program through that view of the owner's own transport, flags and all", async () => {
+    // The object verifySolanaVaultDeployment receives is what matters. Its
+    // first read is `rpc.providerKey`, which the view does not have, so that
+    // read reaches Object.prototype: a getter there, only for this run,
+    // records the receiver. (On this branch nothing reads singleEndpoint
+    // during verification, so a check on the flag's getter alone would pass
+    // with the copy disabled.)
+    const fake = await chain();
+    const base = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: RPC }, fetch: fake.fetch, timeoutMs: 15_000, singleEndpoint: true,
+      sleep: async (ms) => fake.tick(ms) });
+    const owner = { singleEndpoint: true, laterFlag: 7, providerKey: "owner-cache-key", read: base.read, readEach: base.readEach, send: base.send } as unknown as SolanaLiveRpc;
+    const received: object[] = [];
+    Object.defineProperty(Object.prototype, "providerKey", { configurable: true, get() { received.push(this as object); return undefined; } });
+    const out: string[] = [];
+    let result: SolanaRecoveryResult;
+    try {
+      result = await runSolanaRecovery({ rpc: owner, programId: PROGRAM, owner: OWNER, send: false, releases: RELEASED },
+        { log: (line) => out.push(line), sleep: async () => {} });
+    } finally { delete (Object.prototype as Record<string, unknown>).providerKey; }
+    assert.equal(result.sent, false);
+    assert.match(out.join("\n"), /Program binary verified: the released Merrymen vault program/);
+    assert.equal(received.length, 1, "verification read providerKey from one object without its own");
+    const view = received[0] as SolanaLiveRpc & Record<string, unknown>;
+    assert.notEqual(view, owner, "verification received the view, not the owner's transport");
+    assert.equal(Object.hasOwn(view, "singleEndpoint") && view.singleEndpoint, true, "the object verification received carries singleEndpoint");
+    assert.equal(view.laterFlag, 7, "and every other transport flag");
+    assert.equal(Object.hasOwn(view, "providerKey"), false, "but no cache key");
+    assert.throws(() => view.send("AA==", 1), /never sends a transaction/);
+    assert.ok(fake.calls.includes("getAccountInfo"), "and the program was read through the owner's transport");
+  });
+
+  it("pins releases in packages/core: the tool's default list is the shared one, frozen and well formed", () => {
+    assert.equal(SOLANA_VAULT_RELEASES, CORE_SOLANA_VAULT_RELEASES, "the recovery tool trusts exactly the packages/core release pin");
+    assert.ok(Object.isFrozen(CORE_SOLANA_VAULT_RELEASES));
+    const ids = new Set<string>();
+    for (const release of CORE_SOLANA_VAULT_RELEASES) {
+      assert.ok(Object.isFrozen(release), "each release entry is frozen");
+      assert.deepEqual(Object.keys(release).sort(), ["programId", "sha256"]);
+      const bytes = base58Decode(release.programId);
+      assert.ok(bytes?.length === 32 && base58Encode(bytes) === release.programId, `${release.programId} is a canonical program ID`);
+      assert.match(release.sha256, /^[a-f0-9]{64}$/);
+      assert.ok(!ids.has(release.programId), "one hash per program");
+      ids.add(release.programId);
+    }
+    // With no option, the trust decision reads the core list.
+    for (const release of CORE_SOLANA_VAULT_RELEASES) assert.deepEqual(solanaRecoveryProgramTrust({ programId: release.programId, send: true }), { listed: true, sha256: release.sha256 });
+    if (!CORE_SOLANA_VAULT_RELEASES.length) assert.throws(() => solanaRecoveryProgramTrust({ programId: PROGRAM, send: true }), /none is released yet/);
   });
 
   it("plans for any program, says when its binary is not verified, and checks it when a hash is given", async () => {
@@ -645,18 +961,23 @@ async function recoveryFixture(): Promise<string> {
   const { result, error } = await run(fake, ["--program", VAULT_PROGRAM_ID, "--rpc", RPC, "--key-file", keyFile(SECRET_BASE58), "--send"],
     { releases: [{ programId: VAULT_PROGRAM_ID, sha256: BINARY_SHA }] });
   assert.equal(error, null, String(error));
-  assert.equal(fake.sent.length, 2);
-  const [revoke, withdraw] = fake.sent as [FakeChain["sent"][number], FakeChain["sent"][number]];
+  assert.equal(fake.sent.length, 4);
+  const [revoke, sol, usdg, wsol] = fake.sent as FakeChain["sent"][number][];
   // The sent transactions carry exactly the exported step builders' instructions.
+  const legs = solanaRecoveryWithdrawLegs(result!.plan);
+  assert.deepEqual(legs.map((leg) => leg.asset), ["SOL", "USDG", "WSOL"]);
   const shape = (ixs: { program: string; accounts: string[]; data: number[] }[]) => ixs;
-  for (const [sent, built] of [[revoke, solanaRecoveryRevokeInstructions(result!.plan)], [withdraw, solanaRecoveryWithdrawInstructions(result!.plan)]] as const) {
+  for (const [sent, built] of [[revoke!, solanaRecoveryRevokeInstructions(result!.plan)], [sol!, legs[0]!.instructions],
+    [usdg!, legs[1]!.instructions], [wsol!, legs[2]!.instructions]] as const) {
     assert.deepEqual(shape(sent.instructions.map((ix) => ({ program: ix.program, accounts: ix.accounts.map((a) => a.address), data: [...ix.data] }))),
       shape(built.map((ix) => ({ program: String(ix.programAddress), accounts: (ix.accounts ?? []).map((a) => String(a.address)), data: [...(ix.data ?? [])] }))));
   }
-  assert.equal(withdraw.instructions.length, 6, "two CreateIdempotent, SyncNative, two withdraws and withdraw_sol");
+  assert.deepEqual([sol!, usdg!, wsol!].map((tx) => tx.instructions.length), [1, 2, 3],
+    "withdraw_sol; CreateIdempotent and the USDG withdraw; CreateIdempotent, SyncNative and the WSOL withdraw");
   return [
     "# merrymen solana-recover, as signed and sent by worker/src/solana-recover.ts for a vault with a live",
-    "# session, USDG, synced and unsynced WSOL, spare SOL, and no owner token accounts yet. Written by",
+    "# session, USDG, synced and unsynced WSOL, spare SOL, and no owner token accounts yet: revoke_all, then",
+    "# one withdrawal transaction per asset (SOL, USDG, WSOL). Written by",
     "# worker/src/solana-recover.test.ts (MERRYMEN_WRITE_SOLANA_RECOVERY_FIXTURE=1 rewrites it) and executed",
     "# by tests/recovery.rs against the compiled program. The owner seed is a public test key.",
     `program ${VAULT_PROGRAM_ID}`,
@@ -668,8 +989,10 @@ async function recoveryFixture(): Promise<string> {
     `wsol_synced_raw ${FUNDED.wsol}`,
     `wsol_unsynced_lamports ${FUNDED.unsynced}`,
     `sol_excess_lamports ${FUNDED.solExcess}`,
-    `revoke_tx ${revoke.wire}`,
-    `withdraw_tx ${withdraw.wire}`,
+    `revoke_tx ${revoke!.wire}`,
+    `withdraw_sol_tx ${sol!.wire}`,
+    `withdraw_usdg_tx ${usdg!.wire}`,
+    `withdraw_wsol_tx ${wsol!.wire}`,
     "",
   ].join("\n");
 }

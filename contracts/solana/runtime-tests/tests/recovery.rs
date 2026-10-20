@@ -1,8 +1,9 @@
 //! Owner recovery (`merrymen solana-recover`) against the compiled vault program and the
 //! SPL Token, Token-2022 and ATA programs bundled with solana-program-test.
 //!
-//! The two transactions are read from fixtures/recovery-transactions.txt, which
-//! worker/src/solana-recover.test.ts writes from the exact bytes the tool signs and sends.
+//! The transactions (revoke_all, then one withdrawal per asset: SOL, USDG, WSOL) are read
+//! from fixtures/recovery-transactions.txt, which worker/src/solana-recover.test.ts writes
+//! from the exact bytes the tool signs and sends.
 //! Only the recent blockhash is replaced (the fixture's comes from a fake chain) and the
 //! owner signs again; instructions, account order and privileges stay byte-identical.
 //! Everything else here only builds a funded vault through the program's own instructions.
@@ -147,8 +148,9 @@ fn parse_wire(base64_tx: &str) -> Wire {
 }
 
 /// USDG as issued: Token-2022 with a zero transfer fee, a hook-less transfer hook, close
-/// authority, permanent delegate and metadata pointer. The test holds its mint authority.
-fn usdg_mint(issuer: Pubkey) -> Account {
+/// authority, permanent delegate and metadata pointer. The test holds its mint authority,
+/// and its freeze authority when `freezable`.
+fn usdg_mint(issuer: Pubkey, freezable: bool) -> Account {
     let extensions = [
         ExtensionType::TransferFeeConfig,
         ExtensionType::TransferHook,
@@ -179,7 +181,11 @@ fn usdg_mint(issuer: Pubkey) -> Account {
             supply: 0,
             decimals: 6,
             is_initialized: true,
-            freeze_authority: COption::None,
+            freeze_authority: if freezable {
+                COption::Some(issuer)
+            } else {
+                COption::None
+            },
         };
         m.pack_base();
         m.init_account_type().unwrap();
@@ -256,9 +262,23 @@ impl Chain {
     }
 }
 
-#[tokio::test]
-#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
-async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
+struct Fixture {
+    program: Pubkey,
+    seed: [u8; 32],
+    owner: Pubkey,
+    vault: Pubkey,
+    session: Pubkey,
+    usdg: u64,
+    synced: u64,
+    unsynced: u64,
+    excess: u64,
+    revoke: Wire,
+    /// Step 2, one transaction per asset, in the order the tool sends them.
+    sol: Wire,
+    usdg_leg: Wire,
+    wsol_leg: Wire,
+}
+fn load() -> Fixture {
     let f = fixture();
     let program = key(&f, "program");
     assert_eq!(program, vault::ID, "the fixture targets this program");
@@ -267,58 +287,98 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();
-    let owner = Keypair::new_from_array(seed);
-    assert_eq!(owner.pubkey(), key(&f, "owner"));
-    let (vault, _) = Pubkey::find_program_address(&[b"vault", owner.pubkey().as_ref()], &program);
+    let owner = Keypair::new_from_array(seed).pubkey();
+    assert_eq!(owner, key(&f, "owner"));
+    let (vault, _) = Pubkey::find_program_address(&[b"vault", owner.as_ref()], &program);
     assert_eq!(
         vault,
         key(&f, "vault"),
         "TS and Rust derive the same vault PDA"
     );
-    let session = key(&f, "session");
-    let (usdg, synced, unsynced, excess) = (
-        number(&f, "usdg_raw"),
-        number(&f, "wsol_synced_raw"),
-        number(&f, "wsol_unsynced_lamports"),
-        number(&f, "sol_excess_lamports"),
-    );
-    let revoke = parse_wire(f["revoke_tx"]);
-    let withdraw = parse_wire(f["withdraw_tx"]);
-    for wire in [&revoke, &withdraw] {
+    let fx = Fixture {
+        program,
+        seed,
+        owner,
+        vault,
+        session: key(&f, "session"),
+        usdg: number(&f, "usdg_raw"),
+        synced: number(&f, "wsol_synced_raw"),
+        unsynced: number(&f, "wsol_unsynced_lamports"),
+        excess: number(&f, "sol_excess_lamports"),
+        revoke: parse_wire(f["revoke_tx"]),
+        sol: parse_wire(f["withdraw_sol_tx"]),
+        usdg_leg: parse_wire(f["withdraw_usdg_tx"]),
+        wsol_leg: parse_wire(f["withdraw_wsol_tx"]),
+    };
+    for wire in [&fx.revoke, &fx.sol, &fx.usdg_leg, &fx.wsol_leg] {
         assert_eq!(wire.signatures.len(), 1, "the owner is the only signer");
-        assert_eq!(
-            wire.parsed.account_keys[0],
-            owner.pubkey(),
-            "the owner pays the fee"
-        );
+        assert_eq!(wire.parsed.account_keys[0], owner, "the owner pays the fee");
         assert!(
-            wire.signatures[0].verify(owner.pubkey().as_ref(), &wire.message),
+            wire.signatures[0].verify(owner.as_ref(), &wire.message),
             "the tool signed exactly these bytes with the owner key"
         );
     }
-    let vault_usdg = ata(&vault, &USDG, &TOKEN_2022);
-    let vault_wsol = ata(&vault, &WSOL, &CLASSIC_TOKEN);
-    let owner_usdg = ata(&owner.pubkey(), &USDG, &TOKEN_2022);
-    let owner_wsol = ata(&owner.pubkey(), &WSOL, &CLASSIC_TOKEN);
+    let (vault_usdg, vault_wsol, owner_usdg, owner_wsol) = atas(&fx);
+    // Each asset leg names only its own token accounts.
+    for (wire, own, other) in [
+        (
+            &fx.usdg_leg,
+            [vault_usdg, owner_usdg],
+            [vault_wsol, owner_wsol],
+        ),
+        (
+            &fx.wsol_leg,
+            [vault_wsol, owner_wsol],
+            [vault_usdg, owner_usdg],
+        ),
+    ] {
+        for address in own {
+            assert!(
+                wire.parsed.account_keys.contains(&address),
+                "TS and Rust derive the same ATA {address}"
+            );
+        }
+        for address in other {
+            assert!(
+                !wire.parsed.account_keys.contains(&address),
+                "a leg touches one asset only"
+            );
+        }
+    }
     for address in [vault_usdg, vault_wsol, owner_usdg, owner_wsol] {
         assert!(
-            withdraw.parsed.account_keys.contains(&address),
-            "TS and Rust derive the same ATA {address}"
+            !fx.sol.parsed.account_keys.contains(&address),
+            "the SOL leg touches no token account"
         );
     }
+    fx
+}
+fn atas(fx: &Fixture) -> (Pubkey, Pubkey, Pubkey, Pubkey) {
+    (
+        ata(&fx.vault, &USDG, &TOKEN_2022),
+        ata(&fx.vault, &WSOL, &CLASSIC_TOKEN),
+        ata(&fx.owner, &USDG, &TOKEN_2022),
+        ata(&fx.owner, &WSOL, &CLASSIC_TOKEN),
+    )
+}
 
+/// The chain the tool read when it built the fixture: a live vault built through the
+/// program's own instructions (initialize, a session, custody ATAs), funded with minted
+/// USDG, synced and unsynced native SOL in the WSOL account, and spare vault SOL.
+async fn funded_chain(fx: &Fixture, issuer: &Keypair, freezable_usdg: bool) -> Chain {
     // The compiled program from BPF_OUT_DIR; Token, Token-2022 and ATA are ProgramTest's SBF builds.
     let mut pt = ProgramTest::new("merrymen_vault", vault::ID, None);
-    let issuer = Keypair::new();
     pt.add_account(
-        owner.pubkey(),
+        fx.owner,
         Account::new(1_000_000_000, 0, &anchor_lang::system_program::ID),
     );
-    pt.add_account(USDG, usdg_mint(issuer.pubkey()));
+    pt.add_account(USDG, usdg_mint(issuer.pubkey(), freezable_usdg));
     pt.add_account(WSOL, wsol_mint());
     let ctx = pt.start_with_context().await;
-    let mut chain = Chain { ctx, owner };
-    let rent = chain.ctx.banks_client.get_rent().await.unwrap();
+    let mut chain = Chain {
+        ctx,
+        owner: Keypair::new_from_array(fx.seed),
+    };
     let now = chain
         .ctx
         .banks_client
@@ -326,15 +386,13 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
         .await
         .unwrap()
         .unix_timestamp;
-
-    // A live vault through the program's own instructions: initialize, a session, custody ATAs.
-    let owner_key = chain.owner.pubkey();
+    let (vault_usdg, vault_wsol, _, _) = atas(fx);
     let payer = chain.ctx.payer.pubkey();
     let initialize = Instruction {
         program_id: vault::ID,
         accounts: vault::accounts::InitializeVault {
-            vault,
-            owner: owner_key,
+            vault: fx.vault,
+            owner: fx.owner,
             system_program: anchor_lang::system_program::ID,
         }
         .to_account_metas(None),
@@ -343,12 +401,12 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
     let create_session = Instruction {
         program_id: vault::ID,
         accounts: vault::accounts::OwnerAuthority {
-            vault,
-            owner: owner_key,
+            vault: fx.vault,
+            owner: fx.owner,
         }
         .to_account_metas(None),
         data: vault::instruction::CreateSession {
-            session,
+            session: fx.session,
             per_trade: 25_000_000,
             daily: 100_000_000,
             per_trade_wsol: 1_000_000_000,
@@ -358,20 +416,24 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
         }
         .data(),
     };
-    let owner_signer = Keypair::new_from_array(seed);
+    let owner_signer = Keypair::new_from_array(fx.seed);
     chain
         .setup(&[initialize, create_session], &[&owner_signer])
         .await;
     chain
         .setup(
             &[
-                create_associated_token_account_idempotent(&payer, &vault, &USDG, &TOKEN_2022),
-                create_associated_token_account_idempotent(&payer, &vault, &WSOL, &CLASSIC_TOKEN),
+                create_associated_token_account_idempotent(&payer, &fx.vault, &USDG, &TOKEN_2022),
+                create_associated_token_account_idempotent(
+                    &payer,
+                    &fx.vault,
+                    &WSOL,
+                    &CLASSIC_TOKEN,
+                ),
             ],
             &[],
         )
         .await;
-    // Funding: minted USDG, synced and unsynced native SOL in the WSOL account, spare vault SOL.
     chain
         .setup(
             &[
@@ -381,30 +443,56 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
                     &vault_usdg,
                     &issuer.pubkey(),
                     &[],
-                    usdg,
+                    fx.usdg,
                 )
                 .unwrap(),
-                system_instruction::transfer(&payer, &vault_wsol, synced),
+                system_instruction::transfer(&payer, &vault_wsol, fx.synced),
                 spl_token_2022::instruction::sync_native(&CLASSIC_TOKEN, &vault_wsol).unwrap(),
-                system_instruction::transfer(&payer, &vault_wsol, unsynced),
-                system_instruction::transfer(&payer, &vault, excess),
+                system_instruction::transfer(&payer, &vault_wsol, fx.unsynced),
+                system_instruction::transfer(&payer, &fx.vault, fx.excess),
             ],
-            &[&issuer],
+            &[issuer],
         )
         .await;
-
-    // The chain now holds what the tool read when it built the fixture.
-    let vault_size = chain.account(vault).await.unwrap().data.len();
+    let rent = chain.ctx.banks_client.get_rent().await.unwrap();
+    let vault_size = chain.account(fx.vault).await.unwrap().data.len();
     assert_eq!(vault_size, Vault::SPACE);
-    let vault_reserve = rent.minimum_balance(vault_size);
-    let wsol_reserve = rent.minimum_balance(TokenAccount::LEN);
-    assert_eq!(chain.lamports(vault).await, vault_reserve + excess);
-    assert_eq!(chain.token(vault_usdg).await.0, usdg);
+    assert_eq!(
+        chain.lamports(fx.vault).await,
+        rent.minimum_balance(vault_size) + fx.excess
+    );
+    assert_eq!(chain.token(vault_usdg).await.0, fx.usdg);
     assert_eq!(
         chain.token(vault_wsol).await,
-        (synced, wsol_reserve + synced + unsynced, TokenAccount::LEN)
+        (
+            fx.synced,
+            rent.minimum_balance(TokenAccount::LEN) + fx.synced + fx.unsynced,
+            TokenAccount::LEN
+        )
     );
-    assert_eq!(chain.vault_state(vault).await.session, session);
+    assert_eq!(chain.vault_state(fx.vault).await.session, fx.session);
+    chain
+}
+fn failed_at(result: Result<(), BanksClientError>) -> u8 {
+    match result {
+        Err(BanksClientError::TransactionError(TransactionError::InstructionError(index, _))) => {
+            index
+        }
+        other => panic!("expected an instruction error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
+    let fx = load();
+    let issuer = Keypair::new();
+    let mut chain = funded_chain(&fx, &issuer, false).await;
+    let rent = chain.ctx.banks_client.get_rent().await.unwrap();
+    let (vault_usdg, vault_wsol, owner_usdg, owner_wsol) = atas(&fx);
+    let vault_reserve = rent.minimum_balance(Vault::SPACE);
+    let wsol_reserve = rent.minimum_balance(TokenAccount::LEN);
+    let owner_key = fx.owner;
     assert!(chain.account(owner_usdg).await.is_none() && chain.account(owner_wsol).await.is_none());
     // The fee of a message the owner alone signs, with no priority fee: what each step pays.
     let hash = chain.ctx.banks_client.get_latest_blockhash().await.unwrap();
@@ -418,68 +506,145 @@ async fn owner_recovery_transactions_empty_the_vault_into_the_owner_wallet() {
     let owner_before = chain.lamports(owner_key).await;
 
     // Step 1: revoke_all alone.
-    chain.run_fixture(&revoke).await.expect("revoke_all runs");
-    let state = chain.vault_state(vault).await;
+    chain
+        .run_fixture(&fx.revoke)
+        .await
+        .expect("revoke_all runs");
+    let state = chain.vault_state(fx.vault).await;
     assert_eq!(state.session, Pubkey::default(), "no session can trade");
     assert!(state.paused);
     assert_eq!(state.expires_at, 0);
     assert_eq!(
         chain.token(vault_usdg).await.0,
-        usdg,
+        fx.usdg,
         "revoke moves nothing"
     );
     assert_eq!(chain.lamports(owner_key).await, owner_before - fee);
 
-    // Step 2: owner ATAs, SyncNative, withdraw USDG and WSOL, withdraw_sol.
+    // Step 2, SOL: withdraw_sol, so the spare SOL reaches the owner first.
+    chain.run_fixture(&fx.sol).await.expect("the SOL leg runs");
+    assert_eq!(
+        chain.lamports(fx.vault).await,
+        vault_reserve,
+        "vault account at its rent reserve"
+    );
+    assert_eq!(
+        chain.lamports(owner_key).await,
+        owner_before - 2 * fee + fx.excess
+    );
+    // Step 2, USDG: the owner's Token-2022 account, then the USDG withdraw.
     chain
-        .run_fixture(&withdraw)
+        .run_fixture(&fx.usdg_leg)
         .await
-        .expect("the withdrawal runs");
+        .expect("the USDG leg runs");
     let (usdg_left, usdg_lamports, _) = chain.token(vault_usdg).await;
     assert_eq!(usdg_left, 0);
     assert_eq!(
         usdg_lamports,
         rent.minimum_balance(chain.account(vault_usdg).await.unwrap().data.len())
     );
+    // Step 2, WSOL: the owner's WSOL account, SyncNative, then the WSOL withdraw.
+    chain
+        .run_fixture(&fx.wsol_leg)
+        .await
+        .expect("the WSOL leg runs");
     assert_eq!(
         chain.token(vault_wsol).await,
         (0, wsol_reserve, TokenAccount::LEN),
         "WSOL account at its reserve"
     );
-    assert_eq!(
-        chain.lamports(vault).await,
-        vault_reserve,
-        "vault account at its rent reserve"
-    );
     let (owner_usdg_amount, owner_usdg_rent, _) = chain.token(owner_usdg).await;
     let (owner_wsol_amount, owner_wsol_lamports, _) = chain.token(owner_wsol).await;
-    assert_eq!(owner_usdg_amount, usdg, "every USDG unit reached the owner");
+    assert_eq!(
+        owner_usdg_amount, fx.usdg,
+        "every USDG unit reached the owner"
+    );
     assert_eq!(
         owner_wsol_amount,
-        synced + unsynced,
+        fx.synced + fx.unsynced,
         "every WSOL lamport, synced or not, reached the owner"
     );
-    assert_eq!(owner_wsol_lamports, wsol_reserve + synced + unsynced);
+    assert_eq!(owner_wsol_lamports, wsol_reserve + fx.synced + fx.unsynced);
     assert_eq!(
         chain.lamports(owner_key).await,
-        owner_before - 2 * fee - owner_usdg_rent - wsol_reserve + excess,
-        "the owner paid two fees and two ATA reserves and received the spare SOL"
+        owner_before - 4 * fee - owner_usdg_rent - wsol_reserve + fx.excess,
+        "the owner paid four fees and two ATA reserves and received the spare SOL"
     );
 
-    // A rerun of the same withdrawal cannot move more: the stale amounts fail atomically.
+    // A rerun of any leg cannot move more: each stale amount fails its own withdrawal.
     let owner_after = chain.lamports(owner_key).await;
-    match chain.run_fixture(&withdraw).await {
-        // Index 1 is the USDG withdraw: the CreateIdempotent before it is a no-op now.
-        Err(BanksClientError::TransactionError(TransactionError::InstructionError(1, _))) => {}
-        other => panic!("a rerun must fail in the USDG withdraw, got {other:?}"),
+    // withdraw_sol is the SOL leg's only instruction; the token legs' CreateIdempotent
+    // (and SyncNative) are no-ops now, so they fail at their withdraw.
+    for (wire, index) in [(&fx.sol, 0), (&fx.usdg_leg, 1), (&fx.wsol_leg, 2)] {
+        assert_eq!(failed_at(chain.run_fixture(wire).await), index);
     }
-    assert_eq!(chain.token(owner_usdg).await.0, usdg);
-    assert_eq!(chain.token(owner_wsol).await.0, synced + unsynced);
+    assert_eq!(chain.token(owner_usdg).await.0, fx.usdg);
+    assert_eq!(chain.token(owner_wsol).await.0, fx.synced + fx.unsynced);
     assert_eq!(chain.token(vault_wsol).await.1, wsol_reserve);
-    assert_eq!(chain.lamports(vault).await, vault_reserve);
+    assert_eq!(chain.lamports(fx.vault).await, vault_reserve);
     assert_eq!(
         chain.lamports(owner_key).await,
-        owner_after - fee,
-        "only the fee is spent"
+        owner_after - 3 * fee,
+        "only the fees are spent"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the compiled custody SBF artifact; run contracts/solana/test.sh"]
+async fn a_blocked_asset_fails_alone_and_the_others_still_reach_the_owner() {
+    let fx = load();
+    let issuer = Keypair::new();
+    let mut chain = funded_chain(&fx, &issuer, true).await;
+    let rent = chain.ctx.banks_client.get_rent().await.unwrap();
+    let (vault_usdg, vault_wsol, owner_usdg, owner_wsol) = atas(&fx);
+    // The issuer froze the owner's USDG account after the tool read the chain.
+    let payer = chain.ctx.payer.pubkey();
+    chain
+        .setup(
+            &[
+                create_associated_token_account_idempotent(&payer, &fx.owner, &USDG, &TOKEN_2022),
+                spl_token_2022::instruction::freeze_account(
+                    &TOKEN_2022,
+                    &owner_usdg,
+                    &USDG,
+                    &issuer.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+            ],
+            &[&issuer],
+        )
+        .await;
+
+    chain
+        .run_fixture(&fx.revoke)
+        .await
+        .expect("revoke_all runs");
+    chain.run_fixture(&fx.sol).await.expect("the SOL leg runs");
+    // CreateIdempotent passes on the existing account; the transfer into it is refused.
+    assert_eq!(failed_at(chain.run_fixture(&fx.usdg_leg).await), 1);
+    chain
+        .run_fixture(&fx.wsol_leg)
+        .await
+        .expect("the WSOL leg runs after the USDG leg failed");
+
+    assert_eq!(
+        chain.token(vault_usdg).await.0,
+        fx.usdg,
+        "the blocked USDG stays in the vault, intact"
+    );
+    assert_eq!(chain.token(owner_usdg).await.0, 0);
+    assert_eq!(
+        chain.token(vault_wsol).await,
+        (
+            0,
+            rent.minimum_balance(TokenAccount::LEN),
+            TokenAccount::LEN
+        )
+    );
+    assert_eq!(chain.token(owner_wsol).await.0, fx.synced + fx.unsynced);
+    assert_eq!(
+        chain.lamports(fx.vault).await,
+        rent.minimum_balance(Vault::SPACE)
     );
 }

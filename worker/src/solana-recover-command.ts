@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { base58Decode } from "../../packages/core/src/ids";
 import { createSolanaLiveRpc } from "./solana-live-rpc";
 import {
-  readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
+  isSolanaWalletAddress, readSolanaOwnerKey, runSolanaRecovery, SOLANA_RECOVER_KEY_MAX_BYTES, SolanaRecoverError, solanaRecoveryProgramTrust,
   type SolanaRecoveryResult, type SolanaVaultRelease,
 } from "./solana-recover";
 
@@ -27,15 +27,20 @@ before signing. If someone sent you a command with --unlisted-program,
 stop: Merrymen never asks for it.
 
 Steps: (1) revoke_all, alone, waiting until it is finalized, so no session
-key can trade; (2) from finalized balances, create your USDG and WSOL token
-accounts if needed and withdraw all USDG, all WSOL and the vault's spare
-SOL to your wallet. Funds only ever move from the vault to the owner.
-Nothing is sent without --send. Each transaction is sent once; if one does
-not finalize, run the command again: it re-reads the chain first.
+key can trade; (2) from finalized balances, withdraw the vault's spare SOL,
+all USDG and all WSOL to your wallet, creating your USDG and WSOL token
+accounts if needed. Each asset is its own transaction, so one that cannot
+move does not stop the others. Funds only ever move from the vault to the
+owner.
+Nothing is sent without --send. Each transaction is signed once; the same
+signed bytes are rebroadcast until it lands or its blockhash expires, so it
+can land at most once. If one does not finalize, run the command again: it
+re-reads the chain first.
 
 The key is your exported Solana wallet secret key (base58, or a
 solana-keygen JSON file). It is read only from the file or standard input,
 never from the command line, and is never printed, logged or sent anywhere.
+--owner takes the wallet's address (its public key), never a secret.
 Delete the key file when you are done. PROGRAM_ID is the program shown
 next to your vault in Merrymen (the owner of the vault account). The RPC
 must be a mainnet-beta HTTPS endpoint you trust; the owner pays the fees.`;
@@ -81,6 +86,7 @@ export interface SolanaRecoverCommandDeps {
   /** Standard input, read only for --key-file -. */
   stdin?: AsyncIterable<Buffer | string> & { isTTY?: boolean };
   fetch?: typeof globalThis.fetch;
+  /** Waits: the unlisted-program pause, status polls and the transport's rebroadcast interval. */
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
   pollMs?: number;
@@ -121,19 +127,27 @@ export async function runSolanaRecoverCommand(args: readonly string[], deps: Sol
   if (!rpcUrl) throw new SolanaRecoverError("--rpc is required: a mainnet-beta HTTPS RPC endpoint you trust.");
   if (send && !keyFile) throw new SolanaRecoverError("--send needs --key-file PATH (or --key-file - for standard input).");
   if (!keyFile && !expectedOwner) throw new SolanaRecoverError("Give --owner PUBLIC_KEY for a plan, or --key-file to derive it from your key.");
+  // Checked before anything is read or contacted, and never echoed: a value
+  // that is not a wallet address may be a pasted 32-byte secret seed.
+  if (expectedOwner !== undefined && !isSolanaWalletAddress(expectedOwner)) {
+    throw new SolanaRecoverError("--owner must be your Solana wallet address (its public key), and the value given is not one. It was not used, "
+      + "shown or sent anywhere. If you pasted a secret key or seed there, clear it from your shell history and treat that key as exposed.");
+  }
   const sha = text("program-sha256");
   if (sha !== undefined && !/^[a-f0-9]{64}$/.test(sha)) throw new SolanaRecoverError("--program-sha256 must be 64 lowercase hex characters.");
   const allowUnlistedProgram = flags["unlisted-program"] === true;
   // Refuse an unverifiable program before the key is read or the RPC is contacted.
   solanaRecoveryProgramTrust({ programId, send, programSha256: sha, allowUnlistedProgram, releases: deps.releases });
   // The RPC URL can carry an API key: it is validated, used, and never printed.
-  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000, singleEndpoint: true });
+  const rpc = createSolanaLiveRpc({ env: { MERRYMEN_SOLANA_RPC_MAINNET: rpcUrl }, fetch: deps.fetch, timeoutMs: 15_000, singleEndpoint: true,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}) });
 
   let key: Awaited<ReturnType<typeof readSolanaOwnerKey>> | undefined;
   if (keyFile) {
     key = await readSolanaOwnerKey(await readKeyText(keyFile, deps));
     if (expectedOwner !== undefined && expectedOwner !== key.owner) {
-      throw new SolanaRecoverError(`The key belongs to ${key.owner}, not to --owner ${expectedOwner}. Nothing was sent.`);
+      // The key's own address only: the --owner value is not repeated.
+      throw new SolanaRecoverError(`The key belongs to ${key.owner}, not to the --owner address given. Nothing was sent.`);
     }
   }
   const log = deps.log ?? ((line: string) => console.log(line));

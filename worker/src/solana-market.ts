@@ -31,9 +31,33 @@ const ERRORS = {
   "zero-output": "Jupiter quotes no output for this amount; it is too small to trade.",
   "stale-quote": "Jupiter quote context is outside the current slot bounds.",
 } as const;
+/**
+ * Jupiter's zero-output answer, as validated: the evidence that no route buys
+ * `inAmount` of `inputMint` back right now. SolanaMarketError("zero-output")
+ * carries it, so a caller that acts on "dust" (a write-off) keeps the answer
+ * itself, not just the time it heard it.
+ */
+export interface SolanaZeroOutputQuote {
+  source: "jupiter";
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  /** Jupiter's outAmount: 0, or so small that its slippage floor is 0. */
+  outAmount: string;
+  /** Jupiter's otherAmountThreshold, which a zero-output answer always has at "0". */
+  minOutAmount: "0";
+  slippageBps: number;
+  /** Jupiter's context slot, when the answer carried a valid one. */
+  contextSlot: number | null;
+  /** When the quote was requested (the market clock, before the request). */
+  quotedAtMs: number;
+}
 export class SolanaMarketError extends Error {
-  constructor(readonly code: keyof typeof ERRORS) {
+  /** Only on "zero-output" from the market's quote: the answer itself. */
+  readonly zeroOutput?: Readonly<SolanaZeroOutputQuote>;
+  constructor(readonly code: keyof typeof ERRORS, zeroOutput?: SolanaZeroOutputQuote) {
     super(ERRORS[code]); this.name = "SolanaMarketError";
+    if (zeroOutput) this.zeroOutput = Object.freeze({ ...zeroOutput });
   }
 }
 
@@ -235,12 +259,14 @@ export function validSolanaJupiterRoute(value: unknown, intent: SolanaSwapIntent
  * definite answer about the amount, unlike an outage or a malformed quote,
  * and it is never a fill: callers may only value such a holding at zero.
  */
-function zeroOutputQuote(raw: unknown, intent: SolanaSwapIntent): boolean {
+function zeroOutputQuote(raw: unknown, intent: SolanaSwapIntent, quotedAtMs: number): SolanaZeroOutputQuote | null {
   if (!object(raw) || Object.hasOwn(raw, "error") || raw.swapMode !== "ExactIn" ||
     raw.inputMint !== intent.inputMint || raw.outputMint !== intent.outputMint || raw.inAmount !== intent.amountRaw ||
-    raw.slippageBps !== intent.slippageBps || !unsigned(raw.outAmount) || raw.otherAmountThreshold !== "0") return false;
+    raw.slippageBps !== intent.slippageBps || !unsigned(raw.outAmount) || raw.otherAmountThreshold !== "0") return null;
   // The slippage floor of the quoted output must itself round to zero.
-  return BigInt(raw.outAmount) * BigInt(10_000 - intent.slippageBps) < 10_000n;
+  if (BigInt(raw.outAmount) * BigInt(10_000 - intent.slippageBps) >= 10_000n) return null;
+  return { source: "jupiter", inputMint: intent.inputMint, outputMint: intent.outputMint, inAmount: intent.amountRaw, outAmount: raw.outAmount,
+    minOutAmount: "0", slippageBps: intent.slippageBps, contextSlot: int(raw.contextSlot) ? raw.contextSlot : null, quotedAtMs };
 }
 
 export type SolanaMarket = {
@@ -288,7 +314,8 @@ export function createSolanaMarket(options: MarketOptions = {}): SolanaMarket {
         catch { throw new SolanaRpcError(signal.aborted ? "timeout" : "network"); }
         return readSolanaJson(response, signal);
       }, options.timeoutMs);
-      if (zeroOutputQuote(raw, intent)) throw new SolanaMarketError("zero-output");
+      const zero = zeroOutputQuote(raw, intent, quotedAtMs);
+      if (zero) throw new SolanaMarketError("zero-output", zero);
       if (!object(raw) || Object.hasOwn(raw, "error") || raw.swapMode !== "ExactIn" ||
         raw.inputMint !== intent.inputMint || raw.outputMint !== intent.outputMint || raw.inAmount !== intent.amountRaw ||
         raw.slippageBps !== intent.slippageBps || !unsigned(raw.outAmount, true) ||

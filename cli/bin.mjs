@@ -25,6 +25,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write.mjs";
@@ -1661,20 +1662,55 @@ switch (cmd) {
     // solana-recover reads the owner's key from a file or the inherited stdin,
     // never from these arguments.
     const entry = { "solana-agent": "solana-agent-cli.ts", "solana-paper": "solana-paper-cli.ts", "solana-recover": "solana-recover-cli.ts" }[cmd];
+    const agent = cmd === "solana-agent";
     const child = spawn(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", entry), ...rest], {
       cwd: ROOT,
-      stdio: "inherit",
+      // The worker's IPC channel closes when this process dies for any reason,
+      // SIGKILL and the OOM killer included, so the worker never trades as an orphan.
+      // The variable names this process as the worker's parent: a worker that
+      // starts with another parent (re-parented) or a closed channel knows this
+      // command is gone and never opens storage (SOLANA_WORKER_IPC_ENV).
+      stdio: agent ? ["inherit", "inherit", "inherit", "ipc"] : "inherit",
+      ...(agent ? { env: { ...process.env, MERRYMEN_SOLANA_WORKER_IPC: String(process.pid) } } : {}),
       shell: false,
     });
-    // A pid-based stop (kill, a supervisor, nohup) reaches only this process.
-    // Forward it, and exit only from the child's exit, so a stopped command
-    // never leaves the worker trading as an orphan. Windows has no POSIX
+    const running = () => child.exitCode === null && child.signalCode === null;
+    // A pid-based stop (kill, a supervisor, nohup) reaches only this process,
+    // and exit happens only from the child's exit. Windows has no POSIX
     // signals: its console delivers Ctrl+C to the child directly, while
     // child.kill there would terminate the child abruptly instead.
     if (process.platform !== "win32") {
+      // Signals closer together than this are one press delivered twice: the
+      // terminal's copy and a launcher's (npx, npm run) forwarded copy, which
+      // can arrive late under heavy load. Matches SOLANA_WORKER_REPEAT_MS in
+      // worker/src/solana-agent-cli.ts (cli/solana-agent-signals.test.mjs checks).
+      const REPEAT_MS = 1_500;
+      // Press times on the monotonic clock: a wall clock stepped back (NTP)
+      // would otherwise keep every later press inside the window.
+      let presses = 0, lastPressAt = 0;
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
         process.on(signal, () => {
-          if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+          if (!running()) return;
+          if (!agent) { child.kill(signal); return; }
+          const at = performance.now();
+          if (presses > 0 && at - lastPressAt < REPEAT_MS) return;
+          presses++; lastPressAt = at;
+          // One message per press this command received, instead of a second
+          // signal: a terminal Ctrl+C already reached the worker itself, so a
+          // forwarded copy would look like a second press. The second press
+          // forces the stop; a worker too wedged to act on it is killed.
+          const force = presses >= 2, connected = child.connected;
+          if (connected) {
+            try { child.send({ type: "merrymen-solana-worker-stop", force, signal }, () => {}); } catch { /* exiting */ }
+          } else {
+            // The worker closes the channel only once its run has finished, so
+            // nothing is in flight: it exits at once with its own exit code.
+            child.kill(signal);
+          }
+          if (force) {
+            if (connected) bad("Forcing the Solana worker to stop.");
+            setTimeout(() => { if (running()) child.kill("SIGKILL"); }, 3_000).unref();
+          }
         });
       }
     }
@@ -1725,7 +1761,7 @@ switch (cmd) {
   ${bold("merrymen selftest")}       fire one arrow through the whole pipeline
   ${bold("merrymen preflight")}      can it actually trade? balances, chain, caps, sizing
   ${bold("merrymen solana-paper")}   local Solana paper book and quotes (--help)
-  ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies
+  ${bold("merrymen solana-agent")}   run explicitly enabled Solana strategies; Ctrl+C twice forces a stop (--help)
   ${bold("merrymen solana-recover")} withdraw your Solana vault with your own key (--help)
   ${bold("merrymen export")}         write the hash-chained audit journal (stdout)
   ${bold("merrymen verify")}         check an export — reads only the file you hand it
