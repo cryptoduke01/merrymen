@@ -295,6 +295,48 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   assert.deepEqual(saved, { revision: 0, strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
   assert.equal(signCount, 0);
 });
+test("a paced answer is a wait wherever it is read: the first status load, owner controls and the strategy, never a failure", async () => {
+  const PACED = "Your Solana account was refreshed too often. Try again in 3 seconds.";
+  const paced = () => json({ error: PACED, ownerFacing: true }, 429);
+  const alerts = () => [...ui.container.querySelectorAll('[role="alert"]')].map((item) => item.textContent);
+  const notices = () => [...ui.container.querySelectorAll('[role="status"].solana-notice')].map((item) => item.textContent);
+  const card = (heading: string) => [...ui.container.querySelectorAll(".solana-card")].find((item) => item.querySelector("h2")?.textContent === heading)!;
+  const fresh = async () => { await ui.close(); ui = testDom(); calls = []; };
+  // The first status read of the page.
+  let statusAnswer: () => Response = paced;
+  respond = async (path) => { if (path === "status") return statusAnswer(); throw new Error("Unexpected fixture route"); };
+  await render();
+  assert.deepEqual(alerts(), []); assert.deepEqual(notices(), [PACED]);
+  statusAnswer = () => json(state);
+  await ui.click("Refresh account");
+  assert.deepEqual(notices(), []); assert.match(ui.container.textContent!, /Saved preference: paper/);
+  // Checking the server's pending owner record.
+  await fresh(); state = initial("live"); state.runtime.live.programId = PROGRAM;
+  Object.assign(state.runtime.live, { ownerTransaction: { signature: "withdraw-sig", status: "pending", kind: "withdraw" } });
+  statusAnswer = () => json(state);
+  await render();
+  statusAnswer = paced;
+  await press("Check owner transaction");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Owner controls").querySelector('[role="status"].solana-notice')?.textContent, PACED);
+  // Any other failure still reads as one.
+  statusAnswer = () => json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
+  await press("Check owner transaction");
+  assert.deepEqual(alerts(), ["Solana is temporarily unavailable."]); assert.equal(card("Owner controls").querySelector(".solana-notice"), null);
+  // Preparing an owner transaction: nothing was prepared, so there is nothing to review or sign.
+  await fresh(); state = initial("live"); state.runtime.live.programId = PROGRAM;
+  respond = async (path) => { if (path === "status") return json(state); if (path === "owner") return json({ error: "Too many Solana owner requests. Try again in 5 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
+  await render(); await press("Withdraw to my wallet");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Owner controls").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana owner requests. Try again in 5 seconds.");
+  assert.doesNotMatch(ui.container.textContent!, /Review before your wallet opens/); assert.equal(signCount, 0);
+  // Saving the strategy.
+  await fresh(); state = initial();
+  respond = async (path) => { if (path === "status") return json(state); if (path === "strategy") return json({ error: "Too many Solana strategy changes. Try again in 9 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
+  await render(); await press("Save autonomous strategy");
+  assert.deepEqual(alerts(), []);
+  assert.equal(card("Autonomous rebalancing").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana strategy changes. Try again in 9 seconds.");
+});
 test("resuming buys requires a separate owner signature without changing trading limits", async () => {
   state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {

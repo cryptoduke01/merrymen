@@ -10,7 +10,7 @@ import { useSolanaOwner } from "./useSolanaOwner";
 import { RequestError, UNREACHABLE } from "./request-json";
 import { SignIn } from "./HostedControls";
 import { SolanaAutomation } from "./SolanaAutomation";
-import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
+import { OWNER_CONFIRMATION_UNAVAILABLE, outcomeAfterRefusal, pacedAnswer, refusedByServer, savedNothing, signatureOf, SolanaOwnerActions, SolanaRequestError, type OwnerRecord, type OwnerWallet, type RecoverableSol } from "./SolanaOwnerActions";
 import { ownerKeyExportEnabled, releasedProgramSha256, SolanaRecovery } from "./SolanaRecovery";
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
@@ -228,7 +228,12 @@ function ConnectedSolana() {
     discardReview(); setReviewLapsed(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
-    void refresh(abort.signal).catch((e: unknown) => { if (!abort.signal.aborted) setError(e instanceof Error ? e.message : "Could not load your Solana account."); });
+    // The first read can be paced too (the status route allows a burst, then one read every few seconds): a wait, not a failure.
+    void refresh(abort.signal).catch((e: unknown) => {
+      if (abort.signal.aborted) return;
+      const paced = pacedAnswer(e);
+      if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : "Could not load your Solana account.");
+    });
     return () => { accountEpoch.current++; abort.abort(); };
   }, [signer.did, signer.authenticated, refresh, discardReview]);
   const act = async (fn: () => Promise<void>) => {
@@ -239,7 +244,8 @@ function ConnectedSolana() {
       if (epoch !== accountEpoch.current) return;
       // Paced before anything ran: the server's own words say to wait. The page
       // keeps what it holds (a preview, signed bytes) for the next try.
-      if (e instanceof RequestError && e.status === 429) setNotice(e.message);
+      const paced = pacedAnswer(e);
+      if (paced !== null) setNotice(paced);
       else setError(e instanceof Error ? e.message : "The Solana request did not finish. Refresh before retrying.");
     }
     finally { inFlight.current = false; setBusy(false); }

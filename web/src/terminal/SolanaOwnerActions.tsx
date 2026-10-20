@@ -137,6 +137,19 @@ export function refusedByServer(error: unknown): error is RequestError {
   return error instanceof RequestError && error.status >= 400 && error.status < 500 && ![401, 403, 404, 408, 429].includes(error.status);
 }
 
+/**
+ * A PACED ANSWER IS A WAIT, NOT A FAILURE.
+ *
+ * Solana routes answer 429 when an account asks too often (the status route
+ * after a burst of reads, say), before anything runs, in words that say how
+ * long to wait. The page shows that as a notice (role=status), never as a
+ * failure (role=alert), wherever the request was made, and keeps what it holds
+ * for the next try. Returns the server's words, or null for anything else.
+ */
+export function pacedAnswer(error: unknown): string | null {
+  return error instanceof RequestError && error.status === 429 ? error.message : null;
+}
+
 /** A canonical positive integer of base units, as solanaResponse sends freshMinOutAmount. */
 const FRESH_MINIMUM = /^[1-9][0-9]{0,38}$/;
 /**
@@ -285,6 +298,8 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   // `sent`: an earlier submission of these bytes reached the server, or may have.
   const [pending, setPending] = useState<{ action: OwnerAction; signedTransactionBase64: string; signature: string | null; sent: boolean } | null>(null);
   const [result, setResult] = useState<ActionResult | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  // A paced answer (pacedAnswer): a wait, not a failure.
+  const [notice, setNotice] = useState("");
   // Bytes cleared without a known outcome, linked so the owner can check Solana itself.
   const [cleared, setCleared] = useState<{ action: OwnerAction; signature: string } | null>(null);
   const [review, setReview] = useState<OwnerReview | null>(null), [lapsed, setLapsed] = useState<OwnerAction | null>(null);
@@ -315,9 +330,14 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     const timer = setInterval(() => setReviewClock((tick) => tick + 1), 1000);
     return () => clearInterval(timer);
   }, [review]);
+  /** Shows why a request did not finish: a paced answer as a wait, anything else as a failure. */
+  const fail = (e: unknown, fallback: string) => {
+    const paced = pacedAnswer(e);
+    if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : fallback);
+  };
   const begin = (work: () => Promise<void>) => {
-    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setLapsed(null);
-    void work().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner action did not finish. Retry the existing transaction."))
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setNotice(""); setLapsed(null);
+    void work().catch((e: unknown) => fail(e, "The owner action did not finish. Retry the existing transaction."))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
   /** Submits signed bytes (again): the server answers a resubmission from its record of them. */
@@ -417,8 +437,8 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
   });
   /** The server's pending record when this page does not hold its bytes (another device, a reload, a permission). */
   const check = () => {
-    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError("");
-    void refresh().catch((e: unknown) => setError(e instanceof Error ? e.message : "The owner transaction could not be checked. Try again shortly."))
+    if (inFlight.current) return; inFlight.current = true; setBusy(true); setError(""); setNotice("");
+    void refresh().catch((e: unknown) => fail(e, "The owner transaction could not be checked. Try again shortly."))
       .finally(() => { inFlight.current = false; setBusy(false); });
   };
   const held = sol(ownerWallet?.lamports), revokeNeeds = sol(ownerWallet?.revokeLamports), withdrawNeeds = sol(ownerWallet?.withdrawLamports);
@@ -430,6 +450,7 @@ export function SolanaOwnerActions({ available, owner, programId, api, sign, ref
     {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. Merrymen adds a priority fee only from SOL beyond that, and this page signs none above {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
+    {notice && <p role="status" className="solana-notice">{notice}</p>}
     {serverPending && stuck ? <p role="status">{confirmationUnavailable
       ? `Your ${kindName(serverPending.kind)} is awaiting final confirmation, and the server cannot read its outcome from Solana right now.`
       : `Your ${kindName(serverPending.kind)} has been awaiting final confirmation for over ${OWNER_PENDING_STUCK_MS / 60_000} minutes, well past the minute or so its blockhash lasts: the server has not been able to settle its outcome.`}
