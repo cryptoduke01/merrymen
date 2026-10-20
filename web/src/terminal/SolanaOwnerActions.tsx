@@ -1,10 +1,13 @@
 "use client";
 import { useRef, useState } from "react";
-import { SOLANA_USDG_MINT, base58Encode } from "../../../packages/core/src/ids";
+import type { Instruction } from "@solana/kit";
+import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM, base58Encode } from "../../../packages/core/src/ids";
+import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction, buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction,
+  deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
 import type { SolanaApi } from "./SolanaAutomation";
-import { OWNER_MAX_PRIORITY_FEE_LAMPORTS } from "./SolanaPermission";
+import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, type OwnerPaidInstruction } from "./SolanaPermission";
 
 const WSOL = "So11111111111111111111111111111111111111112";
 type ActionResult = { signature: string; status: "pending" | "finalized" | "failed" };
@@ -19,7 +22,72 @@ export type OwnerWallet = { lamports: string; revokeLamports: string; withdrawLa
 /** Owner-recoverable SOL outside the book (status.live.recoverable). */
 export type RecoverableSol = { nativeLamports: string; unsyncedWsolLamports: string };
 /** What the owner route's prepare answers, beyond the bytes to sign. */
-type PreparedOwnerTransaction = { transactionBase64: string; requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
+export type PreparedOwnerTransaction = { transactionBase64: string; requiredLamports?: string; ownerLamports?: string; priorityFeeLamports?: string };
+/** What the owner asked the server to prepare: the owner route's prepare body, without its stage. */
+export type OwnerRequest = { action: "revoke" } | { action: "resume-buys" } | { action: "withdraw"; mint: string; amountRaw: string } | { action: "withdraw-sol"; amountRaw: string };
+
+function plain(instruction: Instruction): OwnerPaidInstruction {
+  return { program: String(instruction.programAddress), data: Uint8Array.from(instruction.data ?? []), accounts: (instruction.accounts ?? []).map((meta) => String(meta.address)) };
+}
+function sameInstruction(a: OwnerPaidInstruction, b: OwnerPaidInstruction): boolean {
+  return a.program === b.program && a.data.length === b.data.length && a.data.every((byte, index) => byte === b.data[index])
+    && a.accounts.length === b.accounts.length && a.accounts.every((account, index) => account === b.accounts[index]);
+}
+/**
+ * The instructions the server builds for `request` (prepareOwnerAction in
+ * worker/src/solana-app-runtime.ts), from the same core builders, for this
+ * owner's vault of this program: `required` in order, after an optional
+ * SyncNative of the vault's wrapped SOL account (a wrapped SOL withdrawal
+ * wraps native SOL sent there first).
+ */
+async function expectedOwnerInstructions(request: OwnerRequest, owner: string, programId: string): Promise<{ required: OwnerPaidInstruction[]; sync: OwnerPaidInstruction | null }> {
+  const vault = await deriveSolanaVaultAddress(programId, owner);
+  if (request.action === "revoke") return { required: [plain(buildRevokeSolanaSessionsInstruction({ programAddress: programId, vault, owner }))], sync: null };
+  if (request.action === "resume-buys") return { required: [plain(buildSetSolanaBreakerInstruction({ programAddress: programId, vault, authority: owner, paused: false }))], sync: null };
+  if (request.action === "withdraw-sol") return { required: [plain(buildWithdrawSolanaNativeInstruction({ programAddress: programId, vault, owner, amount: BigInt(request.amountRaw) }))], sync: null };
+  const tokenProgram = request.mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : request.mint === SOLANA_WRAPPED_SOL_MINT ? SOLANA_CLASSIC_TOKEN_PROGRAM : null;
+  if (!tokenProgram) throw new Error("Only USDG and wrapped SOL can be withdrawn.");
+  const vaultToken = await deriveSolanaAta(vault, request.mint, tokenProgram), ownerToken = await deriveSolanaAta(owner, request.mint, tokenProgram);
+  return {
+    required: [
+      // CreateIdempotent of the owner's own token account, paid by the owner.
+      { program: SOLANA_ASSOCIATED_TOKEN_PROGRAM, data: Uint8Array.of(1), accounts: [owner, ownerToken, owner, request.mint, SOLANA_SYSTEM_PROGRAM, tokenProgram] },
+      plain(buildWithdrawSolanaVaultInstruction({ programAddress: programId, vault, owner, mint: request.mint, tokenProgram, vaultToken, ownerToken, amount: BigInt(request.amountRaw) })),
+    ],
+    sync: tokenProgram === SOLANA_CLASSIC_TOKEN_PROGRAM ? { program: SOLANA_CLASSIC_TOKEN_PROGRAM, data: Uint8Array.of(17), accounts: [vaultToken] } : null,
+  };
+}
+
+/**
+ * THE PAGE'S CHECK OF A PREPARED OWNER TRANSACTION, BEFORE THE WALLET OPENS.
+ *
+ * The owner key signs, and pays for, every owner transaction, so the page
+ * reads the server's bytes as it reads a permission's: a v0 message the
+ * owner alone signs and pays for, a priority fee of at most
+ * OWNER_MAX_PRIORITY_FEE_LAMPORTS (readOwnerPaidTransaction), and nothing but
+ * exactly what the owner asked for, for this owner's vault of this program:
+ * the revocation; the resume request (breaker off); the native SOL
+ * withdrawal of exactly the amount typed; or the token withdrawal of exactly
+ * the amount typed to the owner's own token account, with that account's
+ * creation and, for wrapped SOL, the SyncNative before it. A priority fee
+ * the server states must be the one the bytes carry. Returns that fee in
+ * lamports, or throws: nothing reaches the wallet.
+ */
+export async function checkPreparedOwnerTransaction(prepared: PreparedOwnerTransaction, request: OwnerRequest, expected: { owner: string; programId: string }): Promise<string> {
+  const name = ACTION_NAMES[request.action];
+  const refuse = (): never => { throw new Error(`The prepared ${name} does not match what you asked for. Nothing was signed. Refresh and try again.`); };
+  const decoded = readOwnerPaidTransaction(prepared.transactionBase64, expected.owner) ?? refuse();
+  let wanted: Awaited<ReturnType<typeof expectedOwnerInstructions>>;
+  try { wanted = await expectedOwnerInstructions(request, expected.owner, expected.programId); } catch { return refuse(); }
+  const [first] = decoded.instructions;
+  const rest = wanted.sync && first && sameInstruction(first, wanted.sync) ? decoded.instructions.slice(1) : decoded.instructions;
+  if (rest.length !== wanted.required.length || !rest.every((instruction, index) => sameInstruction(instruction, wanted.required[index]!))) refuse();
+  const fee = decoded.priorityFeeLamports.toString();
+  if (prepared.priorityFeeLamports !== undefined && prepared.priorityFeeLamports !== fee) {
+    throw new Error(`The prepared ${name}'s priority fee does not match its bytes. Nothing was signed. Refresh and try again.`);
+  }
+  return fee;
+}
 
 /**
  * A 4XX REFUSES THE REQUEST IT ANSWERS, NOT NECESSARILY THE SIGNED BYTES.
@@ -95,8 +163,11 @@ export async function outcomeAfterRefusal(readRecord: () => Promise<OwnerRecord>
  * replaces them and they can no longer be sent; if it did, the prepare is
  * refused and the page reads the server's record to show it.
  */
-export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, serverTransaction = null, ownerWallet = null, recoverable = null }: {
-  available: boolean; api: SolanaApi; sign: (bytes: Uint8Array) => Promise<Uint8Array>; refresh: () => Promise<void>;
+export function SolanaOwnerActions({ available, owner, programId, api, sign, refresh, readRecord, serverTransaction = null, ownerWallet = null, recoverable = null }: {
+  available: boolean;
+  /** The bound owner wallet and the vault program the status names: what the prepared bytes must be for. */
+  owner: string | null; programId: string | null;
+  api: SolanaApi; sign: (bytes: Uint8Array) => Promise<Uint8Array>; refresh: () => Promise<void>;
   /** Reads the server's saved owner transaction afresh (and updates the screen). */
   readRecord: () => Promise<OwnerRecord>;
   /** The server's saved owner transaction from the last status read. */
@@ -123,20 +194,24 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, 
       // no longer be submitted once this one is prepared.
       let saved = pending?.action === action ? pending : null;
       if (!saved) {
-        const body = action === "withdraw" ? { stage: "prepare", action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
+        if (!owner || !programId) throw new Error("Connect the Solana wallet bound to this account and wait for the vault program to be verified.");
+        const request: OwnerRequest = action === "withdraw" ? { action, mint, amountRaw: solanaUnits(amount, mint === SOLANA_USDG_MINT ? 6 : 9) }
           // Native lamports held by the vault account above its rent reserve (withdraw_sol).
-          : action === "withdraw-sol" ? { stage: "prepare", action, amountRaw: solanaUnits(solAmount, 9) }
-          : { stage: "prepare", action };
+          : action === "withdraw-sol" ? { action, amountRaw: solanaUnits(solAmount, 9) }
+          : { action };
         let prepared: PreparedOwnerTransaction;
-        try { ({ prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", body)); }
+        try { ({ prepared } = await api<{ prepared: PreparedOwnerTransaction }>("owner", { stage: "prepare", ...request })); }
         catch (e) {
           // Refused before anything was signed (another owner transaction is
           // still pending, say): show the server's record of why.
           if (refusedByServer(e)) await refresh().catch(() => undefined);
           throw e;
         }
+        // The wallet only opens for bytes that do exactly what the owner asked; the fee shown is the one they carry.
+        setCost(null);
+        const fee = await checkPreparedOwnerTransaction(prepared, request, { owner, programId });
         const required = sol(prepared.requiredLamports);
-        setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: prepared.priorityFeeLamports && prepared.priorityFeeLamports !== "0" ? sol(prepared.priorityFeeLamports) : null } : null);
+        setCost(required ? { action, required, held: sol(prepared.ownerLamports), fee: fee !== "0" ? sol(fee) : null } : null);
         const signed = await sign(Uint8Array.from(atob(prepared.transactionBase64), (c) => c.charCodeAt(0)));
         const signedTransactionBase64 = btoa(String.fromCharCode(...signed));
         saved = { action, signedTransactionBase64, signature: signatureOf(signedTransactionBase64), sent: false };
@@ -188,7 +263,7 @@ export function SolanaOwnerActions({ available, api, sign, refresh, readRecord, 
   const pendingIsServers = !!pending && !!serverPending && pending.signature === serverPending.signature;
   return <div className="solana-card"><h2>Owner controls</h2>
     <p>Your wallet must sign every revocation and withdrawal. Token withdrawals return to your own token accounts; native SOL returns to your owner wallet.</p>
-    {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. A priority fee of at most {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL is added only from SOL beyond that.</p>}
+    {held && revokeNeeds && withdrawNeeds && <p>Your owner wallet holds {held} SOL and pays the network fees of these transactions. To revoke it must hold at least {revokeNeeds} SOL; to withdraw, up to {withdrawNeeds} SOL, since a withdrawal may open your token account. Merrymen adds a priority fee only from SOL beyond that, and this page signs none above {sol(OWNER_MAX_PRIORITY_FEE_LAMPORTS.toString())} SOL.</p>}
     {short && <p role="alert" className="solana-warning">That is too little to revoke. Send SOL to your owner wallet now, so you can revoke or withdraw in an emergency.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
     {serverPending && !pendingIsServers && <p role="status">Your {kindName(serverPending.kind)} is awaiting final confirmation on Solana. Until it is final, or its blockhash expires (usually within a few minutes), the server prepares no other owner transaction, a revocation included. <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(serverPending.signature)}`}>View it on Solana</a></p>}

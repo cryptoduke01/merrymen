@@ -45,29 +45,56 @@ const NOT_SIGNED = "The prepared permission does not match what this page shows.
 function refuse(): never { throw new Error(NOT_SIGNED); }
 function startsWith(data: Uint8Array, prefix: readonly number[]) { return data.length >= prefix.length && prefix.every((byte, index) => data[index] === byte); }
 
-/** Decodes the prepared registration and returns the limits it would sign, or refuses. */
-export function readPermissionTransaction(transactionBase64: string, expected: { owner: string; programId: string; vault: string; session: string }): SignedPermissionTerms {
+/** One instruction of an owner-paid transaction: its program, data and account addresses. */
+export type OwnerPaidInstruction = { program: string; data: Uint8Array; accounts: string[] };
+/**
+ * AN OWNER-PAID TRANSACTION AS ITS BYTES SAY, OR NULL WHEN THE PAGE CANNOT VOUCH FOR IT.
+ *
+ * What every owner transaction the page lets the wallet sign shares, a
+ * permission registration (readPermissionTransaction) or an owner action
+ * (SolanaOwnerActions.checkPreparedOwnerTransaction): a v0 message the owner
+ * pays for and alone signs, loading nothing from lookup tables, with at most
+ * one SetComputeUnitLimit and one SetComputeUnitPrice (both or neither,
+ * touching no account) whose priority fee is at most
+ * OWNER_MAX_PRIORITY_FEE_LAMPORTS. Returns the other instructions in order
+ * and that fee, in lamports: what the runtime charges, ceil(price × limit / 1e6).
+ */
+export function readOwnerPaidTransaction(transactionBase64: string, owner: string): { instructions: OwnerPaidInstruction[]; priorityFeeLamports: bigint } | null {
   let message: ReturnType<ReturnType<typeof getCompiledTransactionMessageDecoder>["decode"]>;
   try {
     const transaction = getTransactionDecoder().decode(Uint8Array.from(atob(transactionBase64), (c) => c.charCodeAt(0)));
     message = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
-  } catch { return refuse(); }
+  } catch { return null; }
   const keys = message.staticAccounts.map(String);
   // The owner pays and is the only signer; nothing is loaded from lookup tables.
-  if (message.version !== 0 || message.addressTableLookups?.length || keys[0] !== expected.owner || message.header.numSignerAccounts !== 1) refuse();
-  let terms: Omit<SignedPermissionTerms, "priorityFeeLamports"> | null = null;
+  if (message.version !== 0 || message.addressTableLookups?.length || keys[0] !== owner || message.header.numSignerAccounts !== 1) return null;
+  const instructions: OwnerPaidInstruction[] = [];
   let unitLimit: bigint | null = null, unitPrice: bigint | null = null;
   for (const instruction of message.instructions) {
     const program = keys[instruction.programAddressIndex];
     const data = Uint8Array.from(instruction.data ?? []);
     const accounts = (instruction.accountIndices ?? []).map((index) => keys[index]);
-    // A priority fee: one SetComputeUnitLimit and one SetComputeUnitPrice, touching no account.
-    if (program === COMPUTE_BUDGET_PROGRAM && accounts.length === 0) {
+    if (program === undefined || accounts.some((account) => account === undefined)) return null;
+    if (program === COMPUTE_BUDGET_PROGRAM) {
+      // A priority fee: one SetComputeUnitLimit and one SetComputeUnitPrice, touching no account.
       const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-      if (data.length === 5 && data[0] === 2 && unitLimit === null) { unitLimit = BigInt(view.getUint32(1, true)); continue; }
-      if (data.length === 9 && data[0] === 3 && unitPrice === null) { unitPrice = view.getBigUint64(1, true); continue; }
-      refuse();
+      if (accounts.length === 0 && data.length === 5 && data[0] === 2 && unitLimit === null) { unitLimit = BigInt(view.getUint32(1, true)); continue; }
+      if (accounts.length === 0 && data.length === 9 && data[0] === 3 && unitPrice === null) { unitPrice = view.getBigUint64(1, true); continue; }
+      return null;
     }
+    instructions.push({ program, data, accounts: accounts as string[] });
+  }
+  if ((unitLimit === null) !== (unitPrice === null)) return null;
+  const priorityFeeLamports = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
+  return priorityFeeLamports > OWNER_MAX_PRIORITY_FEE_LAMPORTS ? null : { instructions, priorityFeeLamports };
+}
+
+/** Decodes the prepared registration and returns the limits it would sign, or refuses. */
+export function readPermissionTransaction(transactionBase64: string, expected: { owner: string; programId: string; vault: string; session: string }): SignedPermissionTerms {
+  const decoded = readOwnerPaidTransaction(transactionBase64, expected.owner);
+  if (!decoded) return refuse();
+  let terms: Omit<SignedPermissionTerms, "priorityFeeLamports"> | null = null;
+  for (const { program, data, accounts } of decoded.instructions) {
     // CreateIdempotent for the owner's and the vault's USDG and wrapped SOL
     // accounts, paid by the owner: funder, account, wallet, mint, the system
     // program and that mint's token program, nothing more. The associated
@@ -88,11 +115,8 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
     }
     refuse();
   }
-  if (!terms || (unitLimit === null) !== (unitPrice === null)) return refuse();
-  // What the runtime charges: ceil(price × limit / 1e6) lamports, never above the cap.
-  const priorityFee = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
-  if (priorityFee > OWNER_MAX_PRIORITY_FEE_LAMPORTS) refuse();
-  return { ...terms, priorityFeeLamports: priorityFee.toString() };
+  if (!terms) return refuse();
+  return { ...terms, priorityFeeLamports: decoded.priorityFeeLamports.toString() };
 }
 
 /** What the setup route's prepare answers for a permission registration. */

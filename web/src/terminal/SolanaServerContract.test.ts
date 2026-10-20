@@ -7,6 +7,9 @@
  * - the registration bytes prepareLive really builds (vault initialize or
  *   not, the four token-account creations, a priority fee or none) pass the
  *   page's whole check, checkPreparedPermission, and a changed one does not;
+ * - the owner transactions prepareOwnerAction really builds (revoke, resume,
+ *   native SOL and token withdrawals, a SyncNative first or not, a priority
+ *   fee or none) pass the page's check, checkPreparedOwnerTransaction;
  * - which owner transactions the server prepares while another is pending,
  *   the rule SolanaOwnerActions shows the owner (and ownerPrepare models in
  *   SolanaScreen.test.ts).
@@ -21,14 +24,14 @@ import { address, appendTransactionMessageInstructions, compileTransaction, crea
   signTransaction, type Blockhash, type Instruction } from "@solana/kit";
 import { SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../../packages/core/src/ids";
 import { SOLANA_ASSOCIATED_TOKEN_PROGRAM, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
-  SOLANA_VAULT_LOCAL_TEST_PROGRAM, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
+  SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { wrapSqlite } from "../../../worker/src/db";
 import { createSolanaAppRuntime } from "../../../worker/src/solana-app-runtime";
 import type { SolanaLiveRead, SolanaLiveRpc } from "../../../worker/src/solana-live-rpc";
 import type { SolanaPaperMarket } from "../../../worker/src/solana-paper-service";
 import { solanaResponse } from "../lib/solana-api";
 import { SqlSolanaBindingStore } from "../lib/solana-binding-store";
-import { refusedByServer } from "./SolanaOwnerActions";
+import { checkPreparedOwnerTransaction, refusedByServer, type OwnerRequest } from "./SolanaOwnerActions";
 import { checkPreparedPermission, OWNER_MAX_PRIORITY_FEE_LAMPORTS, type PreparedPermission } from "./SolanaPermission";
 import { RequestError } from "./request-json";
 
@@ -55,7 +58,13 @@ async function fixture() {
   await bindings.settings(TENANT, owner, 0, "live", limits);
   const dataAddress = key(41), binary = Buffer.from("runtime-tested-binary"), program = Buffer.alloc(36), programData = Buffer.alloc(45 + binary.length);
   program.writeUInt32LE(2); keyBytes(dataAddress).copy(program, 4); programData.writeUInt32LE(3); binary.copy(programData, 45);
-  const controls = { initialized: false, sends: 0, height: 4900, simulatedUnits: null as number | null, priorityFees: null as number[] | null };
+  const controls = { initialized: false, sends: 0, height: 4900, simulatedUnits: null as number | null, priorityFees: null as number[] | null, unsyncedWsol: false };
+  // The vault's wrapped SOL account, holding native SOL above its rent reserve and its 0 WSOL when unsyncedWsol is set.
+  const vaultWsol = await deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  const wsolAccount = () => {
+    const b = Buffer.alloc(165); keyBytes(SOLANA_WRAPPED_SOL_MINT).copy(b, 0); keyBytes(vault).copy(b, 32);
+    b[108] = 1; b.writeUInt32LE(1, 109); b.writeBigUInt64LE(2_039_280n, 113); return b;
+  };
   const state = () => {
     const b = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE); Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(b); let p = 8;
     b[p++] = 2; b[p++] = 255;
@@ -66,7 +75,8 @@ async function fixture() {
   };
   const response = (value: unknown) => ({ context: { slot: 1000 }, value });
   // The vault (once initialized) and the owner wallet, a plain system account; every token account is missing, so its rent is counted.
-  const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state()) : null) : k === owner ? account(Buffer.alloc(0), SOLANA_SYSTEM_PROGRAM) : null;
+  const accountFor = (k: unknown) => k === vault ? (controls.initialized ? account(state()) : null) : k === owner ? account(Buffer.alloc(0), SOLANA_SYSTEM_PROGRAM)
+    : k === vaultWsol && controls.unsyncedWsol ? account(wsolAccount(), SOLANA_CLASSIC_TOKEN_PROGRAM) : null;
   const read: SolanaLiveRead = async (method, params = []) => {
     if (method === "getSlot") return 1000;
     if (method === "getEpochInfo") return { absoluteSlot: 1000, blockHeight: controls.height, epoch: 2, slotIndex: 1000, slotsInEpoch: 432_000 };
@@ -197,6 +207,45 @@ test("a registration whose token-account creation or initialize differs from the
     assert.throws(() => checkPreparedPermission({ ...setup, priorityFeeLamports: "5000" }, expected, limits), /fee does not match its bytes/);
     assert.throws(() => checkPreparedPermission(setup, expected, { ...limits, perTradeUsdg: "1000000" }), /does not match the saved limits shown/);
     assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+test("the server's real owner transactions pass the page's check, with and without a SyncNative and a priority fee; a changed one does not", async () => {
+  const f = await fixture();
+  try {
+    f.controls.initialized = true;
+    const expected = { owner: f.owner, programId: PROGRAM };
+    const requests: Array<[OwnerRequest, boolean, string[]]> = [
+      [{ action: "revoke" }, false, ["vault"]],
+      [{ action: "resume-buys" }, false, ["vault"]],
+      [{ action: "withdraw-sol", amountRaw: "1000000" }, false, ["vault"]],
+      [{ action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, false, ["ata:owner:usdg", "vault"]],
+      [{ action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000" }, false, ["ata:owner:wsol", "vault"]],
+      [{ action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000" }, true, ["sync-native", "ata:owner:wsol", "vault"]],
+    ];
+    const shapeOf = (transactionBase64: string) => instructionsOf(transactionBase64).filter(ix => ix.programAddress !== COMPUTE_BUDGET).map(ix =>
+      ix.programAddress === PROGRAM ? "vault" : ix.programAddress === SOLANA_CLASSIC_TOKEN_PROGRAM ? "sync-native" : shape([ix], f.vault, f.owner)[0]!);
+    for (const fee of [false, true]) {
+      f.controls.simulatedUnits = fee ? 150_000 : null; f.controls.priorityFees = fee ? [200_000] : null;
+      for (const [request, unsynced, instructions] of requests) {
+        const name = `${request.action}${"mint" in request ? ` ${request.mint === SOLANA_USDG_MINT ? "usdg" : "wsol"}` : ""}${unsynced ? " after SyncNative" : ""}${fee ? ", priority fee" : ""}`;
+        f.controls.unsyncedWsol = unsynced;
+        const setup = await f.app.prepareOwnerAction(f.scope, request);
+        assert.deepEqual(shapeOf(setup.transactionBase64), instructions, name);
+        // Exactly what the page receives from the route, through exactly its check.
+        const prepared = JSON.parse(JSON.stringify(setup)) as { transactionBase64: string; priorityFeeLamports?: string };
+        const checked = await checkPreparedOwnerTransaction(prepared, request, expected);
+        assert.equal(checked, setup.priorityFeeLamports, name);
+        assert.equal(checked === "0", !fee, name);
+        // The same bytes asked for anything else are refused: another amount, or another action.
+        if ("amountRaw" in request) await assert.rejects(checkPreparedOwnerTransaction(prepared, { ...request, amountRaw: "999999" }, expected), /does not match what you asked for/, name);
+        await assert.rejects(checkPreparedOwnerTransaction(prepared, request.action === "revoke" ? { action: "resume-buys" } : { action: "revoke" }, expected), /does not match what you asked for/, name);
+        // For another owner, or another program.
+        await assert.rejects(checkPreparedOwnerTransaction(prepared, request, { ...expected, owner: key(77) }), /does not match what you asked for/, name);
+        await assert.rejects(checkPreparedOwnerTransaction(prepared, request, { ...expected, programId: key(77) }), /does not match what you asked for/, name);
+      }
+    }
+    assert.equal(f.controls.sends, 0, "preparing sends nothing");
   } finally { f.raw.close(); }
 });
 

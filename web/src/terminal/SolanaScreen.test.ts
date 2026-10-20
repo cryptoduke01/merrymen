@@ -8,7 +8,8 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, getBase64EncodedWireTransaction,
   setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction } from "@solana/kit";
 import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../../packages/core/src/ids";
-import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
+import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruction, buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction,
+  buildWithdrawSolanaNativeInstruction, buildWithdrawSolanaVaultInstruction, deriveSolanaAta, deriveSolanaVaultAddress, SOLANA_ASSOCIATED_TOKEN_PROGRAM,
   SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_SYSTEM_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
@@ -35,10 +36,35 @@ async function permissionTransaction(session: string, signed: ReturnType<typeof 
     await createAta(vault, SOLANA_USDG_MINT), await createAta(vault, SOLANA_WRAPPED_SOL_MINT), await createAta(OWNER, SOLANA_USDG_MINT), await createAta(OWNER, SOLANA_WRAPPED_SOL_MINT),
     buildCreateSolanaSessionInstruction({ programAddress: PROGRAM, vault, owner: OWNER, session, perTrade: BigInt(signed.perTradeUsdg), daily: BigInt(signed.dailyUsdg),
       perTradeWsol: BigInt(signed.perTradeWsol), dailyWsol: BigInt(signed.dailyWsol), maxOps: signed.maxOpsPerDay, expiresAt: BigInt(Math.floor(signed.expiresAtMs / 1000)) }), ...extra];
+  return { transactionBase64: ownerPaid(instructions), vault, programId: PROGRAM, session, expiresAtMs: Date.now() + 60_000 };
+}
+/** A v0 transaction the owner pays for, as wire bytes. */
+function ownerPaid(instructions: Instruction[]): string {
   const message = setTransactionMessageLifetimeUsingBlockhash({ blockhash: address("11111111111111111111111111111111") as unknown as Blockhash, lastValidBlockHeight: 1n },
     setTransactionMessageFeePayer(address(OWNER), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 }))));
-  return { transactionBase64: getBase64EncodedWireTransaction(compileTransaction(message)), vault, programId: PROGRAM, session, expiresAtMs: Date.now() + 60_000 };
+  return getBase64EncodedWireTransaction(compileTransaction(message));
 }
+/**
+ * The owner transaction the runtime prepares for an owner route `body`, as
+ * real wire bytes for OWNER's vault of the status's program, after `before`
+ * (a priority fee, say). SolanaServerContract.test.ts runs the server's own
+ * through the same page check.
+ */
+async function ownerBytes(body: Record<string, unknown> | undefined, before: Instruction[] = []): Promise<string> {
+  const programAddress = state.runtime.live.programId!, vault = await deriveSolanaVaultAddress(programAddress, OWNER), amount = () => BigInt(String(body!.amountRaw));
+  let instructions: Instruction[];
+  if (body?.action === "revoke") instructions = [buildRevokeSolanaSessionsInstruction({ programAddress, vault, owner: OWNER })];
+  else if (body?.action === "resume-buys") instructions = [buildSetSolanaBreakerInstruction({ programAddress, vault, authority: OWNER, paused: false })];
+  else if (body?.action === "withdraw-sol") instructions = [buildWithdrawSolanaNativeInstruction({ programAddress, vault, owner: OWNER, amount: amount() })];
+  else if (body?.action === "withdraw") {
+    const mint = String(body.mint), tokenProgram = mint === SOLANA_USDG_MINT ? TOKEN_2022_PROGRAM : SOLANA_CLASSIC_TOKEN_PROGRAM;
+    instructions = [await createAta(OWNER, mint), buildWithdrawSolanaVaultInstruction({ programAddress, vault, owner: OWNER, mint, tokenProgram,
+      vaultToken: await deriveSolanaAta(vault, mint, tokenProgram), ownerToken: await deriveSolanaAta(OWNER, mint, tokenProgram), amount: amount() })];
+  } else throw new Error("Unexpected owner action");
+  return ownerPaid([...before, ...instructions]);
+}
+/** The owner route's prepare answer for `body`, with real bytes. */
+const prepareAnswer = async (body: Record<string, unknown> | undefined) => json({ prepared: { transactionBase64: await ownerBytes(body) } });
 /** Types into the input whose label starts with `label`, the way a person does. */
 async function type(label: string, value: string) {
   const input = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith(label))!.querySelector("input")!;
@@ -208,13 +234,13 @@ test("a delayed response from the previous identity never populates a new accoun
 });
 
 test("owner recovery stays available in paper mode and retries exact signed bytes", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   const submissions: unknown[] = [];
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
       assert.deepEqual(body, { stage: "prepare", action: "revoke" });
-      return json({ prepared: { transactionBase64: "AQID" } });
+      return prepareAnswer(body);
     }
     if (path === "owner" && body?.stage === "submit") {
       submissions.push(body.signedTransactionBase64);
@@ -223,9 +249,9 @@ test("owner recovery stays available in paper mode and retries exact signed byte
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Revoke all Solana sessions");
+  await render(); await press("Revoke all Solana sessions");
   assert.equal(signCount, 1);
-  await ui.click("Check existing owner transaction");
+  await press("Check existing owner transaction");
   assert.equal(signCount, 1); assert.deepEqual(submissions, ["AQID", "AQID"]);
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
 });
@@ -244,17 +270,17 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   assert.equal(signCount, 0);
 });
 test("resuming buys requires a separate owner signature without changing trading limits", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
       assert.deepEqual(body, { stage: "prepare", action: "resume-buys" });
-      return json({ prepared: { transactionBase64: "AQID" } });
+      return prepareAnswer(body);
     }
     if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "resume-proof", status: "finalized" } });
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Ask wallet to resume buys");
+  await render(); await press("Ask wallet to resume buys");
   assert.equal(signCount, 1);
   assert.equal(calls.some((call) => call.path === "settings"), false);
   assert.match(ui.container.textContent!, /drawdown still exceeds your limit/);
@@ -387,10 +413,10 @@ test("a prepared permission that encodes anything but the shown limits never rea
 
 const refusal = (error: string, status = 409) => json({ error, ownerFacing: true }, status);
 test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       const prepared = calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare");
       if (prepared.at(-1)!.body!.action === "withdraw") return refusal("The prepared owner transaction expired before submission.");
@@ -398,13 +424,13 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /expired before submission\. This signed withdrawal was not accepted and has been discarded/);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
-  await ui.click("Revoke all Solana sessions");
+  await press("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   const owner = calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
   assert.deepEqual(owner, ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -412,14 +438,14 @@ test("a refused owner submission discards the stale signed bytes and leaves Revo
 });
 
 /** The owner route's prepare, as prepareOwner answers it: nothing new while a saved owner transaction is pending (pinned in SolanaServerContract.test.ts). */
-const ownerPrepare = () => (state.runtime.live as { ownerTransaction?: { status: string } | null }).ownerTransaction?.status === "pending"
-  ? refusal("Refresh the pending owner transaction before preparing another.") : json({ prepared: { transactionBase64: "AQID" } });
+const ownerPrepare = (body: Record<string, unknown> | undefined) => (state.runtime.live as { ownerTransaction?: { status: string } | null }).ownerTransaction?.status === "pending"
+  ? refusal("Refresh the pending owner transaction before preparing another.") : prepareAnswer(body);
 const ownerTransaction = (signature: string, status: string, kind: string) => Object.assign(state.runtime.live, { ownerTransaction: { signature, status, kind } });
 test("withdrawal bytes the server never saved do not hold back Revoke: the revocation replaces them", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
     if (path === "owner" && body?.stage === "submit") {
       // The withdrawal's submission never reached the server; the revocation's is saved and broadcast.
       if (ownerCalls().filter((call) => call === "submit").length === 1) throw new Error("Lost response");
@@ -428,13 +454,13 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   assert.equal(button("Check existing owner transaction").disabled, false);
   assert.equal(button("Withdraw to my wallet").disabled, true);
   assert.equal(button("Ask wallet to resume buys").disabled, true);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
   assert.match(ui.container.textContent!, /Revoking stays available: if the server never saved this withdrawal, a revocation replaces it and it can no longer be sent; if the server saved it, a revocation can be prepared once it is final or expired/);
-  await ui.click("Revoke all Solana sessions");
+  await press("Revoke all Solana sessions");
   // A fresh revocation was prepared and signed; the withdrawal bytes were not resent as a revoke.
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "prepare:revoke", "submit"]);
@@ -444,10 +470,10 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
 });
 
 test("while the server holds a submitted owner transaction, every owner action waits for it, Revoke included, and says so", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
     if (path === "owner" && body?.stage === "submit") {
       const withdrawal = ownerCalls().filter((call) => call.startsWith("prepare:")).at(-1) === "prepare:withdraw";
       if (!withdrawal) return json({ result: { signature: "revoke-sig", status: "finalized" } });
@@ -457,7 +483,7 @@ test("while the server holds a submitted owner transaction, every owner action w
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   const text = () => ui.container.textContent!;
   assert.match(text(), /A signed withdrawal is awaiting final confirmation on Solana\. Until it is final or expired, no other owner transaction can be prepared, a revocation included/);
   for (const name of ["Revoke all Solana sessions", "Ask wallet to resume buys", "Withdraw to my wallet", "Withdraw native SOL"]) assert.equal(button(name).disabled, true, name);
@@ -465,11 +491,11 @@ test("while the server holds a submitted owner transaction, every owner action w
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit"]);
   // It finalizes; the check reads that, and the actions come back.
   ownerTransaction("withdraw-sig", "finalized", "withdraw");
-  await ui.click("Check existing owner transaction");
+  await press("Check existing owner transaction");
   assert.match(text(), /Owner transaction: finalized/);
   assert.doesNotMatch(text(), /awaiting final confirmation/);
   assert.equal(button("Revoke all Solana sessions").disabled, false);
-  await ui.click("Revoke all Solana sessions");
+  await press("Revoke all Solana sessions");
   assert.equal(signCount, 2);
   assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit", "prepare:revoke", "submit"]);
 });
@@ -478,14 +504,14 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
   state = initial("live"); state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return ownerPrepare();
+    if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
     if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "revoke-sig", status: "pending" } });
     throw new Error("Unexpected fixture route");
   };
   await render();
   // Another device submitted a permission registration after this page last read the status.
   ownerTransaction("permission-sig", "pending", "session");
-  await ui.click("Revoke all Solana sessions");
+  await press("Revoke all Solana sessions");
   const text = () => ui.container.textContent!;
   assert.equal(signCount, 0, "the wallet never opened");
   assert.match(text(), /Refresh the pending owner transaction before preparing another\./);
@@ -505,11 +531,11 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
 
 const ownerCalls = () => calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
 test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports the server's record, never 'not accepted'", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   let submits = 0;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       submits++;
       // The server saved and broadcast these bytes; it holds them as pending.
@@ -521,9 +547,9 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /Owner transaction: pending/);
-  await ui.click("Check existing owner transaction");
+  await press("Check existing owner transaction");
   const text = ui.container.textContent!;
   assert.doesNotMatch(text, /not accepted|discarded/);
   assert.match(text, /does not match the saved transaction\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept\. It may already have completed on Solana/);
@@ -531,7 +557,7 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
   assert.equal(button("Withdraw to my wallet").disabled, true, "no second withdrawal while the first may complete");
   // The server's record, not the refusal, settles it.
   (state.runtime.live as { ownerTransaction?: { status: string } }).ownerTransaction!.status = "finalized";
-  await ui.click("Check existing owner transaction");
+  await press("Check existing owner transaction");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded/);
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
@@ -540,13 +566,13 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
 });
 
 test("a 4xx after an unknown outcome clears bytes the server holds no record of, without claiming they were never sent", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   // Real wire bytes: one owner signature, then a message.
   const signature = new Uint8Array(64).fill(9), wire = Uint8Array.from([1, ...signature, 0x80, 1, 2, 3]);
   let submits = 0;
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       assert.equal(body.signedTransactionBase64, Buffer.from(wire).toString("base64"));
       if (++submits === 1) throw new Error("Lost response");
@@ -555,9 +581,9 @@ test("a 4xx after an unknown outcome clears bytes the server holds no record of,
     throw new Error("Unexpected fixture route");
   };
   signedBytes = () => wire;
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   assert.equal(button("Withdraw to my wallet").disabled, true);
-  await ui.click("Check existing owner transaction");
+  await press("Check existing owner transaction");
   const text = ui.container.textContent!;
   assert.doesNotMatch(text, /not accepted/);
   assert.match(text, /expired before submission\. The server holds no record of this signed withdrawal, so it was cleared and cannot be resent/);
@@ -569,18 +595,18 @@ test("a 4xx after an unknown outcome clears bytes the server holds no record of,
 });
 
 test("a refused retry keeps the signed bytes when the server's record cannot be read", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   let submits = 0, statusUp = true;
   respond = async (path, body) => {
     if (path === "status") return statusUp ? json(state) : json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") {
       if (++submits === 1) throw new Error("Lost response");
       statusUp = false; return refusal("The prepared owner transaction expired before submission.");
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet"); await ui.click("Check existing owner transaction");
+  await render(); await press("Withdraw to my wallet"); await press("Check existing owner transaction");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /An earlier submission of this signed withdrawal may already be on Solana, so it was kept\. This does not mean it failed/);
   assert.equal(button("Check existing owner transaction").disabled, false);
@@ -588,19 +614,19 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
 });
 
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal("Your sign-in does not match this Solana account.", 403), refusal("Request timed out.", 408)];
   respond = async (path, body) => {
     if (path === "status") return json(state);
-    if (path === "owner" && body?.stage === "prepare") return json({ prepared: { transactionBase64: "AQID" } });
+    if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
     if (path === "owner" && body?.stage === "submit") return answers.shift()!;
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Withdraw to my wallet");
+  await render(); await press("Withdraw to my wallet");
   for (let i = 0; i < 4; i++) {
     assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
     assert.equal(button("Check existing owner transaction").disabled, false);
-    await ui.click("Check existing owner transaction");
+    await press("Check existing owner transaction");
   }
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.equal(button("Check existing owner transaction").disabled, false);
@@ -923,13 +949,13 @@ test("the live card shows warnings, the fee payer's level and the runtime's setu
 });
 
 test("owner controls show the owner wallet's SOL against what revoke and withdraw need, and the recoverable SOL", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   Object.assign(state.runtime.live, { ownerWallet: { lamports: "500000", revokeLamports: "895880", withdrawLamports: "2934280" },
     recoverable: { nativeLamports: "1500000000", unsyncedWsolLamports: "250000000" } });
   await render();
   const text = () => ui.container.textContent!;
   assert.match(text(), /Your owner wallet holds 0\.0005 SOL and pays the network fees of these transactions\. To revoke it must hold at least 0\.00089588 SOL; to withdraw, up to 0\.00293428 SOL/);
-  assert.match(text(), /A priority fee of at most 0\.001 SOL is added only from SOL beyond that/);
+  assert.match(text(), /Merrymen adds a priority fee only from SOL beyond that, and this page signs none above 0\.001 SOL/);
   assert.match(text(), /That is too little to revoke\. Send SOL to your owner wallet now/);
   assert.match(text(), /The vault account holds 1\.5 SOL above its rent reserve/);
   assert.match(text(), /0\.25 SOL was sent to the vault's wrapped SOL account without being wrapped/);
@@ -941,23 +967,103 @@ test("owner controls show the owner wallet's SOL against what revoke and withdra
 });
 
 test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and shows what the owner wallet must hold", async () => {
-  state.runtime.live.programId = OWNER;
+  state.runtime.live.programId = PROGRAM;
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
       assert.deepEqual(body, { stage: "prepare", action: "withdraw-sol", amountRaw: "1500000000" });
-      return json({ prepared: { transactionBase64: "AQID", requiredLamports: "905880", ownerLamports: "10000000", priorityFeeLamports: "10000" } });
+      // 200,000 units at 50,000 micro-lamports: a 0.00001 SOL priority fee.
+      return json({ prepared: { transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", ownerLamports: "10000000", priorityFeeLamports: "10000" } });
     }
     if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "native-proof", status: "finalized" } });
     throw new Error("Unexpected fixture route");
   };
   await render();
   await type("Native SOL to withdraw", "1.5");
-  await ui.click("Withdraw native SOL");
+  await press("Withdraw native SOL");
   assert.equal(signCount, 1);
   assert.match(ui.container.textContent!, /The prepared native SOL withdrawal needs your owner wallet to hold at least 0\.00090588 SOL \(it holds 0\.01 SOL\): its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.deepEqual(calls.filter((call) => call.path === "owner").map((call) => call.body!.stage), ["prepare", "submit"]);
+});
+
+test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
+  state.runtime.live.programId = PROGRAM;
+  const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER), stranger = base58Encode(new Uint8Array(32).fill(9));
+  const usdgAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
+  const wsolAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
+  const transfer: Instruction = { programAddress: address(SOLANA_SYSTEM_PROGRAM), data: Uint8Array.of(2, 0, 0, 0, 0, 202, 154, 59, 0, 0, 0, 0),
+    accounts: [{ address: address(OWNER), role: 3 }, { address: address(stranger), role: 1 }] };
+  const syncNative = async (wallet: string, program = SOLANA_CLASSIC_TOKEN_PROGRAM): Promise<Instruction> =>
+    ({ programAddress: address(program), data: Uint8Array.of(17), accounts: [{ address: address(await wsolAccount(wallet)), role: 1 }] });
+  const withdrawUsdg = async (ownerToken: string, amount = 1_000_000n) => [await createAta(OWNER, SOLANA_USDG_MINT), buildWithdrawSolanaVaultInstruction({ programAddress: PROGRAM, vault, owner: OWNER,
+    mint: SOLANA_USDG_MINT, tokenProgram: TOKEN_2022_PROGRAM, vaultToken: await usdgAccount(vault), ownerToken, amount })];
+  let answer: (body: Record<string, unknown>) => Promise<{ transactionBase64: string; requiredLamports?: string; priorityFeeLamports?: string }>;
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "owner" && body?.stage === "prepare") return json({ prepared: await answer(body) });
+    if (path === "owner" && body?.stage === "submit") return json({ result: { signature: "owner-proof", status: "finalized" } });
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  await type("Native SOL to withdraw", "1.5");
+  const text = () => ui.container.textContent!;
+  const refused: Array<[string, string, (body: Record<string, unknown>) => Promise<{ transactionBase64: string; requiredLamports?: string; priorityFeeLamports?: string }>, RegExp]> = [
+    ["a revocation that also moves the owner's SOL", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, [transfer]) }), /The prepared revocation does not match what you asked for\. Nothing was signed/],
+    ["a revocation that also registers a trading session", "Revoke all Solana sessions", async () => ({ transactionBase64: ownerPaid([
+      buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault, owner: OWNER }),
+      buildCreateSolanaSessionInstruction({ programAddress: PROGRAM, vault, owner: OWNER, session: stranger, perTrade: 1n << 40n, daily: 1n << 40n, perTradeWsol: 1n << 40n, dailyWsol: 1n << 40n, maxOps: 96, expiresAt: 1n << 40n })]) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a revocation of another owner's vault", "Revoke all Solana sessions", async () => ({ transactionBase64: ownerPaid([buildRevokeSolanaSessionsInstruction({ programAddress: PROGRAM, vault: await deriveSolanaVaultAddress(PROGRAM, stranger), owner: OWNER })]) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a revocation under another program", "Revoke all Solana sessions", async () => ({ transactionBase64: ownerPaid([buildRevokeSolanaSessionsInstruction({ programAddress: stranger, vault, owner: OWNER })]) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a resume request that pauses buying", "Ask wallet to resume buys", async () => ({ transactionBase64: ownerPaid([buildSetSolanaBreakerInstruction({ programAddress: PROGRAM, vault, authority: OWNER, paused: true })]) }),
+      /The prepared request to resume buys does not match what you asked for/],
+    ["a native SOL withdrawal of another amount", "Withdraw native SOL", async () => ({ transactionBase64: ownerPaid([buildWithdrawSolanaNativeInstruction({ programAddress: PROGRAM, vault, owner: OWNER, amount: 1_500_000_001n })]) }),
+      /The prepared native SOL withdrawal does not match what you asked for/],
+    ["a USDG withdrawal to someone else's token account", "Withdraw to my wallet", async () => ({ transactionBase64: ownerPaid(await withdrawUsdg(await usdgAccount(stranger))) }),
+      /The prepared withdrawal does not match what you asked for/],
+    ["a USDG withdrawal of another amount", "Withdraw to my wallet", async () => ({ transactionBase64: ownerPaid(await withdrawUsdg(await usdgAccount(OWNER), 2_000_000n)) }),
+      /The prepared withdrawal does not match what you asked for/],
+    ["a USDG withdrawal after a SyncNative of the vault's USDG account", "Withdraw to my wallet", async () => ({ transactionBase64: ownerPaid([
+      { programAddress: address(SOLANA_CLASSIC_TOKEN_PROGRAM), data: Uint8Array.of(17), accounts: [{ address: address(await usdgAccount(vault)), role: 1 }] }, ...await withdrawUsdg(await usdgAccount(OWNER))]) }),
+      /The prepared withdrawal does not match what you asked for/],
+    ["a priority fee above 0.001 SOL", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(1_400_000, 1_000_000n)) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a priority fee limit without a price", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n).slice(0, 1)) }),
+      /The prepared revocation does not match what you asked for/],
+    ["a stated fee its bytes do not carry", "Revoke all Solana sessions", async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", priorityFeeLamports: "0" }),
+      /The prepared revocation's priority fee does not match its bytes\. Nothing was signed/],
+    ["bytes that are not a transaction", "Revoke all Solana sessions", async () => ({ transactionBase64: "AQID" }), /The prepared revocation does not match what you asked for/],
+  ];
+  for (const [name, label, prepared, refusedWith] of refused) {
+    answer = prepared;
+    await press(label);
+    assert.match(text(), refusedWith, name);
+    assert.equal(signCount, 0, name);
+    assert.equal(calls.some((call) => call.body?.stage === "submit"), false, name);
+    assert.doesNotMatch(text(), /needs your owner wallet to hold/, name);
+  }
+  // What the server really builds is signed: the fee shown is the one decoded from the bytes, not the server's claim.
+  answer = async (body) => ({ transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880" });
+  await press("Revoke all Solana sessions");
+  assert.equal(signCount, 1);
+  assert.match(text(), /The prepared revocation needs your owner wallet to hold at least 0\.00090588 SOL: its network fee, a priority fee of 0\.00001 SOL so it lands under congestion/);
+  // A wrapped SOL withdrawal that first wraps native SOL sent to the vault's wrapped SOL account.
+  const mint = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Asset"))!.querySelector("select")!;
+  await act(async () => { mint.value = SOLANA_WRAPPED_SOL_MINT; mint.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  answer = async (body) => ({ transactionBase64: await ownerBytes(body, [await syncNative(vault)]) });
+  await press("Withdraw to my wallet");
+  assert.equal(signCount, 2);
+  assert.deepEqual(calls.filter((call) => call.path === "owner" && call.body?.stage === "prepare").at(-1)!.body, { stage: "prepare", action: "withdraw", mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "1000000000" });
+  // But never a SyncNative of someone else's account, or under another token program.
+  for (const before of [[await syncNative(stranger)], [await syncNative(vault, TOKEN_2022_PROGRAM)]]) {
+    answer = async (body) => ({ transactionBase64: await ownerBytes(body, before) });
+    await press("Withdraw to my wallet");
+    assert.match(text(), /The prepared withdrawal does not match what you asked for/);
+  }
+  assert.equal(signCount, 2);
 });
 
 /** SetComputeUnitLimit and SetComputeUnitPrice, as the runtime adds them to an owner transaction. */

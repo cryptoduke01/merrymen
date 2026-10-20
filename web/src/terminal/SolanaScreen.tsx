@@ -451,7 +451,8 @@ function ConnectedSolana() {
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
-      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
+      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} owner={sameWallet ? binding.owner : null} programId={live?.programId ?? null}
+        api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
         serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null} />
       {/* Off by default; only the bound owner of a vault the server has read. */}
       {ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault && <SolanaRecovery key={`recovery-${signer.did}`} owner={signer.address}
