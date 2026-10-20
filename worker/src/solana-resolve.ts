@@ -15,15 +15,19 @@
  *   provider must be on its own hostname.
  * - It books only when two of them agree on the same final outcome (a fill, an
  *   on-chain failure, or a proven expiry) and no provider reports a different
- *   final outcome. An expiry is not booked while any provider has seen the
- *   signature. A provider that cannot answer, or answers with a receipt that
- *   cannot be read, simply does not count.
+ *   final outcome. A provider that cannot answer, or answers with a receipt
+ *   that cannot be read, does not count toward that agreement.
+ * - An expiry is not booked while any provider has seen the signature, nor
+ *   while any provider the operator has not set aside could not be read: an
+ *   unreadable answer may be the evidence that it landed (a finalized status
+ *   whose receipt cannot be used is refused as unreadable, not as unseen).
  * - When one provider keeps reporting a final outcome the others contradict,
- *   the operator can set it aside by name (--exclude primary|fallback|third).
- *   Its view is still read, shown and recorded with the decision as excluded;
- *   two OTHER providers on their own hostnames must still agree, no other
- *   provider may disagree, and an expiry is still refused while any provider,
- *   the excluded one included, has seen the signature.
+ *   or cannot be read at all, the operator can set it aside by name (--exclude
+ *   primary|fallback|third). Its view is still read, shown and recorded with
+ *   the decision as excluded; two OTHER providers on their own hostnames must
+ *   still agree, no other provider may disagree, and an expiry is still
+ *   refused while any provider, the excluded one included, has seen the
+ *   signature.
  * - Before booking it records the operator, their reason, the outcome and
  *   every provider's view in solana_operator_resolutions, then books through
  *   the trading store's own settle, which re-checks the evidence against the
@@ -57,8 +61,8 @@ export const SOLANA_RESOLVE_USAGE = [
   "       npm run solana:resolve -- book <tenant> <request-id> --operator NAME --reason \"why\" [--third-rpc] [--exclude primary|fallback|third]",
   "       npm run solana:resolve -- history <tenant> [<request-id>]",
   `--third-rpc also asks the provider whose HTTPS URL is in ${SOLANA_RESOLVE_THIRD_RPC_ENV} (set it in .env.solana.local or the environment, never on the command line).`,
-  "--exclude sets aside one provider that reports a conflicting final outcome: its view is still shown and recorded, two other providers on their own hostnames must agree,",
-  "and an expiry is still refused while any provider has seen the signature.",
+  "--exclude sets aside one provider that reports a conflicting final outcome or cannot be read: its view is still shown and recorded, two other providers on their own",
+  "hostnames must agree, and an expiry is still refused while any provider has seen the signature.",
 ].join("\n");
 
 const SCHEMA = `CREATE TABLE IF NOT EXISTS solana_operator_resolutions (
@@ -102,9 +106,10 @@ function normalizedHost(url: string): string { return new URL(url).hostname.toLo
 /**
  * What may be booked from these views. Two providers on different hostnames
  * must derive the same final outcome, and no provider may report a different
- * one; an expiry also needs that no provider has seen the signature. A view
- * the operator excluded neither agrees nor disagrees, but its having seen the
- * signature still refuses an expiry. Anything else books nothing.
+ * one. An expiry also needs that no provider has seen the signature and that
+ * every provider not excluded could be read. A view the operator excluded
+ * neither agrees nor disagrees, but its having seen the signature still
+ * refuses an expiry. Anything else books nothing.
  */
 export function solanaResolveDecision(views: readonly SolanaResolveView[]): SolanaResolveDecision {
   const settled = views.filter((view): view is SolanaResolveView & { observation: SolanaObservation } => !view.excluded && "observation" in view && view.observation.settlement !== null);
@@ -118,9 +123,19 @@ export function solanaResolveDecision(views: readonly SolanaResolveView[]): Sola
     return { book: false, reason: "Only one provider reports this final outcome. Two independent providers must agree before anything is booked; consult another provider with --third-rpc." };
   }
   const settlement = agreeing[0]!.observation.settlement!;
-  // Every view counts here, an excluded one included: a provider that saw the signature may be the one telling the truth.
-  if (settlement.status === "expired" && views.some(view => "observation" in view && view.observation.seen)) {
-    return { book: false, reason: "A provider has seen this signature, so its expiry is not booked: the transaction may have landed. Nothing is booked." };
+  if (settlement.status === "expired") {
+    // Every view counts here, an excluded one included: a provider that saw the signature may be the one telling the truth.
+    if (views.some(view => "observation" in view && view.observation.seen)) {
+      return { book: false, reason: "A provider has seen this signature, so its expiry is not booked: the transaction may have landed. Nothing is booked." };
+    }
+    // An unreadable answer may be the proof it landed: a finalized status whose
+    // receipt cannot be used throws rather than reading as unseen. A transaction
+    // that landed and failed leaves the vault sequence unchanged, so the others'
+    // expiry proofs cannot rule it out. Only the operator sets a dead provider aside.
+    if (views.some(view => !view.excluded && "error" in view)) {
+      return { book: false, reason: "A provider could not be read, so this expiry is not booked: its answer may be the evidence that the transaction landed. Nothing is booked. "
+        + "If that provider is down, set it aside with --exclude (two other providers must still agree)." };
+    }
   }
   return { book: true, settlement, agreed: agreeing.map(view => view.label) };
 }

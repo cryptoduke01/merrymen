@@ -140,14 +140,46 @@ test("an expiry two providers prove is booked only while no provider has seen th
     book: { operator: "milla", reason: "dropped" } });
   assert.equal(refused.booked, false); assert.match(refused.lines.at(-1)!, /has seen this signature/);
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending");
-  // The fallback cannot answer at all: it does not count either way.
+  // The fallback cannot answer at all: an expiry waits until the operator sets it aside.
   const unreadable = providers({ ...expired, fallback: new SolanaRpcError("timeout") });
-  const booked = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: unreadable.list, observe: unreadable.observe, now: () => f.clock.value,
+  const waiting = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: unreadable.list, observe: unreadable.observe, now: () => f.clock.value,
     book: { operator: "milla", reason: "dropped" } });
-  assert.equal(booked.booked, true); assert.match(booked.lines.join("\n"), /fallback: could not be used: Solana read timed out\./);
+  assert.equal(waiting.booked, false); assert.match(waiting.lines.at(-1)!, /A provider could not be read, so this expiry is not booked.*--exclude/);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
+  const booked = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: unreadable.list, observe: unreadable.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "dropped; fallback is down" }, exclude: "fallback" });
+  assert.equal(booked.booked, true); assert.match(booked.lines.join("\n"), /fallback: could not be used: Solana read timed out\. \(excluded by the operator/);
   assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "expired");
   // The sequence is free again for a new trade.
   const next = submission("after-expiry"); next.risk.slot = 1001; assert.equal(await f.store.recordSigned(next), true);
+});
+
+test("an expiry is not booked while a provider has a finalized status whose receipt cannot be read, until the operator sets that provider aside", async t => {
+  // The primary has a finalized status but a receipt that cannot be used (observeSolanaSubmission throws):
+  // the transaction landed, maybe failed with the vault sequence unchanged. The other two prove an expiry.
+  const f = await fixture(t);
+  const views = { primary: new SolanaSettlementError() as Error, fallback: { settlement: expiry(f.pending), seen: false }, "operator's provider": { settlement: expiry(f.pending, "1250"), seen: false } };
+  const p = providers(views);
+  const refused = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "primary broken" } });
+  assert.equal(refused.booked, false); assert.equal(refused.decision?.book, false);
+  assert.match(refused.lines.join("\n"), /primary: could not be used: Finalized Solana evidence disagrees with the recorded submission\.\n.*\nA provider could not be read, so this expiry is not booked/s);
+  assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "pending"); assert.deepEqual(await resolutions(f.db), []);
+  // The decision alone says the same, for an unreadable fallback too; an excluded unreadable view does not block.
+  const unread: SolanaResolveView = { label: "fallback", hostId: "b", error: "Its answer could not be read." };
+  const proven: SolanaResolveView[] = [{ label: "primary", hostId: "a", observation: { settlement: expiry(f.pending), seen: false } },
+    { label: "operator's provider", hostId: "c", observation: { settlement: expiry(f.pending), seen: false } }];
+  assert.equal(solanaResolveDecision([...proven, unread]).book, false);
+  assert.equal(solanaResolveDecision([...proven, { ...unread, excluded: true }]).book, true);
+  // A fill two providers agree on is not held back by an unreadable one: a fill moved the vault's sequence.
+  assert.equal(solanaResolveDecision([{ ...proven[0]!, observation: { settlement: fill(f.pending), seen: true } }, { ...proven[1]!, observation: { settlement: fill(f.pending), seen: true } }, unread]).book, true);
+  // The operator sets the unreadable primary aside: the two proofs book the expiry, with the dissent recorded.
+  const booked = await resolveSolanaPendingTrade({ db: f.db, tenant: TENANT, requestId: "stuck-1", providers: p.list, observe: p.observe, now: () => f.clock.value,
+    book: { operator: "milla", reason: "primary returns a corrupt receipt for everything" }, exclude: "primary" });
+  assert.equal(booked.booked, true); assert.equal((await f.store.get(OWNER, "stuck-1"))!.status, "expired");
+  const evidence = JSON.parse((await resolutions(f.db))[0]!.evidence_json as string);
+  assert.equal(evidence.excluded, "primary"); assert.deepEqual(evidence.providers[0], { label: "primary", hostId: evidence.providers[0].hostId, excluded: true,
+    error: "Finalized Solana evidence disagrees with the recorded submission." });
 });
 
 test("a malformed receipt from one provider does not count; two readable agreeing providers still book, and none books nothing", async t => {
