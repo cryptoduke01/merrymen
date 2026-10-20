@@ -25,6 +25,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write.mjs";
@@ -1684,12 +1685,14 @@ switch (cmd) {
       // can arrive late under heavy load. Matches SOLANA_WORKER_REPEAT_MS in
       // worker/src/solana-agent-cli.ts (cli/solana-agent-signals.test.mjs checks).
       const REPEAT_MS = 1_500;
+      // Press times on the monotonic clock: a wall clock stepped back (NTP)
+      // would otherwise keep every later press inside the window.
       let presses = 0, lastPressAt = 0;
       for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
         process.on(signal, () => {
           if (!running()) return;
           if (!agent) { child.kill(signal); return; }
-          const at = Date.now();
+          const at = performance.now();
           if (presses > 0 && at - lastPressAt < REPEAT_MS) return;
           presses++; lastPressAt = at;
           // One message per press this command received, instead of a second

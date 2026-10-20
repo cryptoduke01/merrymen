@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { constants } from "node:os";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { runSolanaAgent } from "./solana-agent";
 import { EX_CONFIG, hostedSolanaRefusals } from "./deploy-guard-checks";
@@ -65,7 +66,11 @@ export interface SolanaWorkerStopOptions {
   write(text: string): void;
   setTimer(callback: () => void, ms: number): { unref?(): unknown };
   parentGraceMs?: number;
-  /** Monotonic enough to compare signal times; defaults to Date.now. */
+  /**
+   * The clock signal times are compared on. Defaults to performance.now, which
+   * is monotonic: a wall clock stepped back (NTP) would keep every later press
+   * inside the repeat window, so no press could force a stop.
+   */
   now?(): number;
   repeatMs?: number;
   /**
@@ -105,7 +110,7 @@ export interface SolanaWorkerStopOptions {
  * durable attempt schedule, so nothing is replayed.
  */
 export function installSolanaWorkerStop(host: SolanaWorkerStopHost, options: SolanaWorkerStopOptions): { parentLost(): boolean; finished(): void } {
-  const now = options.now ?? Date.now, repeatMs = options.repeatMs ?? SOLANA_WORKER_REPEAT_MS;
+  const now = options.now ?? (() => performance.now()), repeatMs = options.repeatMs ?? SOLANA_WORKER_REPEAT_MS;
   let presses = 0, lastPressAt = 0, stopping = false, finished = false, parentLost = false;
   const stop = (why: string, hint = ` Press Ctrl+C again to force (presses within ${repeatMs / 1000} s count as this one).`) => {
     if (stopping) return;

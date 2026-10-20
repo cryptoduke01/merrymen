@@ -315,14 +315,14 @@ test("worker stop: the parent named by the command is parsed strictly, and anyth
 });
 
 /** The worker's stop handling, driven directly: a fake process, abort, exit and timers. */
-function stopHarness({ connected = true, ppid = 4242, parentPid = undefined, finishedExitCode = undefined } = {}) {
+function stopHarness({ connected = true, ppid = 4242, parentPid = undefined, finishedExitCode = undefined, defaultClock = false } = {}) {
   const host = Object.assign(new EventEmitter(), { connected, ppid, disconnected: 0, disconnect() { this.disconnected++; this.connected = false; } });
   const events = { aborts: 0, exits: [], writes: [], timers: [] };
   const clock = { ms: 1_000_000 };
   const handle = installSolanaWorkerStop(host, {
     abort: () => { events.aborts++; }, exit: (code) => { events.exits.push(code); }, write: (text) => { events.writes.push(text); },
     setTimer: (callback, ms) => { const timer = { callback, ms, unrefed: false, unref() { this.unrefed = true; } }; events.timers.push(timer); return timer; },
-    now: () => clock.ms, parentPid, finishedExitCode,
+    ...(defaultClock ? {} : { now: () => clock.ms }), parentPid, finishedExitCode,
   });
   return { host, events, handle, later: (ms = SOLANA_WORKER_REPEAT_MS) => { clock.ms += ms; } };
 }
@@ -371,6 +371,29 @@ test("the solana-agent command merges duplicate signals over the same window as 
   const source = readFileSync(BIN, "utf8");
   const windows = [...source.matchAll(/const REPEAT_MS = ([0-9_]+);/g)].map((match) => Number(match[1].replaceAll("_", "")));
   assert.deepEqual(windows, [SOLANA_WORKER_REPEAT_MS]);
+  // And on the same monotonic clock: the press handler reads performance.now, never the wall clock.
+  const handler = source.slice(source.indexOf("const REPEAT_MS = "), source.indexOf("child.on(\"error\""));
+  assert.match(handler, /const at = performance\.now\(\);/);
+  assert.doesNotMatch(handler, /Date\.now\(\)/);
+  assert.match(source, /^import \{ performance \} from "node:perf_hooks";$/m);
+});
+
+test("worker stop: the repeat window runs on the monotonic clock, whatever the wall clock does", (t) => {
+  const clocks = { mono: 5_000, wall: 1_790_000_000_000 };
+  t.mock.method(performance, "now", () => clocks.mono);
+  t.mock.method(Date, "now", () => clocks.wall);
+  // NTP steps the wall clock an hour back after the first press; real time moves past the window.
+  const back = stopHarness({ defaultClock: true });
+  back.host.emit("SIGINT");
+  clocks.wall -= 3_600_000; clocks.mono += SOLANA_WORKER_REPEAT_MS;
+  back.host.emit("SIGINT");
+  assert.deepEqual(back.events.exits, [130], "a deliberate second press still forces the stop");
+  // The wall clock jumps an hour ahead between the two copies of one press: still one press.
+  const ahead = stopHarness({ defaultClock: true });
+  ahead.host.emit("SIGINT");
+  clocks.wall += 3_600_000; clocks.mono += 100;
+  ahead.host.emit("SIGINT");
+  assert.deepEqual([ahead.events.aborts, ahead.events.exits], [1, []], "one press delivered twice never forces");
 });
 
 test("worker stop: after the run finished, a stop exits at once with the run's own code, never 130", () => {
