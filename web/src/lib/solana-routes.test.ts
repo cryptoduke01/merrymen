@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
 import { after, before, beforeEach, mock, test } from "node:test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as api from "./solana-api";
 import * as auth from "./solana-auth";
@@ -63,6 +64,20 @@ test("paper and intent routes always derive tenant and owner from the verified b
     assert.notEqual((await post("intent", { mode: "paper", intent, action: "trade", ...extra })).status, 200);
   }
   assert.deepEqual(calls, []);
+});
+test("the owner's previewed minimum reaches the runtime's trade, and the page sends it with every trade", async () => {
+  // The route forwards the intent, floor included, untouched.
+  const intent = { mode: "paper", requestId: "floor-one", minOutAmount: "9950000" };
+  assert.equal((await post("intent", { mode: "paper", intent, action: "trade" })).status, 200);
+  assert.deepEqual(calls.pop(), { method: "trade", args: [scope, { mode: "paper", intent }] });
+  // The page's trade request carries the minimum of the quote the owner just saw. Without it the server
+  // places the trade at whatever the fresh route guarantees (the floor check is skipped), so this is pinned.
+  // A behavioural test of the request body belongs in SolanaScreen.test.ts (the web UI track).
+  const page = readFileSync(fileURLToPath(new URL("../terminal/SolanaScreen.tsx", import.meta.url)), "utf8");
+  const placeTrade = page.slice(page.indexOf("const placeTrade = async () => {"), page.indexOf("const tokenLabel ="));
+  assert.ok(placeTrade.length > 0, "placeTrade must exist for this pin to mean anything");
+  assert.equal((placeTrade.match(/api</g) ?? []).length, 1, "one request");
+  assert.match(placeTrade, /api<\{ receipt: Receipt \}>\("intent", \{ action: "trade", mode, intent: \{ \.\.\.intent, minOutAmount: preview\.quote\.minOutAmount \} \}\)/);
 });
 test("live mode requires explicit separate consent and registration requires saved live mode", async () => {
   assert.equal((await post("settings", { mode: "live", limits, revision: 2 })).status, 400);
