@@ -25,8 +25,10 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  anchorProgramIds, base58Decode, declaredProgramId, programRecord, provenance, readToolchain, releaseStatus, RELEASE_RULE,
+  anchorProgramIds, base58Decode, CANDIDATE_LABEL, candidateArtifactName, declaredProgramId, programRecord, provenance, readToolchain,
+  releaseLine, releaseStatus, RELEASE_RULE,
 } from "./solana-program-record.mjs";
+import { releaseArtifactName, releaseRecord } from "./solana-release.mjs";
 import { checkRuntimeTests, countTests, parseResults, runtimeTargets } from "./solana-runtime-tests.mjs";
 import { decide, solanaPaths } from "./solana-paths.mjs";
 import { ARTIFACT, assess, compareCommitted, differences, LINUX_HOST, LINUX_MANIFEST, verifyRecorded } from "./solana-linux-manifest.mjs";
@@ -162,19 +164,24 @@ describe("the CI jobs", () => {
     assert.doesNotMatch(top, refused);
   });
 
-  it("names the artifact for its commit and run, and as a release candidate only from a run on main", () => {
+  it("names the artifact for its commit and run, and at most candidate-unconfirmed, never release", () => {
     // The release rule says CI never runs on a tag push. Pushes run on main only.
     const on = /^on:\n((?: {2}.*\n|\n)*)/m.exec(ci)?.[1] ?? "";
     assert.match(on, /^ {2}push:\n {4}branches: \[main\]\n(?! {4})/m);
     assert.doesNotMatch(on, /tags/);
     const upload = /uses: actions\/upload-artifact@\S+.*\n((?: {8}.*\n)*)/.exec(test)?.[1] ?? "";
-    assert.match(upload, /^ {10}name: merrymen-vault-sbf-\$\{\{ steps\.linux-manifest\.outputs\.release \}\}-\$\{\{ github\.sha \}\}-run\$\{\{ github\.run_id \}\}\.\$\{\{ github\.run_attempt \}\}$/m);
+    assert.match(upload, /^ {10}name: \$\{\{ steps\.linux-manifest\.outputs\.artifact \}\}$/m);
     // The label comes from the Linux manifest comparison, which decides it
     // from the run and the outcome (solana-linux-manifest.mjs report), and
-    // nothing but its two values reaches the name. The record step, which
-    // cannot know the outcome, gives no label.
+    // nothing but its two values reaches the name, which also carries the
+    // commit and the run. Neither value says release: this upload comes
+    // before app has checked the rebuild's hash, so only solana · release,
+    // after app, does. The record step, which cannot know the outcome, gives no label.
     const label = steps(test).find(s => s.includes("id: linux-manifest")) ?? "";
-    assert.match(label, /^ {10}release=\$\(node scripts\/ci\/solana-linux-manifest\.mjs report contracts\/solana contracts\/solana\/target\/deploy\/merrymen_vault\.build\.json\)\n {10}case "\$release" in release-candidate\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"$/m);
+    assert.match(label, /^ {10}release=\$\(node scripts\/ci\/solana-linux-manifest\.mjs report contracts\/solana contracts\/solana\/target\/deploy\/merrymen_vault\.build\.json\)\n {10}case "\$release" in candidate-unconfirmed\|not-a-release\) ;; \*\) echo "::error::[^"]*"; exit 1 ;; esac\n {10}echo "release=\$release" >> "\$GITHUB_OUTPUT"\n {10}echo "artifact=merrymen-vault-sbf-\$release-\$GITHUB_SHA-run\$GITHUB_RUN_ID\.\$GITHUB_RUN_ATTEMPT" >> "\$GITHUB_OUTPUT"$/m);
+    assert.equal(candidateArtifactName(CANDIDATE_LABEL, { commit: "c", runId: "7", runAttempt: "2" }), "merrymen-vault-sbf-candidate-unconfirmed-c-run7.2",
+      "solana-release.mjs expects the name this step writes");
+    assert.match(test, /^ {4}outputs:\n {6}sha256: \$\{\{ steps\.record\.outputs\.sha256 \}\}\n(?: {6}#.*\n)* {6}release: \$\{\{ steps\.linux-manifest\.outputs\.release \}\}\n {6}artifact: \$\{\{ steps\.linux-manifest\.outputs\.artifact \}\}$/m);
     const record = steps(test).find(s => s.includes("id: record")) ?? "";
     assert.doesNotMatch(record, /release/);
     assert.doesNotMatch(test, /steps\.record\.outputs\.release/);
@@ -207,7 +214,7 @@ describe("the CI jobs", () => {
     // The comparison runs twice: before the upload, where its outcome names
     // the artifact and nothing fails on it, and as the last step, which fails
     // on it. So a run that fails it has still handed the owner the manifest
-    // to review and commit, under a name that is never release-candidate.
+    // to review and commit, under a name that is never a candidate's.
     assert.equal(all.at(-1), [
       "      - name: Linux manifest matches the committed one",
       "        if: needs.solana-paths.outputs.run == 'true'",
@@ -220,8 +227,9 @@ describe("the CI jobs", () => {
       "        if: needs.solana-paths.outputs.run == 'true'",
       "        run: |",
       "          release=$(node scripts/ci/solana-linux-manifest.mjs report contracts/solana contracts/solana/target/deploy/merrymen_vault.build.json)",
-      "          case \"$release\" in release-candidate|not-a-release) ;; *) echo \"::error::the comparison gave no release label\"; exit 1 ;; esac",
+      "          case \"$release\" in candidate-unconfirmed|not-a-release) ;; *) echo \"::error::the comparison gave no release label\"; exit 1 ;; esac",
       "          echo \"release=$release\" >> \"$GITHUB_OUTPUT\"",
+      "          echo \"artifact=merrymen-vault-sbf-$release-$GITHUB_SHA-run$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"",
     ].join("\n"));
     // The same environment as the Test step, so --record's in-place build is
     // the build test.sh made, not a rebuild with other settings.
@@ -338,6 +346,58 @@ describe("the CI jobs", () => {
       const shown = `vault artifact: tested ${vars.VAULT_TESTED_SHA256 || "(none)"}, rebuilt ${vars.VAULT_REBUILT_SHA256 || "(none)"}`;
       assert.ok(r.stdout.split("\n").includes(shown), `${label}: ${r.stdout}`);
     }
+  });
+
+  it("solana · release, after app, is the only job that uploads a release name, and only for solana · test's candidate", () => {
+    const release = job("solana-release");
+    assert.ok(release, "ci.yml has no solana-release job");
+    assert.match(release, /^ {4}name: solana · release$/m);
+    /** Each job's needs, and everything it waits on through them. */
+    const needsOf = id => /^ {4}needs: \[([^\]]*)\]$/m.exec(job(id))?.[1].split(",").map(x => x.trim()).filter(Boolean) ?? [];
+    const upstream = id => {
+      const seen = new Set();
+      const walk = j => { for (const n of needsOf(j)) if (!seen.has(n)) { seen.add(n); walk(n); } };
+      walk(id);
+      return seen;
+    };
+    assert.deepEqual(needsOf("solana-release"), ["app", "solana-test", "solana-rebuild"]);
+    // No job-level if: it runs only when app (and so every part) succeeded,
+    // and a run whose app passed never sees it skipped (the Kaka test below).
+    assert.doesNotMatch(release, /^ {4}(if|continue-on-error):/m);
+    assert.doesNotMatch(release, /continue-on-error/);
+    // Every upload in ci.yml, by job: solana · test's name is its label's,
+    // which says at most candidate-unconfirmed; any other name that could say
+    // release must be uploaded by a job downstream of app.
+    const uploads = jobIds().flatMap(id => steps(job(id)).filter(st => st.includes("uses: actions/upload-artifact@"))
+      .map(st => ({ id, name: /^ {10}name: (.*)$/m.exec(st)?.[1] ?? "" })));
+    assert.deepEqual(uploads, [
+      { id: "solana-test", name: "${{ steps.linux-manifest.outputs.artifact }}" },
+      { id: "solana-release", name: "merrymen-vault-release-${{ github.sha }}-run${{ github.run_id }}.${{ github.run_attempt }}" },
+    ]);
+    for (const { id, name } of uploads) {
+      if (id === "solana-test") continue;
+      assert.match(name, /release/);
+      assert.ok(upstream(id).has("app"), `${id} uploads ${name} without waiting for app`);
+    }
+    assert.equal(upstream("solana-test").has("app"), false);
+    assert.equal(releaseArtifactName({ commit: "c", runId: "7", runAttempt: "2" }), "merrymen-vault-release-c-run7.2", "the name the summary prints is the one uploaded");
+    const [notice, ...rest] = steps(release);
+    assert.match(notice, /^ {6}- name: Not a release\n {8}if: needs\.solana-test\.outputs\.release != 'candidate-unconfirmed'\n {8}run: echo "[^"$`]*"$/, notice);
+    assert.equal(rest.length, 4);
+    for (const step of rest) {
+      const conditions = [...step.matchAll(/^ {8}if: (.*)$/gm)].map(m => m[1]);
+      assert.deepEqual(conditions, ["needs.solana-test.outputs.release == 'candidate-unconfirmed'"], step);
+    }
+    const record = rest.find(st => st.includes("- name: Release record")) ?? "";
+    assert.match(record, /^ {8}run: node scripts\/ci\/solana-release\.mjs "\$RUNNER_TEMP\/merrymen_vault\.release\.json"$/m);
+    for (const [k, v] of [
+      ["VAULT_RELEASE_LABEL", "needs.solana-test.outputs.release"], ["VAULT_ARTIFACT", "needs.solana-test.outputs.artifact"],
+      ["VAULT_TESTED_SHA256", "needs.solana-test.outputs.sha256"], ["VAULT_REBUILT_SHA256", "needs.solana-rebuild.outputs.sha256"],
+    ]) assert.ok(record.includes(`          ${k}: \${{ ${v} }}`), `${k} from ${v}`);
+    // The record is what is uploaded, and it is required to exist.
+    const upload = rest.at(-1);
+    assert.match(upload, /^ {10}path: \$\{\{ runner\.temp \}\}\/merrymen_vault\.release\.json\n {10}if-no-files-found: error$/m);
+    assert.ok(rest.indexOf(record) < rest.length - 1);
   });
 
   it("keeps the Kaka docs-only lane open: no job of the run can conclude skipped", async () => {
@@ -1061,11 +1121,11 @@ describe("solana-program-record.mjs", () => {
     const candidates = [main, { ...main, event: "workflow_dispatch" }];
     for (const p of candidates) {
       assert.deepEqual(releaseStatus(p, "matches"), {
-        candidate: true, label: "release-candidate", reason: "a run on main whose pinned Linux build matched the committed manifest", rule: RELEASE_RULE,
+        candidate: true, label: "candidate-unconfirmed", reason: "a run on main whose pinned Linux build matched the committed manifest", rule: RELEASE_RULE,
       }, JSON.stringify(p));
       // Any other outcome, or none yet, is not a release: the artifact's name
-      // follows this, so bytes that fail the comparison never carry the
-      // release-candidate name.
+      // follows this, so bytes that fail the comparison never carry a
+      // candidate's name.
       const outcomes = {
         null: "its Linux build manifest has not been compared yet",
         uncommitted: "no Linux build manifest is committed yet",
@@ -1102,6 +1162,14 @@ describe("solana-program-record.mjs", () => {
     assert.match(RELEASE_RULE, /^A release artifact comes only from a CI run on refs\/heads\/main of millw14\/merrymen: a push to main, or a manual \(workflow_dispatch\) run on main, whose pinned Linux build matched the committed contracts\/solana\/build-manifests\/Linux-x86_64\.json and whose app check passed/);
     assert.match(RELEASE_RULE, /CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate\./);
     assert.doesNotMatch(RELEASE_RULE, /or a tag of/);
+    // The verdict comes after app: solana · test's name is unconfirmed, the release record is solana · release's.
+    assert.match(RELEASE_RULE, /solana · test uploads such a run's bytes as merrymen-vault-sbf-candidate-unconfirmed-<commit>-run<id>\.<attempt>, before app has decided; solana · release, which runs only after app passed, confirms them with merrymen-vault-release-<commit>-run<id>\.<attempt>/);
+    assert.equal(CANDIDATE_LABEL, "candidate-unconfirmed");
+    // No label releaseStatus can give says release on its own.
+    for (const outcome of [null, "matches", "uncommitted", "differs", "removed"]) {
+      for (const p of [...candidates, ...others]) assert.match(releaseStatus(p, outcome).label, /^(candidate-unconfirmed|not-a-release)$/);
+    }
+    assert.match(releaseLine(releaseStatus(main, "matches")), /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(/);
   });
 
   it("records the run: event, ref, commit, the pull request head, workflow and run", () => {
@@ -1163,7 +1231,7 @@ describe("solana-program-record.mjs", () => {
     assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, null));
     assert.equal(JSON.parse(readFileSync(out, "utf8")).release.label, "not-a-release");
     assert.match(readFileSync(mainSummary, "utf8"), /- release: \*\*not a release artifact\*\* \(its Linux build manifest has not been compared yet\)\./);
-    assert.doesNotMatch(readFileSync(mainSummary, "utf8"), /release candidate\*\*/);
+    assert.doesNotMatch(readFileSync(mainSummary, "utf8"), /\*\*release candidate/);
     // A manual run on a tag: the record says it is not a release.
     const tagRun = run(process.execPath, [script, root, so, out], { GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/tags/vault-v1" });
     assert.equal(tagRun.status, 0, tagRun.stderr);
@@ -1176,6 +1244,83 @@ describe("solana-program-record.mjs", () => {
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /::error::the artifact does not contain the declared program ID/);
     assert.equal(bad.stdout, "");
+  });
+});
+
+describe("solana-release.mjs", () => {
+  const script = join(here, "solana-release.mjs");
+  const commit = "c".repeat(40);
+  const hash = "a".repeat(64);
+  const main = {
+    GITHUB_REPOSITORY: "millw14/merrymen", GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_SHA: commit,
+    GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1",
+  };
+  const candidate = {
+    ...main,
+    VAULT_RELEASE_LABEL: "candidate-unconfirmed",
+    VAULT_ARTIFACT: `merrymen-vault-sbf-candidate-unconfirmed-${commit}-run123.1`,
+    VAULT_TESTED_SHA256: hash,
+    VAULT_REBUILT_SHA256: hash,
+  };
+
+  it("confirms solana · test's candidate on main once the tested and rebuilt hashes agree", () => {
+    for (const env of [candidate, { ...candidate, GITHUB_EVENT_NAME: "workflow_dispatch" }]) {
+      const r = releaseRecord(env);
+      assert.equal(r.sha256, hash);
+      assert.equal(r.artifact, candidate.VAULT_ARTIFACT);
+      assert.equal(r.commit, commit);
+      assert.deepEqual([r.provenance.runId, r.provenance.runAttempt], ["123", "1"]);
+      assert.deepEqual([r.release.candidate, r.release.confirmed, r.release.label, r.release.rule], [true, true, "release", RELEASE_RULE]);
+      assert.match(releaseLine(r.release), /^- release: \*\*release\*\* \(a run on main whose pinned Linux build matched the committed manifest and whose app check passed/);
+    }
+    // A re-run of app (attempt 2) keeps solana · test's upload from attempt 1.
+    assert.equal(releaseRecord({ ...candidate, GITHUB_RUN_ATTEMPT: "2" }).artifact, candidate.VAULT_ARTIFACT);
+  });
+
+  it("refuses every run that is not a confirmed candidate on main", () => {
+    const refused = {
+      "a pull request": [{ ...candidate, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" }, /not a push or manual run on refs\/heads\/main/],
+      "a branch": [{ ...candidate, GITHUB_REF: "refs/heads/feature" }, /not a push or manual run/],
+      "a tag": [{ ...candidate, GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/tags/vault-v1" }, /not a push or manual run/],
+      "a fork": [{ ...candidate, GITHUB_REPOSITORY: "someone/merrymen" }, /not a push or manual run/],
+      "a schedule": [{ ...candidate, GITHUB_EVENT_NAME: "schedule" }, /not a push or manual run/],
+      "no commit": [{ ...candidate, GITHUB_SHA: "" }, /no commit, run id or attempt/],
+      "no attempt": [{ ...candidate, GITHUB_RUN_ATTEMPT: "" }, /no commit, run id or attempt/],
+      "not a candidate": [{ ...candidate, VAULT_RELEASE_LABEL: "not-a-release" }, /labelled this run's artifact "not-a-release", not candidate-unconfirmed/],
+      "the old label": [{ ...candidate, VAULT_RELEASE_LABEL: "release-candidate" }, /not candidate-unconfirmed/],
+      "no vault build": [{ ...candidate, VAULT_RELEASE_LABEL: "", VAULT_ARTIFACT: "", VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, /not candidate-unconfirmed/],
+      "another commit's artifact": [{ ...candidate, VAULT_ARTIFACT: `merrymen-vault-sbf-candidate-unconfirmed-${"d".repeat(40)}-run123.1` }, /is not merrymen-vault-sbf-candidate-unconfirmed-c{40}-run123\.<attempt> of this run/],
+      "another run's artifact": [{ ...candidate, VAULT_ARTIFACT: `merrymen-vault-sbf-candidate-unconfirmed-${commit}-run124.1` }, /of this run/],
+      "a later attempt's artifact": [{ ...candidate, VAULT_ARTIFACT: `merrymen-vault-sbf-candidate-unconfirmed-${commit}-run123.2` }, /of this run/],
+      "a not-a-release artifact": [{ ...candidate, VAULT_ARTIFACT: `merrymen-vault-sbf-not-a-release-${commit}-run123.1` }, /of this run/],
+      "no artifact": [{ ...candidate, VAULT_ARTIFACT: "" }, /of this run/],
+      "no tested hash": [{ ...candidate, VAULT_TESTED_SHA256: "", VAULT_REBUILT_SHA256: "" }, /no vault artifact hash from solana · test/],
+      "a short hash": [{ ...candidate, VAULT_TESTED_SHA256: "abc", VAULT_REBUILT_SHA256: "abc" }, /no vault artifact hash/],
+      "a rebuild that differs": [{ ...candidate, VAULT_REBUILT_SHA256: "b".repeat(64) }, /the rebuilt vault artifact "b{64}" differs from the tested one a{64}/],
+      "no rebuild hash": [{ ...candidate, VAULT_REBUILT_SHA256: "" }, /differs from the tested one/],
+    };
+    for (const [label, [env, error]] of Object.entries(refused)) assert.throws(() => releaseRecord(env), error, label);
+  });
+
+  it("as a command: writes the record and the summary, or exits 1 having written nothing", () => {
+    const dir = fresh("release");
+    const out = join(dir, "merrymen_vault.release.json");
+    const summary = join(dir, "summary.md");
+    const ok = run(process.execPath, [script, out], { ...candidate, GITHUB_STEP_SUMMARY: summary });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), releaseRecord(candidate));
+    assert.equal(ok.stdout, `merrymen-vault-release-${commit}-run123.1: ${candidate.VAULT_ARTIFACT} holds the release, SHA-256 ${hash}\n`);
+    const text = readFileSync(summary, "utf8");
+    assert.match(text, /^### merrymen_vault release\n\n- record: `merrymen-vault-release-c{40}-run123\.1`\n- bytes: `merrymen-vault-sbf-candidate-unconfirmed-c{40}-run123\.1` \(target\/deploy\/merrymen_vault\.so\)\n- SHA-256: `a{64}` \(tested and rebuilt\)\n- release: \*\*release\*\* /);
+    rmSync(out);
+    const pr = run(process.execPath, [script, out], { ...candidate, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" });
+    assert.equal(pr.status, 1);
+    assert.match(pr.stderr, /^::error::not a push or manual run on refs\/heads\/main of millw14\/merrymen/m);
+    assert.equal(existsSync(out), false);
+    const differs = run(process.execPath, [script, out], { ...candidate, VAULT_REBUILT_SHA256: "b".repeat(64) });
+    assert.equal(differs.status, 1);
+    assert.equal(existsSync(out), false);
+    assert.equal(run(process.execPath, [script], candidate).status, 2);
   });
 });
 
@@ -1321,7 +1466,7 @@ describe("solana-linux-manifest.mjs", () => {
     }
   });
 
-  it("as a command: report names the artifact release-candidate only for a run on main whose build matches the committed manifest, and never fails on the outcome", () => {
+  it("as a command: report names the artifact candidate-unconfirmed only for a run on main whose build matches the committed manifest, and never fails on the outcome", () => {
     const origin = fresh("report-repo");
     const gitIn = (...args) => {
       const r = run("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], {
@@ -1361,17 +1506,18 @@ describe("solana-linux-manifest.mjs", () => {
     assert.equal(none.record.release.label, "not-a-release");
     assert.equal(none.record.program, "merrymen_vault", "the rest of the record is kept");
 
-    // Committed and matching: release-candidate on main, not-a-release on a pull request.
+    // Committed and matching: candidate-unconfirmed on main, not-a-release on a pull request.
     gitIn("add", "contracts/solana/build-manifests/Linux-x86_64.json");
     gitIn("commit", "-q", "-m", "commit the Linux manifest");
     build(so);
     const matches = report(mainRun);
     assert.equal(matches.status, 0, matches.stderr);
-    assert.equal(matches.stdout, "release-candidate\n");
+    assert.equal(matches.stdout, "candidate-unconfirmed\n");
     assert.deepEqual(matches.record.release, releaseStatus({ repository: "millw14/merrymen", event: "push", ref: "refs/heads/main" }, "matches"));
     assert.equal(matches.record.release.candidate, true);
     assert.match(matches.summary, /^### Linux build manifest\n\nThe pinned Linux build matches the committed build-manifests\/Linux-x86_64\.json: /);
-    assert.match(matches.summary, /^- release: \*\*release candidate\*\* \(a run on main whose pinned Linux build matched the committed manifest\)\. A release artifact comes only/m);
+    assert.match(matches.summary, /^- release: \*\*release candidate, unconfirmed until app passes\*\* \(a run on main whose pinned Linux build matched the committed manifest\)\. A release artifact comes only/m);
+    assert.match(matches.stderr, /The artifact is uploaded as candidate-unconfirmed \(a run on main whose pinned Linux build matched the committed manifest\)\.$/m);
     build(so);
     const pr = report(prRun);
     assert.equal(pr.status, 0, pr.stderr);

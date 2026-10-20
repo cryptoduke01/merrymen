@@ -247,6 +247,9 @@ jobs:
     timeout-minutes: 60
     outputs:
       sha256: ${{ steps.record.outputs.sha256 }}
+      # For solana · release, which runs after app: the upload's label and name.
+      release: ${{ steps.linux-manifest.outputs.release }}
+      artifact: ${{ steps.linux-manifest.outputs.artifact }}
     steps:
       - name: Not needed for this change
         if: needs.solana-paths.outputs.run != 'true'
@@ -352,33 +355,39 @@ jobs:
         run: scripts/ci/solana-toolchain.sh check
 
       # Before the upload, so the artifact's name says what the comparison
-      # found: release-candidate only for a run on main whose pinned Linux
+      # found: candidate-unconfirmed only for a run on main whose pinned Linux
       # build matches the committed manifest, not-a-release for every other
       # run and for bytes that differ from it, a deleted manifest or none
-      # committed. Writes the outcome and the decision into the record. Fails
-      # only on an error; the last step fails on the outcome.
+      # committed. Never "release": app has not compared the rebuild's hash
+      # yet, and the rest of the run can still fail or be cancelled, so the
+      # verdict is solana · release's, after app passed. Writes the outcome
+      # and the decision into the record. Fails only on an error; the last
+      # step fails on the outcome.
       - name: Linux manifest and release label
         id: linux-manifest
         if: needs.solana-paths.outputs.run == 'true'
         run: |
           release=$(node scripts/ci/solana-linux-manifest.mjs report contracts/solana contracts/solana/target/deploy/merrymen_vault.build.json)
-          case "$release" in release-candidate|not-a-release) ;; *) echo "::error::the comparison gave no release label"; exit 1 ;; esac
+          case "$release" in candidate-unconfirmed|not-a-release) ;; *) echo "::error::the comparison gave no release label"; exit 1 ;; esac
           echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "artifact=merrymen-vault-sbf-$release-$GITHUB_SHA-run$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
-      # A release takes its artifact from here, never from a laptop, and only
+      # A release takes its bytes from here, never from a laptop, and only
       # from a run on refs/heads/main (a push to main or a manual run on main)
-      # whose build matches the committed Linux manifest. This workflow never
-      # runs on a tag push, and a manual run on a tag or another branch is not
-      # a release. The name says release-candidate only then, not-a-release
-      # on every other run (every pull request run included), and always the
-      # commit and run that built it. Only named files: target/deploy also
-      # holds a throwaway program keypair. The archive keeps the paths below
-      # contracts/solana/, so the manifest is build-manifests/Linux-x86_64.json
-      # inside it.
+      # whose build matches the committed Linux manifest and whose app check
+      # passed. This workflow never runs on a tag push, and a manual run on a
+      # tag or another branch is not a release. The name says
+      # candidate-unconfirmed only for such a run on main, not-a-release on
+      # every other run (every pull request run included), and always the
+      # commit and run that built it; solana · release's record, uploaded only
+      # after app passed, is what makes it a release. Only named files:
+      # target/deploy also holds a throwaway program keypair. The archive
+      # keeps the paths below contracts/solana/, so the manifest is
+      # build-manifests/Linux-x86_64.json inside it.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: needs.solana-paths.outputs.run == 'true'
         with:
-          name: merrymen-vault-sbf-${{ steps.linux-manifest.outputs.release }}-${{ github.sha }}-run${{ github.run_id }}.${{ github.run_attempt }}
+          name: ${{ steps.linux-manifest.outputs.artifact }}
           path: |
             contracts/solana/target/deploy/merrymen_vault.so
             contracts/solana/target/deploy/merrymen_vault.build.json
@@ -482,6 +491,54 @@ jobs:
               echo "::error::solana · paths gave no decision ($SOLANA_BUILD)"; exit 1
               ;;
           esac
+
+  # THE RELEASE VERDICT, AFTER app. solana · test uploads the vault before app
+  # has compared its hash with solana · rebuild's, before app · tests and the
+  # Postgres suites have finished, and before a newer push to main can cancel
+  # the run, so its name says at most candidate-unconfirmed. This job needs
+  # app and so runs only when app passed. For a candidate (a run on main whose
+  # pinned Linux build matched the committed manifest) it uploads
+  # merrymen-vault-release-<commit>-run<id>.<attempt>, a record naming the
+  # candidate artifact and the SHA-256 solana · test tested and solana ·
+  # rebuild reproduced (scripts/ci/solana-release.mjs, which refuses anything
+  # else). No other job uploads a name that says release. Like the vault
+  # jobs, it has no job-level if: on every other run, every pull request's
+  # included, only the notice runs and the job concludes success, so the Kaka
+  # docs-only lane, which needs every job of the run to succeed, stays open.
+  solana-release:
+    name: solana · release
+    needs: [app, solana-test, solana-rebuild]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Not a release
+        if: needs.solana-test.outputs.release != 'candidate-unconfirmed'
+        run: echo "solana · test uploaded no release candidate in this run (a pull request, a run off main, no vault build, or a Linux build that did not match the committed manifest), so there is no release to confirm."
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        with:
+          node-version: 22
+
+      # Through env, not interpolated into the script: they are job outputs.
+      - name: Release record
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        run: node scripts/ci/solana-release.mjs "$RUNNER_TEMP/merrymen_vault.release.json"
+        env:
+          VAULT_RELEASE_LABEL: ${{ needs.solana-test.outputs.release }}
+          VAULT_ARTIFACT: ${{ needs.solana-test.outputs.artifact }}
+          VAULT_TESTED_SHA256: ${{ needs.solana-test.outputs.sha256 }}
+          VAULT_REBUILT_SHA256: ${{ needs.solana-rebuild.outputs.sha256 }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: needs.solana-test.outputs.release == 'candidate-unconfirmed'
+        with:
+          name: merrymen-vault-release-${{ github.sha }}-run${{ github.run_id }}.${{ github.run_attempt }}
+          path: ${{ runner.temp }}/merrymen_vault.release.json
+          if-no-files-found: error
 
   contracts:
     name: contracts

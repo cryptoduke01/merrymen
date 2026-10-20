@@ -17,12 +17,15 @@
 //
 // A release artifact comes only from a CI run on refs/heads/main of
 // millw14/merrymen (a push to main or a manual run on main) whose pinned
-// Linux build matched the committed build manifest (RELEASE_RULE). CI never
-// runs on a tag push, and a manual run on a tag or another branch is not a
-// candidate. This script cannot know the manifest outcome yet, so its record
-// always says not-a-release; in solana · test, solana-linux-manifest.mjs
-// report compares the manifest, rewrites the record's release with
-// releaseStatus(run, outcome), and gives ci.yml the artifact name's label.
+// Linux build matched the committed build manifest and whose app check passed
+// (RELEASE_RULE). CI never runs on a tag push, and a manual run on a tag or
+// another branch is not a candidate. This script cannot know the manifest
+// outcome yet, so its record always says not-a-release; in solana · test,
+// solana-linux-manifest.mjs report compares the manifest, rewrites the
+// record's release with releaseStatus(run, outcome), and gives ci.yml the
+// artifact name's label. That label is at most candidate-unconfirmed: the
+// upload happens before app has compared the rebuild's hash, so only
+// solana-release.mjs, in the job that runs after app passed, says release.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -102,12 +105,27 @@ export const RELEASE_REPOSITORY = "millw14/merrymen";
  * main, so such a run is not a candidate either.
  */
 export const RELEASE_REF = "refs/heads/main";
+/**
+ * solana · test's label for a run on main whose Linux build matched the
+ * committed manifest. It uploads before app has compared the rebuild's hash
+ * and before the rest of the run has passed, so the name cannot say more.
+ */
+export const CANDIDATE_LABEL = "candidate-unconfirmed";
+/** The label of every other solana · test upload. */
+export const NOT_A_RELEASE_LABEL = "not-a-release";
+/** What solana · test names its upload, from the label and the run. */
+export function candidateArtifactName(label, { commit, runId, runAttempt }) {
+  return `merrymen-vault-sbf-${label}-${commit}-run${runId}.${runAttempt}`;
+}
 export const RELEASE_RULE = `A release artifact comes only from a CI run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}: `
   + "a push to main, or a manual (workflow_dispatch) run on main, whose pinned Linux build matched the committed "
   + "contracts/solana/build-manifests/Linux-x86_64.json and whose app check passed, so solana · rebuild reproduced its hash. "
+  + `solana · test uploads such a run's bytes as merrymen-vault-sbf-${CANDIDATE_LABEL}-<commit>-run<id>.<attempt>, before app has decided; `
+  + "solana · release, which runs only after app passed, confirms them with merrymen-vault-release-<commit>-run<id>.<attempt>, "
+  + "a record naming that artifact and its SHA-256. Without that record the run is not a release. "
   + "CI never runs on a tag push, and a manual run on a tag or another branch is not a release candidate. "
   + "Every other artifact, every pull request run's included, is not a release artifact. "
-  + "Confirm the run on GitHub itself (event, branch, commit): this record and the artifact name are written by the run and prove nothing alone.";
+  + "Confirm the run on GitHub itself (event, branch, commit, and that app passed): this record and the artifact names are written by the run and prove nothing alone.";
 
 /** The run that built an artifact, from the GitHub Actions environment. */
 export function provenance(env) {
@@ -138,29 +156,39 @@ const RELEASE_REASONS = {
   removed: "the committed Linux build manifest was deleted",
 };
 
+/** A push or manual run on refs/heads/main of RELEASE_REPOSITORY. */
+export function fromMain(p) {
+  return p?.repository === RELEASE_REPOSITORY
+    && (p.event === "push" || p.event === "workflow_dispatch")
+    && p.ref === RELEASE_REF;
+}
+
 /**
  * Whether a run's artifact is a release candidate (RELEASE_RULE): a push or
  * manual run on refs/heads/main of RELEASE_REPOSITORY, and `linuxManifest`,
  * the outcome of solana-linux-manifest.mjs's comparison, is "matches". Any
  * other outcome, or none yet (null), is not-a-release. ci.yml names the
- * uploaded artifact with `label`.
+ * uploaded artifact with `label`, which is never more than
+ * candidate-unconfirmed: whether the run is a release is decided after app
+ * passed (solana-release.mjs).
  */
 export function releaseStatus(p, linuxManifest = null) {
-  const fromMain = p?.repository === RELEASE_REPOSITORY
-    && (p.event === "push" || p.event === "workflow_dispatch")
-    && p.ref === RELEASE_REF;
-  const candidate = fromMain && linuxManifest === "matches";
-  const reason = !fromMain
+  const main = fromMain(p);
+  const candidate = main && linuxManifest === "matches";
+  const reason = !main
     ? `not a push or manual run on ${RELEASE_REF} of ${RELEASE_REPOSITORY}`
     : linuxManifest === null
       ? "its Linux build manifest has not been compared yet"
       : RELEASE_REASONS[linuxManifest] ?? `an unknown Linux manifest outcome ${JSON.stringify(linuxManifest)}`;
-  return { candidate, label: candidate ? "release-candidate" : "not-a-release", reason, rule: RELEASE_RULE };
+  return { candidate, label: candidate ? CANDIDATE_LABEL : NOT_A_RELEASE_LABEL, reason, rule: RELEASE_RULE };
 }
 
 /** The step summary's release line. */
 export function releaseLine(release) {
-  return `- release: ${release.candidate ? "**release candidate**" : "**not a release artifact**"} (${release.reason}). ${release.rule}`;
+  const verdict = release.confirmed
+    ? "**release**"
+    : release.candidate ? "**release candidate, unconfirmed until app passes**" : "**not a release artifact**";
+  return `- release: ${verdict} (${release.reason}). ${release.rule}`;
 }
 
 export function programRecord({ libRs, anchorToml, so, toolchain = null, commit = null, run = null }) {

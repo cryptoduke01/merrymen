@@ -165,16 +165,25 @@ request fails (this step, and the TypeScript manifest test) until the manifest t
 uploaded is committed. Check it against `solana · rebuild`'s hash the same way; the next
 run must then pass, which shows CI reproduced it.
 
-A release artifact is `merrymen-vault-sbf-release-candidate-<commit>-run<id>.<attempt>`,
-from a CI run on `refs/heads/main` (a push to main, or a manual run on main) whose pinned
-Linux build matched the committed Linux manifest and whose `app` check passed. So the
-first release needs a committed Linux manifest: until one is committed, every artifact is
-`not-a-release`. Every other artifact is named `merrymen-vault-sbf-not-a-release-…`: every
-pull request's, and every one whose build differs from the committed manifest or whose
-commit deleted it, a run on main included. The record's `release` and `linuxManifest`
-fields say why. CI never runs on a tag push, and a manual run on a tag or another branch
-is not a release. The name and record are written by the run itself, so confirm the run's
-event, branch and commit on GitHub, and that its `app` check passed, before using it.
+A release comes only from a CI run on `refs/heads/main` (a push to main, or a manual run
+on main) whose pinned Linux build matched the committed Linux manifest and whose `app`
+check passed. `solana · test` uploads before `app` has compared the rebuild's hash, and
+before the rest of the run has passed or a newer push has cancelled it, so it names such
+a run's bytes `merrymen-vault-sbf-candidate-unconfirmed-<commit>-run<id>.<attempt>`, never
+a release. `solana · release` needs `app` and runs only when it passed; for a candidate
+it uploads `merrymen-vault-release-<commit>-run<id>.<attempt>`, a record
+(`merrymen_vault.release.json`) naming the candidate artifact and the SHA-256 that
+`solana · test` tested and `solana · rebuild` reproduced. That record is the release
+verdict: take the bytes from the artifact it names (`target/deploy/merrymen_vault.so`)
+and check that they hash to its `sha256`. A candidate without a release record in the same
+run is not a release. The first release needs a committed Linux manifest: until one is
+committed, every artifact is `not-a-release`. Every other artifact is named
+`merrymen-vault-sbf-not-a-release-…`: every pull request's, and every one whose build
+differs from the committed manifest or whose commit deleted it, a run on main included.
+The build record's `release` and `linuxManifest` fields say why. CI never runs on a tag
+push, and a manual run on a tag or another branch is not a release. The names and records
+are written by the run itself, so confirm the run's event, branch and commit on GitHub,
+and that its `app` check passed, before using it.
 
 The TypeScript suite also writes `runtime-tests/fixtures/ts-instructions.json` from the
 shared ABI builders (`MERRYMEN_WRITE_SOLANA_ABI_FIXTURE=1` rewrites it) and fails while it

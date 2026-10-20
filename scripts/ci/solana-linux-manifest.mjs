@@ -23,11 +23,13 @@
 // outcome and the release decision into <record.json> (the build record
 // solana-program-record.mjs wrote), adds both to the step summary, and prints
 // the artifact's release label on stdout for the upload's name. Only a run on
-// main whose build matches the committed manifest is release-candidate
+// main whose build matches the committed manifest is candidate-unconfirmed
 // (solana-program-record.mjs releaseStatus); every other artifact, one whose
 // manifest differs, was deleted or was never committed included, is uploaded
 // as not-a-release. So bytes that fail the comparison still reach the owner,
-// but never under the release-candidate name.
+// but never under a candidate's name. No label here says release: the upload
+// comes before app has compared the rebuild's hash, so the release verdict is
+// solana · release's, after app passed (solana-release.mjs).
 //
 // compare is the job's last step, after the upload. It fails (exit 1) when a
 // Linux manifest is committed at HEAD and differs from the recorded one in
@@ -192,7 +194,7 @@ export function outcomeLine({ status, manifest, problem = null }) {
   if (status === "uncommitted") {
     return `No ${LINUX_MANIFEST} is committed, so nothing was compared. This run recorded ${built}; `
       + "the manifest is in the uploaded vault artifact. Review it and commit it from a run whose app check passed: "
-      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it is a release candidate.";
+      + "from then on CI fails whenever the pinned Linux build differs from it, and a run on main that matches it and passes app is a release.";
   }
   return `${problem} This run recorded ${built}.`;
 }
