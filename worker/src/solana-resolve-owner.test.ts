@@ -2,8 +2,8 @@ import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
-import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
+import { base58Decode, base58Encode, CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/core/src/ids";
+import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR, SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import type { SolanaSignedSubmission } from "./solana-executor";
@@ -229,6 +229,61 @@ test("the owner command validates its input before reading anything, and never t
   assert.match(booked, /Booked the withdrawal as never run, recorded as decided by milla\./);
   assert.match(await runSolanaResolveCommand(["owner", "history", TENANT], { db: f.db }), new RegExp(`${WITHDRAWAL}\\twithdraw\\tfailed \\(no-receipt\\)\\tbooked\\tby milla\\tleaked session`));
   assert.ok(hosts.includes("primary.example") && hosts.includes("fallback.example"), "each configured provider was read");
+});
+
+/** The vault account as getAccountInfo returns it: this owner's vault at `seq` and `epoch`. */
+function vaultAccount(seq: bigint, epoch: bigint) {
+  const data = Buffer.alloc(SOLANA_VAULT_ACCOUNT_SIZE);
+  Buffer.from(SOLANA_VAULT_DISCRIMINATOR).copy(data, 0); data[8] = 2; data[9] = 254;
+  Buffer.from(base58Decode(OWNER)!).copy(data, 10); Buffer.from(base58Decode(SESSION)!).copy(data, 42);
+  data.writeBigUInt64LE(epoch, 74); data.writeBigUInt64LE(seq, 82); data.writeBigInt64LE(1_900_000_000n, 90);
+  data.writeBigUInt64LE(10_000_000n, 98); data.writeBigUInt64LE(50_000_000n, 106); data.writeBigUInt64LE(50_000_000n, 114); data.writeBigUInt64LE(120_000_000n, 122);
+  data.writeUInt16LE(20, 130);
+  return { owner: PROGRAM, executable: false, lamports: 3_000_000, data: [data.toString("base64"), "base64"], space: data.length };
+}
+test("the CLI's own observer (no injected view) reads each configured provider as the app does: a no-receipt booking and a receipt booking", async t => {
+  const env = { MERRYMEN_SOLANA_RPC_MAINNET: "https://primary.example/key", MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK: "https://fallback.example/key" };
+  // Two providers answering JSON-RPC: the withdrawal either landed at slot 1250, or was never seen and its blockhash expired
+  // (finalized height 1205 past 1200) while the vault's sequence moved for another reason (2, prepared at 1).
+  const chain = (landed: boolean) => {
+    const asked: Array<{ host: string; method: string }> = [];
+    const fetch = (async (url: string, init: { body: string }) => {
+      const { id, method, params } = JSON.parse(init.body) as { id: number; method: string; params: unknown[] };
+      asked.push({ host: new URL(url).hostname, method });
+      const result = method === "getGenesisHash" ? SOLANA_MAINNET_GENESIS_HASH
+        : method === "getSignatureStatuses" ? { context: { slot: 1300 }, value: [landed ? { confirmationStatus: "finalized", slot: 1250, err: null } : null] }
+        : method === "getTransaction" ? (landed ? { version: 0, slot: 1250, meta: { err: null }, transaction: ["d2l0aGRyYXc=", "base64"] } : null)
+        : method === "getEpochInfo" ? { absoluteSlot: 1300, blockHeight: 1205, epoch: 2, slotIndex: 1300, slotsInEpoch: 432_000 }
+        : method === "getAccountInfo" && params[0] === VAULT ? { context: { slot: 1300 }, value: vaultAccount(2n, 1n) }
+        : undefined;
+      if (result === undefined) throw new Error(`unexpected ${method}`);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { headers: { "content-type": "application/json" } });
+    }) as never;
+    return { fetch, asked };
+  };
+  {
+    const f = await fixture(t), book = (await f.store.liveBook())!, never = chain(false);
+    const booked = await runSolanaResolveCommand(["owner", "book", TENANT, WITHDRAWAL, "--operator", "milla", "--reason", "both providers: no receipt, sequence moved"],
+      { db: f.db, env, fetch: never.fetch, now: () => f.clock.value });
+    assert.match(booked, /primary: pending: not seen, blockhash expired at finalized height 1205, but the vault moved \(sequence 2, epoch 1 at slot 1300\)/);
+    assert.match(booked, /Booked the withdrawal as never run, recorded as decided by milla\./);
+    const setup = (await f.store.setup())!;
+    assert.equal(setup.status, "failed"); assert.equal(setup.expiryProof?.reason, "operator-no-receipt"); assert.equal(setup.expiryProof?.vaultSequence, "2");
+    assert.deepEqual(await f.store.liveBook(), book, "never run: no capital out");
+    for (const host of ["primary.example", "fallback.example"]) {
+      assert.deepEqual([...new Set(never.asked.filter(item => item.host === host).map(item => item.method))].sort(),
+        ["getAccountInfo", "getEpochInfo", "getGenesisHash", "getSignatureStatuses", "getTransaction"], host);
+    }
+  }
+  {
+    const f = await fixture(t), cash = BigInt((await f.store.liveBook())!.cashRaw), landed = chain(true);
+    const booked = await runSolanaResolveCommand(["owner", "book", TENANT, WITHDRAWAL, "--operator", "milla", "--reason", "both providers: receipt"],
+      { db: f.db, env, fetch: landed.fetch, now: () => f.clock.value });
+    assert.match(booked, /primary: finalized at slot 1250, and the vault shows its effect/);
+    assert.match(booked, /Booked the withdrawal as finalized, recorded as decided by milla\./);
+    assert.equal((await f.store.setup())!.status, "finalized"); assert.equal((await f.store.setup())!.finalizedSlot, 1250);
+    assert.equal((await f.store.liveBook())!.cashRaw, (cash - 1_000_000n).toString());
+  }
 });
 
 test("a decision the app beat is recorded as superseded and fails the run, never as the one that finished it", async t => {
