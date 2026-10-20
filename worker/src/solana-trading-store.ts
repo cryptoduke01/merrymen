@@ -241,6 +241,21 @@ export function solanaExpiredAttemptAllowance(env: Readonly<Record<string, strin
   if (!/^(0|[1-9][0-9]?)$/.test(value) || Number(value) > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
   return Number(value);
 }
+/** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
+export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.";
+/**
+ * How proven-expired attempts use one account's daily operations at `nowMs`, by
+ * the same rolling 24-hour window and arithmetic recordSigned admits by:
+ * `counted` of the `expired` attempts count toward maxOpsPerDay (those beyond
+ * the allowance), next to `operations` that landed, failed or are pending.
+ * For operator alerting only; admission never reads it.
+ */
+export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope, nowMs: number, allowance: number): Promise<{ expired: number; counted: number; operations: number }> {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(allowance) || allowance < 0) refuse("Invalid Solana expired-attempt query.");
+  const rows = await db.prepare("SELECT status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string }>;
+  const expired = rows.filter(r => r.status === "expired").length;
+  return { expired, counted: Math.max(0, expired - allowance), operations: rows.length - expired };
+}
 function clock(now: () => number): number { const n = now(); if (!Number.isSafeInteger(n) || n < 0) refuse("Invalid Solana runtime clock."); return n; }
 function key(value: string): void { if (canonicalId(CHAINS.solana, "account", value) !== value) refuse("Invalid Solana account key."); }
 function raw(value: string, zero = true): bigint { return parseSolanaRawAmount(value, zero); }
@@ -563,7 +578,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // owner's operation count (by default none), so at most maxOpsPerDay plus
       // the allowance are ever signed in 24 hours.
       if (operations.length + Math.max(0, dropped - allowance) >= limits.maxOpsPerDay) {
-        refuse("Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.");
+        refuse(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
       }
       const soldToday = counted.reduce((n, r) => {
         const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;

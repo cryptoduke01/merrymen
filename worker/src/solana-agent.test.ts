@@ -10,7 +10,8 @@ import { boundSolanaRebalanceSell, createSolanaAgent, planSolanaRebalance } from
 import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { runSolanaHoldCommand } from "./solana-operator-hold";
-import { ensureSolanaTradingSchema } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_AGENT_ALERT_REPEAT_MS, solanaAccountRef } from "./solana-agent";
 
 const NOW = 1_000_000;
 const limits = { perTradeUsdg: "10000000", dailyUsdg: "100000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: NOW + 1000000 };
@@ -356,4 +357,73 @@ test("a proven-expired live attempt is retried at once under a fresh request ID,
   clock.now += 60_000;
   assert.deepEqual((await agent.tick()).map(r => r.outcome), ["waiting"]);
   assert.deepEqual(sent, ["rebalance-2-0", "rebalance-2-1"]);
+});
+
+/** A live account whose strategy buys every tick, with `expired` proven-expired attempts in the last 24 hours, and a runtime stub. */
+async function expiryAccount(t: { after: (fn: () => void) => void }, input: { maxOpsPerDay: number; expired: number }) {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW }, lines: string[] = [];
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+  await bindings.bind(TENANT, "did:privy:expiry", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, maxOpsPerDay: input.maxOpsPerDay, perTradeWsol: "100000000", dailyWsol: "1000000000" });
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 60 });
+  await ensureSolanaTradingSchema(db);
+  for (let i = 0; i < input.expired; i++) {
+    await db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+      VALUES(?,?,?,?,?,?,'expired',?,?,?)`).run(TENANT, OWNER, `dropped-${i}`, "vault", "0", `sig-dropped-${i}`, clock.now - 1000 - i, "5000000", "{}");
+  }
+  const control = { refuse: null as Error | null, trades: 0 };
+  const runtime = {
+    status: async () => ({ paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [], ready: true, canExit: true, blockers: [] } }),
+    trade: async () => { control.trades++; if (control.refuse) throw control.refuse; return {}; },
+  } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("a buy needs no quote"); } };
+  const agent = (allowance?: number) => createSolanaAgent({ db, runtime, market, now: () => clock.now, log: line => lines.push(line),
+    ...(allowance === undefined ? {} : { expiredAttemptAllowance: allowance }) });
+  return { db, clock, lines, control, agent };
+}
+const fieldsOf = (line: string) => JSON.parse(line.slice(line.indexOf("{"), line.lastIndexOf("}") + 1)) as Record<string, unknown>;
+
+test("a strategy refused because expired attempts used up the day's operations says an [alert] the operator can act on, and is held", async t => {
+  const f = await expiryAccount(t, { maxOpsPerDay: 4, expired: 4 });
+  f.control.refuse = new SolanaTradingStoreError(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
+  const agent = f.agent();
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(f.lines.length, 1);
+  assert.match(f.lines[0]!, /^\[alert\] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations/);
+  assert.match(f.lines[0]!, /MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE/);
+  assert.deepEqual(fieldsOf(f.lines[0]!), { solana: "alert", kind: "expired-attempts-exhausted", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }),
+    expired: 4, counted: 4, allowance: 0, operations: 0, maxOpsPerDay: 4 });
+  // No tenant identity or owner key in the line.
+  assert.ok(!f.lines[0]!.includes(TENANT) && !f.lines[0]!.includes(OWNER));
+  // Said once per repeat window while it persists, then again.
+  f.clock.now += 60_000; await agent.tick(); assert.equal(f.lines.length, 1);
+  f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; await agent.tick(); assert.equal(f.lines.length, 2);
+  // Any other refusal is not this alert, and stays an unavailable outcome.
+  f.control.refuse = new SolanaTradingStoreError("The Solana rolling daily limit would be exceeded.");
+  f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  f.control.refuse = new Error(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
+  f.clock.now += SOLANA_AGENT_ALERT_REPEAT_MS; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
+  assert.equal(f.lines.length, 2);
+});
+
+test("expired attempts that count for more than half of the day's operations say a [warn]; within half, or covered by the allowance, nothing", async t => {
+  // 3 of 4 operations counted: more than half.
+  const high = await expiryAccount(t, { maxOpsPerDay: 4, expired: 3 });
+  assert.deepEqual((await high.agent().tick()).map(r => r.outcome), ["submitted"]);
+  assert.equal(high.lines.length, 1);
+  assert.match(high.lines[0]!, /^\[warn\] Solana proven-expired attempts use more than half of an account's daily operations/);
+  assert.deepEqual(fieldsOf(high.lines[0]!), { solana: "warn", kind: "expired-attempts-high", account: solanaAccountRef({ tenant: TENANT, owner: OWNER }),
+    expired: 3, counted: 3, allowance: 0, operations: 0, maxOpsPerDay: 4 });
+  // Exactly half is not more than half.
+  const half = await expiryAccount(t, { maxOpsPerDay: 4, expired: 2 });
+  assert.deepEqual((await half.agent().tick()).map(r => r.outcome), ["submitted"]); assert.deepEqual(half.lines, []);
+  // An allowance of 2 leaves one of the three counted.
+  const allowed = await expiryAccount(t, { maxOpsPerDay: 4, expired: 3 });
+  assert.deepEqual((await allowed.agent(2).tick()).map(r => r.outcome), ["submitted"]); assert.deepEqual(allowed.lines, []);
+  // Attempts older than the 24 h window count for nothing.
+  const old = await expiryAccount(t, { maxOpsPerDay: 4, expired: 3 });
+  old.clock.now += 86_400_000;
+  await old.db.prepare("UPDATE solana_wallet_bindings SET limits_json=?").run(JSON.stringify({ ...limits, maxOpsPerDay: 4, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: old.clock.now + 1_000_000 }));
+  assert.deepEqual((await old.agent().tick()).map(r => r.outcome), ["submitted"]); assert.deepEqual(old.lines, []);
 });
