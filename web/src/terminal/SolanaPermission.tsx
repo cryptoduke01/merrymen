@@ -29,6 +29,15 @@ const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
  * worker/src/solana-app-runtime.ts (a test keeps the two equal).
  */
 export const OWNER_MAX_PRIORITY_FEE_LAMPORTS = 1_000_000n;
+/**
+ * The least compute-unit limit a permission may carry: what the runtime gives
+ * its instructions with no limit at all (200,000 each, other than ComputeBudget,
+ * at most 1,400,000). The server never signs less (solanaOwnerComputeUnitLimit
+ * in worker/src/solana-app-runtime.ts); a lower one, from an under-reported
+ * simulation, could make the permission run out of compute on chain.
+ */
+export const OWNER_DEFAULT_UNITS_PER_INSTRUCTION = 200_000n;
+const MAX_COMPUTE_UNITS = 1_400_000n;
 
 export type SignedPermissionTerms = {
   perTradeUsdg: string; dailyUsdg: string; perTradeWsol: string; dailyWsol: string; maxOpsPerDay: number; expiresAtSeconds: string;
@@ -79,6 +88,9 @@ export function readPermissionTransaction(transactionBase64: string, expected: {
     refuse();
   }
   if (!terms || (unitLimit === null) !== (unitPrice === null)) return refuse();
+  const work = BigInt(message.instructions.filter((instruction) => keys[instruction.programAddressIndex] !== COMPUTE_BUDGET_PROGRAM).length);
+  const leastUnits = work * OWNER_DEFAULT_UNITS_PER_INSTRUCTION < MAX_COMPUTE_UNITS ? work * OWNER_DEFAULT_UNITS_PER_INSTRUCTION : MAX_COMPUTE_UNITS;
+  if (unitLimit !== null && unitLimit < leastUnits) refuse();
   // What the runtime charges: ceil(price × limit / 1e6) lamports, never above the cap.
   const priorityFee = unitLimit !== null && unitPrice !== null ? (unitPrice * unitLimit + 999_999n) / 1_000_000n : 0n;
   if (priorityFee > OWNER_MAX_PRIORITY_FEE_LAMPORTS) refuse();

@@ -113,6 +113,29 @@ export const SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS = 1_000_000n;
 /** Compute units an owner transaction reserves above its simulation: room to open one more token account meanwhile. */
 const OWNER_COMPUTE_HEADROOM = 40_000;
 /**
+ * What the runtime gives each instruction (other than ComputeBudget) of a
+ * transaction that sets no compute-unit limit, which is how owner transactions
+ * went before they carried a priority fee.
+ */
+const DEFAULT_UNITS_PER_INSTRUCTION = 200_000;
+/**
+ * The compute-unit limit an owner transaction signs: its simulation plus
+ * headroom, but never below what it would get with no limit at all (the
+ * runtime default for its instructions), and never above MAX_COMPUTE_UNITS.
+ *
+ * The simulation comes from one provider. A provider that under-reports it (a
+ * bug, or a hostile one answering 1 unit) must not make a revoke or withdrawal
+ * run out of compute on chain, the owner paying the fee each time. The floor
+ * makes a priority fee never shrink the budget the transaction had without
+ * one; its price is derived from these units, so the total fee stays within
+ * the owner's cap whatever the limit (ownerPriority).
+ */
+export function solanaOwnerComputeUnitLimit(simulatedUnits: number, instructionCount: number): number {
+  const simulated = Math.ceil(simulatedUnits * 1.2) + OWNER_COMPUTE_HEADROOM;
+  const floor = DEFAULT_UNITS_PER_INSTRUCTION * instructionCount;
+  return Math.min(MAX_COMPUTE_UNITS, Math.max(simulated, floor));
+}
+/**
  * How long preparing an owner transaction waits for its priority-fee reads
  * (simulation and recent fees) before sending it without a priority fee.
  */
@@ -454,7 +477,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   /**
    * A bounded priority fee for an owner transaction, so a revoke or withdrawal
    * still lands under congestion: the compute units its simulation used (plus
-   * headroom), priced at recent fees on the accounts it writes, never above
+   * headroom, and never below the runtime default: solanaOwnerComputeUnitLimit),
+   * priced at recent fees on the accounts it writes, never above
    * SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS in total nor above what the owner
    * holds beyond the transaction's own needs (`spare`). Best effort: when the
    * simulation or the fee estimate cannot be read, the owner has nothing to
@@ -480,7 +504,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (!object(sim) || !object(sim.value) || sim.value.err !== null) return null;
       const consumed = sim.value.unitsConsumed;
       if (typeof consumed !== "number" || !Number.isSafeInteger(consumed) || consumed < 1 || consumed > MAX_COMPUTE_UNITS) return null;
-      const units = Math.min(MAX_COMPUTE_UNITS, Math.ceil(consumed * 1.2) + OWNER_COMPUTE_HEADROOM);
+      // `instructions` never holds a ComputeBudget instruction: those are added here.
+      const units = solanaOwnerComputeUnitLimit(consumed, instructions.length);
       const writable = [...new Set([owner, ...instructions.flatMap(ix => (ix.accounts ?? []).filter(meta => (meta.role & 1) === 1).map(meta => String(meta.address)))])];
       const price = await readSolanaPriorityFee(bounded, writable, { minimum: 0n, maximum: fundable * 1_000_000n / BigInt(units) });
       if (price < 1n) return null;

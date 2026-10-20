@@ -124,9 +124,9 @@ async function fixture() {
 
 import { solanaResponse } from "./solana-api";
 import { refusedByServer } from "../terminal/SolanaOwnerActions";
-import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, permissionMatchesLimits, readPermissionTransaction } from "../terminal/SolanaPermission";
+import { OWNER_DEFAULT_UNITS_PER_INSTRUCTION, OWNER_MAX_PRIORITY_FEE_LAMPORTS, permissionMatchesLimits, readPermissionTransaction } from "../terminal/SolanaPermission";
 import { RequestError } from "../terminal/request-json";
-import { SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS } from "../../../worker/src/solana-app-runtime";
+import { SOLANA_OWNER_MAX_PRIORITY_FEE_LAMPORTS, solanaOwnerComputeUnitLimit } from "../../../worker/src/solana-app-runtime";
 import { solanaComputeBudgetInstructions } from "../../../worker/src/solana-executor";
 import { address, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage, decompileTransactionMessage,
   getCompiledTransactionMessageDecoder, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash, type Blockhash, type Instruction } from "@solana/kit";
@@ -240,6 +240,9 @@ test("the browser signs the real permission with its bounded priority fee, and r
     const rebuilt = (instructions: Instruction[]) => String(getBase64EncodedWireTransaction(compileTransaction(setTransactionMessageLifetimeUsingBlockhash(
       { blockhash: setup.blockhash as Blockhash, lastValidBlockHeight: BigInt(setup.lastValidBlockHeight) },
       setTransactionMessageFeePayer(address(f.owner), appendTransactionMessageInstructions(instructions, createTransactionMessage({ version: 0 })))))));
+    // A 150,000-unit simulation, but six instructions get 1,200,000 units with no limit: the server signs no less.
+    assert.equal(body.length, 6); assert.equal(setup.computeUnitLimit, 1_200_000);
+    assert.equal(BigInt(solanaOwnerComputeUnitLimit(1, 1)), OWNER_DEFAULT_UNITS_PER_INSTRUCTION, "browser and server share one floor");
     const units = BigInt(setup.computeUnitLimit!), atCap = OWNER_MAX_PRIORITY_FEE_LAMPORTS * 1_000_000n / units;
     assert.equal(readPermissionTransaction(rebuilt([...solanaComputeBudgetInstructions(Number(units), atCap), ...body]), expected).priorityFeeLamports,
       ((atCap * units + 999_999n) / 1_000_000n).toString(), "up to the cap is signed");
@@ -249,6 +252,9 @@ test("the browser signs the real permission with its bounded priority fee, and r
       [limit!, ...body],
       [...solanaComputeBudgetInstructions(Number(units), 1n), ...solanaComputeBudgetInstructions(Number(units), 1n).slice(1), ...body],
       [{ ...limit!, accounts: [{ address: address(f.owner), role: 1 }] }, ...solanaComputeBudgetInstructions(Number(units), 1n).slice(1), ...body],
+      // A limit from an under-reported simulation (1 unit × 1.2 + 40,000 headroom): it could run out of compute on chain.
+      [...solanaComputeBudgetInstructions(40_002, 1n), ...body],
+      [...solanaComputeBudgetInstructions(1_199_999, 1n), ...body],
     ] as Instruction[][];
     for (const [index, instructions] of refused.entries()) {
       assert.throws(() => readPermissionTransaction(rebuilt(instructions), expected), /does not match what this page shows/, String(index));

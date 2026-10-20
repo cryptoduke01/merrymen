@@ -12,7 +12,7 @@ import { sealSecret } from "./store-crypto";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_DEPLOYMENT_RECHECK_MS, SolanaAppRuntimeError, solanaOwnerComputeUnitLimit } from "./solana-app-runtime";
 import { SolanaRpcError, withSolanaReadDeadline } from "./solana-rpc";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -952,9 +952,10 @@ test("owner transactions carry a bounded priority fee the owner can afford, and 
     // Simulated at 20,000 units; recent fees on the accounts it writes put the 75th percentile at 50,000 micro-lamports.
     f.controls.simulatedUnits = 20_000; f.controls.priorityFees = [1_000, 2_000, 50_000, 100_000];
     const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
-    assert.deepEqual(ownerBudget(revoke.transactionBase64), { units: 20_000 * 1.2 + 40_000, price: 50_000n });
-    assert.equal(revoke.priorityFeeLamports, "3200"); assert.equal(revoke.computeUnitLimit, 64_000);
-    assert.equal(revoke.requiredLamports, String(OWNER_BASE + 3200), "the fee is part of what the owner must hold");
+    // 20,000 × 1.2 + 40,000 is below the 200,000 units a one-instruction revoke gets with no limit: it keeps those.
+    assert.deepEqual(ownerBudget(revoke.transactionBase64), { units: 200_000, price: 50_000n });
+    assert.equal(revoke.priorityFeeLamports, "10000"); assert.equal(revoke.computeUnitLimit, 200_000);
+    assert.equal(revoke.requiredLamports, String(OWNER_BASE + 10_000), "the fee is part of what the owner must hold");
     // The signed bytes are exactly the reviewed message, priority fee included.
     const signedTransactionBase64 = await f.sign(revoke.transactionBase64);
     assert.equal((await f.app.submitOwnerAction(f.scope, { signedTransactionBase64 })).status, "pending");
@@ -992,6 +993,32 @@ test("owner transactions carry a bounded priority fee the owner can afford, and 
     const estimate = h.calls.filter(call => call.method === "getRecentPrioritizationFees").at(-1)!.key as string[];
     for (const account of [h.owner, h.vault, h.cashAta, h.ownerCashAta]) assert.ok(estimate.includes(account), account);
   } finally { h.raw.close(); }
+});
+
+test("one provider's under-reported simulation never signs an owner compute limit below the runtime default", async () => {
+  // Unit: the simulation plus headroom, floored at 200,000 per instruction, capped at 1,400,000.
+  assert.equal(solanaOwnerComputeUnitLimit(1, 1), 200_000);
+  assert.equal(solanaOwnerComputeUnitLimit(1, 2), 400_000);
+  assert.equal(solanaOwnerComputeUnitLimit(500_000, 1), 640_000);
+  assert.equal(solanaOwnerComputeUnitLimit(1_300_000, 1), 1_400_000);
+  assert.equal(solanaOwnerComputeUnitLimit(1, 9), 1_400_000);
+  const f = await fixture();
+  try {
+    await readyLive(f); f.controls.cash = 5_000_000n;
+    // A provider answers that the transaction used 1 compute unit.
+    f.controls.simulatedUnits = 1; f.controls.priorityFees = [1_000_000_000];
+    const revoke = await f.app.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.equal(revoke.computeUnitLimit, 200_000, "one instruction: what a revoke gets with no limit at all");
+    assert.equal(ownerBudget(revoke.transactionBase64)!.units, 200_000);
+    // The total fee still never exceeds the owner's cap: the price shrinks as the units grow.
+    assert.equal(revoke.priorityFeeLamports, "1000000");
+    const withdraw = await f.app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" });
+    assert.equal(withdraw.computeUnitLimit, 400_000, "open the owner's token account, then withdraw: two instructions");
+    const budget = ownerBudget(withdraw.transactionBase64)!;
+    assert.equal(budget.units, 400_000);
+    assert.ok((budget.price * 400_000n + 999_999n) / 1_000_000n <= 1_000_000n);
+    assert.equal(withdraw.priorityFeeLamports, "1000000");
+  } finally { f.raw.close(); }
 });
 
 test("a slow priority-fee read leaves the owner transaction without a fee instead of failing it (audit G2-1, owner half)", { timeout: 30_000 }, async () => {
