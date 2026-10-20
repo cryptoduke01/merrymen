@@ -603,9 +603,11 @@ function spentOut(w: WindowBudget): "spent" {
  * order, and end in [endMin, endMax] (`notWhole`: other than the whole run, an
  * exact candidate read already). [start, end) when found, null when there is
  * none, "spent" once the window budget runs out. `minLength`: the shortest a
- * window of this run can hold a keypair in (87 when it has no "1").
+ * window of this run can hold a keypair in (shortestKeypairIn).
  */
 function sweep(run: string, w: WindowBudget, from: number, to: number, endMin: number, endMax: number, minLength: number, notWhole = false): [number, number] | null | "spent" {
+  // Spent already: no tables built for a sweep that could read nothing.
+  if (w.checks <= 0 || w.decodes <= 0 || w.starts <= 0) return spentOut(w);
   const last = Math.min(to, endMax - minLength);
   for (let a = Math.max(from, 0); a <= last; a += SECRET_SWEEP_CHUNK) {
     const chunkLast = Math.min(last, a + SECRET_SWEEP_CHUNK - 1);
@@ -634,6 +636,16 @@ function leadingOnes(run: string): number {
   let z = 0;
   while (z < 64 && run.charCodeAt(z) === 49) z++;
   return z;
+}
+/**
+ * The fewest characters any window of a run can hold a keypair in: the more
+ * leading "1"s a window has, the shorter it can be, so its longest stretch of
+ * "1"s decides (87 with none). A shorter run can hold no key at all.
+ */
+function shortestKeypairIn(run: string): number {
+  let most = 0;
+  for (let i = 0, ones = 0; i < run.length && most < 64; i++) most = Math.max(most, ones = run.charCodeAt(i) === 49 ? ones + 1 : 0);
+  return keypairLengthsAfter(most)[0];
 }
 
 /**
@@ -675,12 +687,11 @@ function secretsIn(text: string, budget: SecretScanBudget): string[] {
    * or a keypair's length (one character of glue at most).
    */
   const runs: Array<{ at: number; run: string; min: number; long: boolean; lo: number; hi: number }> = [];
-  const unglued = keypairLengthsAfter(0)[0];
   // 64 bytes never encode shorter than 64 characters, so a shorter run (an address) costs nothing.
   for (const [at, end] of base58Runs(text, 64)) {
     const run = text.slice(at, end);
-    // No window of a run of hex alone or of filler can be a key, and without a "1" none is under 87.
-    const min = run.includes("1") ? 64 : unglued;
+    // Nor does one too short for any window of it to be a key, or of hex alone, or filler.
+    const min = shortestKeypairIn(run);
     if (run.length < min || hexFrom(run, 0) || filler(run)) continue;
     const [shortest, longest] = keypairLengthsAfter(leadingOnes(run));
     if (run.length <= longest && run.length >= shortest) {
