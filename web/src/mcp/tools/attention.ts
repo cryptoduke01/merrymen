@@ -13,7 +13,7 @@ import {
   KEY_RE, SEVERITIES, SEVERITY_MEANING, conditionOfKey, deliveryItems, proposalItems, rankItems, readAgentAttention,
   type AttentionItem, type AttentionLinks, type Severity,
 } from "@/lib/services/attention";
-import { connectionStanding, KIND_CAPABILITY, listProposalRows, type ProposalKind } from "@/lib/services/proposals";
+import { connectionStanding, KIND_CAPABILITY, liveAwaitingRows, MAX_OPEN_PROPOSALS, type ProposalKind } from "@/lib/services/proposals";
 import { settingsReader } from "@/lib/services/settings-view";
 import { mcpConfig } from "../config";
 import { hasCapability } from "../policy";
@@ -28,8 +28,8 @@ const PROPOSAL_SCOPES: ReadonlyArray<{ capability: Capability; what: string }> =
   { capability: "drafts.write", what: "settings proposals and agent setup drafts" },
   { capability: "social.write", what: "post drafts" },
 ];
-/** Waiting proposals read per call. Trade proposals live 15 minutes, so more than this is a runaway client. */
-const PROPOSALS_MAX = 50;
+/** Live waiting proposals read per call: creation refuses more than MAX_OPEN_PROPOSALS, so a full page means something raced past it. */
+const PROPOSALS_MAX = 2 * MAX_OPEN_PROPOSALS;
 const MAX_SEEN = 100;
 const DAY = 86_400;
 
@@ -89,7 +89,7 @@ const getAttention = defineTool({
     const items: AttentionItem[] = [];
     await ctx.ledger(async (db) => {
       for (const a of agents) {
-        const r = await readAgentAttention(db, { slug: a.slug, account: a.account, accounts: a.accounts, expiresAt: a.expiresAt, settings, now, links });
+        const r = await readAgentAttention(db, { slug: a.slug, account: a.account, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, links });
         names.set(a.slug, untrusted(r.name, 64));
         items.push(...r.items);
       }
@@ -103,12 +103,12 @@ const getAttention = defineTool({
     let proposalsCut = false;
     if (PROPOSAL_SCOPES.some((s) => hasCapability(ctx.principal, s.capability))) {
       const d = await ctx.mcp();
-      const rows = await listProposalRows(d.db, ctx.principal.tenant, { status: "awaiting_approval", limit: PROPOSALS_MAX });
+      const rows = await liveAwaitingRows(d.db, ctx.principal.tenant, now, PROPOSALS_MAX);
       // A full page may have left an open proposal unread: none of its seen keys can resolve.
       proposalsCut = rows.length >= PROPOSALS_MAX;
       const waiting = [];
       for (const r of rows) {
-        if (r.expires_at <= now || !kindChecked(r.kind)) continue;
+        if (!kindChecked(r.kind)) continue;
         if (r.agent_slug === null ? ref !== undefined : !slugs.has(r.agent_slug)) continue;
         if (!(await connectionStanding(d.db, r)).ok) continue;
         waiting.push({ id: r.id, kind: r.kind, agent_slug: r.agent_slug, created_at: r.created_at, expires_at: r.expires_at, approval_url: issuer ? approvalUrl(r.id) : null });

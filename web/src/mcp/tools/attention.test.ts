@@ -26,6 +26,8 @@ process.env.MERRYMEN_PUBLIC_ORIGIN = "https://app.test";
 
 let restore: (() => void) | null = null;
 afterEach(() => { restore?.(); restore = null; resetMetricsForTest(); });
+/** Tear down one setup() before the next inside a test. */
+const reset = () => { restore?.(); restore = null; };
 
 const NOW = 1_800_000_000;
 const HOUR = 3600;
@@ -62,10 +64,10 @@ async function setup(o: { agentA?: Partial<OwnedAgent>; scopes?: string[] } = {}
   return { d, pa: a.principal, pb: b.principal, ask, directory: directory_ };
 }
 
-function agentRow(d: TestDb, account: string, o: { status?: string; mode?: string; beat?: number; blocker?: string | null } = {}) {
+function agentRow(d: TestDb, account: string, o: { status?: string; mode?: string; beat?: number | null; blocker?: string | null } = {}) {
   d.raw.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, mode, beat_at, live_blocker, sponsor_gas, epoch)
     VALUES (?, 'Alan', ?, '0x1', 4663, '{}', 1700000000, 4102444800, ?, ?, ?, ?, 0, 1)`)
-    .run(account, account === ACCOUNT_A ? OWNER_A : OWNER_B, o.status ?? "armed", o.mode ?? "live", o.beat ?? NOW - 30, o.blocker ?? null);
+    .run(account, account === ACCOUNT_A ? OWNER_A : OWNER_B, o.status ?? "armed", o.mode ?? "live", o.beat === undefined ? NOW - 30 : o.beat, o.blocker ?? null);
 }
 
 function event(d: TestDb, account: string, message: string, at: number, level = "warn") {
@@ -196,6 +198,26 @@ test("an agent stopped on purpose (kill switch, or a discarded permission) is fy
   assert.match(r.items[0]!.title, /No trading permission is active/);
 });
 
+test("a worker that never reported once (an armed row with no heartbeat, or no row at all) is stale after the start-up grace", async () => {
+  {
+    const { d, ask } = await setup();
+    agentRow(d, ACCOUNT_A, { beat: null });
+    const item = only(await ask(), "worker-stale");
+    assert.equal(item.key, `worker-stale:${SLUG_A}:never`);
+    assert.equal(item.severity, "today");
+    assert.match(item.title, /never reported/);
+    reset();
+  }
+  {
+    const { ask } = await setup();
+    assert.equal(only(await ask(), "worker-stale").key, `worker-stale:${SLUG_A}:never`, "a signed permission whose ledger row was never written");
+    reset();
+  }
+  const { d, ask } = await setup({ agentA: { grantedAt: NOW - 120 } });
+  agentRow(d, ACCOUNT_A, { beat: null });
+  assert.deepEqual((await ask()).items, [], "two minutes after signing is still start-up");
+});
+
 test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it)", async () => {
   const earlier = "0x52908400098527886e0f7030069857d2e4169ee7" as const; // EIP-55's own mixed-case example
   const { d, ask } = await setup({ agentA: { accounts: [ACCOUNT_A, earlier] } });
@@ -292,6 +314,16 @@ test("proposals waiting for approval appear only under a proposal scope, link to
   assert.deepEqual(r.not_checked.map((n) => n.part), ["trade proposals", "settings proposals and agent setup drafts", "alert deliveries"]);
   assert.deepEqual(r.resolved_keys, []);
   assert.deepEqual((await ask({ seen_keys: [`proposal-waiting:${SLUG_A}:constructor.x`] })).resolved_keys, [], "a made-up kind is never checked");
+
+  // Lapsed rows keep 'awaiting_approval' until opened; sixty newer ones must not hide the live one.
+  const cols = (d.raw.prepare("PRAGMA table_info(mcp_proposals)").all() as Array<{ name: string }>).map((c) => c.name);
+  const copy = cols.map((c) => (c === "id" ? "?" : c === "idempotency_key" ? "NULL" : c === "created_at" ? "?" : c === "expires_at" ? "?" : c)).join(", ");
+  for (let i = 0; i < 60; i++) {
+    d.raw.prepare(`INSERT INTO mcp_proposals (${cols.join(", ")}) SELECT ${copy} FROM mcp_proposals WHERE id = ?`)
+      .run(`prp_${i.toString(16).padStart(32, "0")}`, NOW + 1 + i, NOW + 2, id);
+  }
+  const crowded = await ask({}, pa, NOW + 100);
+  assert.equal(only(crowded, "proposal-waiting").key, `proposal-waiting:${SLUG_A}:post.${id}`);
 
   const past = await ask({}, pa, NOW + 30 * DAY);
   assert.deepEqual(past.items.filter((i) => i.kind === "proposal-waiting"), [], "a lapsed proposal is not waiting");

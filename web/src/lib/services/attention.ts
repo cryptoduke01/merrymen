@@ -97,6 +97,8 @@ export const ATTENTION_EVENTS_MAX = 2_000;
 export const ATTENTION_LOOKBACK_SEC = DAY;
 /** An expired permission is act_now this long after it lapsed, then fyi: a stopped agent is not news for ever. */
 const EXPIRED_LOUD_SEC = 3 * DAY;
+/** How long a newly armed agent may go without its first heartbeat before it counts as not reporting. */
+const FIRST_BEAT_GRACE_SEC = 15 * MINUTE;
 /** A cap refusal newer than this means the cap is holding buys now. */
 const CAP_CURRENT_SEC = 2 * HOUR;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -216,6 +218,8 @@ export interface AgentAttentionInput {
   account: string | null;
   /** Every account the agent has held (older ledger rows live under these). */
   accounts: readonly string[];
+  /** When the current permission was signed (the grant's own time). */
+  grantedAt: number | null;
   expiresAt: number | null;
   settings: SettingsView | null;
   now: number;
@@ -295,6 +299,21 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
   const running = status === "active" || status === "armed";
+  // A worker that never reported at all: the default 'armed' row with no
+  // heartbeat, or a signed permission whose ledger row was never written.
+  // Judged only while the permission is live (an expired one has its own item).
+  const signedAt = input.grantedAt ?? row?.granted_at ?? null;
+  const grace = Math.max(FIRST_BEAT_GRACE_SEC, 2 * freshWithinSec);
+  const live = input.expiresAt === null || input.expiresAt > now;
+  if (beat === null && live && (row === null || running) && signedAt !== null && now - signedAt > grace) {
+    items.push({
+      key: `worker-stale:${slug}:never`, severity: "today", kind: "worker-stale", agent: slug,
+      title: "The agent's worker has never reported",
+      detail: `The trading permission was signed at ${iso(signedAt)}, but the agent's worker has not reported once since, so it is not trading or running exits. Merrymen starts workers; the owner cannot fix this from here.`,
+      owner_can_fix: false, what_to_do: null, link: null,
+      started_at: signedAt + grace, ends_at: null,
+    });
+  }
   if (running && beat !== null && now - beat > freshWithinSec) {
     items.push({
       key: `worker-stale:${slug}:${beat}`, severity: "today", kind: "worker-stale", agent: slug,
