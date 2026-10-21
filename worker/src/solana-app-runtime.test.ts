@@ -30,6 +30,8 @@ import { buildWithdrawSolanaVaultInstruction, SOLANA_TRANSFER_HOOK_NAMES_OWNER }
 import { SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, SOLANA_LIVE_SELL_CAP_UNCHECKED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_ABOVE_BOOK,
   SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED } from "./solana-app-runtime";
+import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 /** A Token-2022 USDG mint carrying the TransferHook extension (type 14): the issuer holds its authority, `hook` names the program or none. */
@@ -150,8 +152,10 @@ async function fixture(options: { declared?: string } = {}) {
       outAmount: intent.amountRaw, minOutAmount: (BigInt(intent.amountRaw) * 995n / 1000n).toString(), slippageBps: intent.slippageBps,
       contextSlot: 1000, quotedAtMs: clock.now, expiresAtMs: clock.now + 30_000 }),
   };
+  // The tenant is on the live list, and the caps are the fixture's own limits: 10 USDG and 0.1 SOL per trade (the defaults), 50 USDG and 0.5 SOL a day.
   const env = { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM, MERRYMEN_SOLANA_VAULT_SHA256: createHash("sha256").update(binary).digest("hex"),
-    MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"), MERRYMEN_JUPITER_API_KEY: "fixture" };
+    MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"), MERRYMEN_JUPITER_API_KEY: "fixture",
+    MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "50", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "0.5" };
   const runtime = (overrides: Partial<Parameters<typeof createSolanaAppRuntime>[0]> = {}) =>
     createSolanaAppRuntime({ db, rpc, market, env, now: () => clock.now, localTestDeployment: false, ...overrides });
   const app = runtime();
@@ -238,7 +242,7 @@ test("live configuration failure never falls back to a paper fill", async () => 
   try {
     await f.app.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
     await f.live();
-    const app = f.runtime({ env: {} });
+    const app = f.runtime({ env: { MERRYMEN_SOLANA_LIVE_TENANTS: TENANT } });
     await assert.rejects(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), /immutable Solana vault/);
     const book = await new SolanaTradingStore(f.db, f.scope).paper().get(f.owner);
     assert.equal(book!.cashRaw, "100000000"); assert.equal(book!.trades.length, 0); assert.equal(f.controls.sends, 0);
@@ -2413,5 +2417,179 @@ test("a malformed expired-attempt allowance is a status blocker and refuses a li
     }
     assert.equal((await new SolanaTradingStore(f.db, f.scope).pending()).length, 0); assert.equal(f.controls.sends, 0);
     assert.equal((await f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE: "96" } }).status(f.scope)).live.ready, true);
+  } finally { f.raw.close(); }
+});
+
+/** A runtime refusal with exactly this code and owner-facing text. */
+const rollout = (message: string, code: SolanaAppRuntimeError["code"]) => (error: unknown) => {
+  assert.ok(error instanceof SolanaAppRuntimeError, String(error)); assert.equal(error.message, message); assert.equal(error.code, code); return true;
+};
+const OTHER_TENANT = `0x${"22".repeat(20)}`;
+
+test("live rollout: a tenant MERRYMEN_SOLANA_LIVE_TENANTS does not name cannot save live mode, prepare, submit or activate a permission, or buy; paper and status still work", async () => {
+  const f = await fixture();
+  try {
+    // Unset, empty, only spaces, or naming another tenant: this tenant may not go live, and status says so without a blocker (nothing to exit).
+    for (const value of [undefined, "", "  ", OTHER_TENANT]) {
+      const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: value } });
+      await assert.rejects(off.checkLiveSettings(f.scope, limits), rollout(SOLANA_LIVE_NOT_OPEN, "permission"), String(value));
+      const status = await off.status(f.scope);
+      assert.deepEqual(status.liveAccess, { onList: false, misconfigured: false, caps: { perTradeUsdg: "10000000", dailyUsdg: "50000000", perTradeWsol: "100000000", dailyWsol: "500000000" } });
+      assert.ok(!status.live.blockers.includes(SOLANA_LIVE_PAUSED), status.live.blockers.join(" | "));
+    }
+    const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT } });
+    // Paper is open to every tenant.
+    await off.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
+    assert.equal((await off.trade(f.scope, { mode: "paper", intent: f.trade })).mode, "paper");
+    // Live mode saved while it was on the list: no new permission, and no live buy or buy preview, each refused before any chain read.
+    await f.live(); f.calls.length = 0;
+    await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+    await assert.rejects(off.preview(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+    await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "off-list-buy" } }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+    assert.deepEqual(f.calls, [], "refused before any chain read");
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
+    // A permission prepared while it was on the list is neither saved nor sent once it is off.
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    await assert.rejects(off.submitSetup(f.scope, { signedTransactionBase64 }), rollout(SOLANA_LIVE_NOT_OPEN, "not-saved"));
+    assert.equal(f.controls.sends, 0); assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.signature, undefined, "not saved");
+    // One submitted while it was on the list and landed is not activated once it is off; the owner keeps the session key to finish later.
+    const submitted = await f.app.submitSetup(f.scope, { signedTransactionBase64 });
+    f.controls.initialized = true; f.controls.finalized = true;
+    await assert.rejects(off.activateLive(f.scope, { signature: submitted.signature, sessionSecretKey: f.sessionSeed.toString("base64") }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).session(), null, "not activated");
+    // Bytes already saved are still answered: their outcome is the owner's to learn.
+    assert.equal((await off.submitSetup(f.scope, { signedTransactionBase64 })).status, "finalized");
+    // Back on the list (among others, with spaces), the same permission activates.
+    const on = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: ` ${OTHER_TENANT} , ${TENANT} ` } });
+    assert.equal((await on.activateLive(f.scope, { signature: submitted.signature, sessionSecretKey: f.sessionSeed.toString("base64") })).registered, true);
+    assert.equal((await on.status(f.scope)).liveAccess.onList, true);
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: a tenant taken off the list after going live is exits-only: status says so plainly, buys and new permissions are refused, and revoke, withdrawals, outside withdrawals and live mode for its exits still work", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const listed = await f.app.status(f.scope);
+    assert.equal(listed.live.ready, true, listed.live.blockers.join(" | ")); assert.equal(listed.liveAccess.onList, true);
+    for (const value of [OTHER_TENANT, undefined]) {
+      const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: value } });
+      const status = await off.status(f.scope);
+      assert.deepEqual(status.live.blockers, [SOLANA_LIVE_PAUSED], String(value));
+      assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true, "exits stay open");
+      assert.equal(status.liveAccess.onList, false);
+    }
+    const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT } });
+    f.calls.length = 0;
+    await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "paused-buy" } }), rollout(SOLANA_LIVE_PAUSED, "permission"));
+    await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_PAUSED, "permission"));
+    assert.deepEqual(f.calls, [], "refused before any chain read");
+    // Live mode may be saved again, whatever the limits: it is how its exits are sold, and they can never be registered while it is off the list.
+    await off.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "900000000" });
+    // Withdraw USDG, wrapped SOL and native SOL, then revoke: each is prepared; the revocation is signed and sent.
+    f.controls.unsyncedWsolLamports = 13; f.controls.vaultNativeLamports = 100;
+    for (const action of [{ action: "withdraw" as const, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, { action: "withdraw" as const, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "13" },
+      { action: "withdraw-sol" as const, amountRaw: "100" }]) {
+      assert.ok((await off.prepareOwnerAction(f.scope, action)).transactionBase64, JSON.stringify(action));
+    }
+    const revoke = await off.prepareOwnerAction(f.scope, { action: "revoke" });
+    assert.equal((await off.submitOwnerAction(f.scope, { signedTransactionBase64: await f.sign(revoke.transactionBase64) })).status, "pending");
+    assert.equal(f.controls.sends, 1);
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: off the list, withdrawals made outside Merrymen are still recorded", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
+    f.controls.cash = 0n;
+    const signature = await outsideWithdrawal(f, SOLANA_USDG_MINT, 90_000_000n, [90_000_000n, 0n]);
+    const recorded = await off.recordExternalWithdrawals(f.scope, { signatures: [signature] });
+    assert.deepEqual(recorded.booked, [{ signature, mint: SOLANA_USDG_MINT, amountRaw: "90000000" }]);
+    assert.deepEqual((await off.status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED], "the book matches the vault again; only buying stays paused");
+  } finally { f.raw.close(); }
+});
+
+test("live rollout caps: live limits above a cap are refused where they are saved and where a permission is prepared, naming the cap; the defaults apply when unset", async () => {
+  const f = await fixture();
+  try {
+    // No cap settings: 10 USDG and 0.1 SOL per trade, 25 USDG and 0.25 SOL a day.
+    const defaults = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: undefined, MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: undefined } });
+    assert.deepEqual((await defaults.status(f.scope)).liveAccess, { onList: true, misconfigured: false, caps: SOLANA_LIVE_CAP_DEFAULTS });
+    const atCaps = { ...limits, dailyUsdg: "25000000", dailyWsol: "250000000" };
+    await defaults.checkLiveSettings(f.scope, atCaps);
+    for (const over of [{ ...atCaps, perTradeUsdg: "10000001", dailyUsdg: "25000000" }, { ...atCaps, dailyUsdg: "25000001" }, { ...atCaps, perTradeWsol: "100000001" },
+      { ...atCaps, dailyWsol: "250000001" }, limits]) {
+      await assert.rejects(defaults.checkLiveSettings(f.scope, over), rollout(solanaLiveCapRefusal(over, SOLANA_LIVE_CAP_DEFAULTS, "save")!, "permission"), JSON.stringify(over));
+    }
+    assert.equal(solanaLiveCapRefusal(limits, SOLANA_LIVE_CAP_DEFAULTS, "save"), "USDG per 24 hours is above this platform's live cap of 25 USDG; SOL sold per 24 hours is above "
+      + "this platform's live cap of 0.25 SOL. Live limits here are at most 10 USDG per trade, 25 USDG per 24 hours, 0.1 SOL sold per trade and 0.25 SOL sold per 24 hours. "
+      + "Lower them and save again. Nothing was saved.");
+    // Limits saved before the caps were lowered: registering them is refused before any chain read, and status warns.
+    await f.live(); f.calls.length = 0;
+    await assert.rejects(defaults.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(solanaLiveCapRefusal(limits, SOLANA_LIVE_CAP_DEFAULTS, "register")!, "permission"));
+    assert.deepEqual(f.calls, [], "refused before any chain read");
+    assert.equal(await new SolanaTradingStore(f.db, f.scope).setup(), null, "nothing prepared");
+    assert.ok((await defaults.status(f.scope)).live.warnings.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
+    // Within the caps the same account prepares, and the session signed on chain carries those limits.
+    const binding = (await f.bindings.get(TENANT))!;
+    await f.bindings.settings(TENANT, f.owner, binding.revision, "live", atCaps);
+    const prepared = await defaults.prepareLive(f.scope, { limits: atCaps, sessionPublicKey: f.session });
+    assert.deepEqual((await new SolanaTradingStore(f.db, f.scope).setup())!.limits, atCaps); assert.ok(prepared.transactionBase64);
+    assert.ok(!(await defaults.status(f.scope)).live.warnings.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
+  } finally { f.raw.close(); }
+});
+
+test("live rollout caps: a permission registered above caps lowered since is told it may not buy, and its exits stay open", async () => {
+  const f = await fixture();
+  try {
+    // The fixture's permission allows 50 USDG and 0.5 SOL a day; the caps are lowered to the defaults.
+    await readyLive(f);
+    const lowered = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: undefined, MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: undefined } });
+    const status = await lowered.status(f.scope);
+    assert.deepEqual(status.live.blockers, [solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)]);
+    assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
+    // At the caps the fixture's own: ready.
+    assert.equal((await f.app.status(f.scope)).live.ready, true);
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: a malformed list or cap refuses new permissions and buys as configuration with one [alert] a minute naming the setting, never the value; exits, revoke and withdraw continue", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    for (const [setting, value, said] of [
+      ["MERRYMEN_SOLANA_LIVE_TENANTS", `${TENANT},`, "MERRYMEN_SOLANA_LIVE_TENANTS entry 2 is empty"],
+      ["MERRYMEN_SOLANA_LIVE_TENANTS", `${TENANT}, 0x9876`, "MERRYMEN_SOLANA_LIVE_TENANTS entry 2 is not a tenant id (0x and 40 hex digits)"],
+      ["MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG", "25 USDG", "MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG must be a positive amount in USDG with at most 6 decimal places"],
+      ["MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL", "0.1234567891", "MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL must be a positive amount in SOL with at most 9 decimal places"],
+      ["MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG", "77", "MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG must not exceed MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG"],
+    ] as const) {
+      const lines: string[] = [];
+      const app = f.runtime({ env: { ...f.env, [setting]: value }, log: line => lines.push(line) });
+      const status = await app.status(f.scope);
+      assert.deepEqual(status.live.blockers, [SOLANA_LIVE_ROLLOUT_MISCONFIGURED], setting);
+      assert.equal(status.live.canExit, true); assert.equal(status.liveAccess.misconfigured, true); assert.equal(status.liveAccess.onList, setting === "MERRYMEN_SOLANA_LIVE_TENANTS" ? false : true);
+      await assert.rejects(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "misconfigured-buy" } }), rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration"));
+      await assert.rejects(app.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration"));
+      // It went live, so it keeps live mode for its exits; revoke and withdraw prepare.
+      await app.checkLiveSettings(f.scope, limits);
+      assert.ok((await app.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" })).transactionBase64);
+      assert.ok((await app.prepareOwnerAction(f.scope, { action: "revoke" })).transactionBase64);
+      const alerts = lines.filter(line => line.startsWith("[alert] solana-live-rollout misconfigured: "));
+      assert.equal(alerts.length, 1, "once a minute per process, however often it is read");
+      assert.ok(alerts[0]!.includes(said), alerts[0]); assert.ok(alerts[0]!.endsWith("no new live Solana permission or live buy is admitted until it is fixed (exits, revoke and withdraw continue)"));
+      assert.ok(!alerts[0]!.includes(value.trim()) && !alerts[0]!.includes(TENANT), "never the value");
+      f.clock.now += 60_000; await app.status(f.scope);
+      assert.equal(lines.filter(line => line.startsWith("[alert] solana-live-rollout")).length, 2, "said again after a minute");
+    }
+    // An account that never went live cannot save live mode while the list cannot be read.
+    const g = await fixture();
+    try {
+      await assert.rejects(g.runtime({ env: { ...g.env, MERRYMEN_SOLANA_LIVE_TENANTS: "everyone" }, log: () => {} }).checkLiveSettings(g.scope, limits),
+        rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration"));
+    } finally { g.raw.close(); }
   } finally { f.raw.close(); }
 });

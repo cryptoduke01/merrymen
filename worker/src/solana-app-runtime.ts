@@ -39,6 +39,8 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
   solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
+import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, solanaLiveTenants,
+  type SolanaLiveCaps } from "./solana-live-rollout";
 
 /**
  * Codes:
@@ -178,6 +180,23 @@ export const SOLANA_WITHDRAW_BELOW_BOOK = "Your vault holds less of this asset t
  * it expires, so the owner is told to revoke again.
  */
 export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that landed on Solana after your revocation is still active there until it expires. Merrymen never uses it; revoke again under Owner controls to end it.";
+/**
+ * THE LIVE ROLLOUT (solana-live-rollout.ts), AS THE OWNER HEARS IT. It only
+ * ever stops new live permissions and buys; exits, revoke and withdraw never
+ * read it.
+ * - SOLANA_LIVE_NOT_OPEN: a tenant MERRYMEN_SOLANA_LIVE_TENANTS does not name,
+ *   whose account never went live: it cannot save live mode, register a
+ *   permission or buy.
+ * - SOLANA_LIVE_PAUSED: one that went live (a registered permission or a live
+ *   book) and is off the list now: exits-only. Status says it as a blocker that
+ *   leaves exits open; its buys and new permissions are refused with it.
+ * - SOLANA_LIVE_ROLLOUT_MISCONFIGURED: the list or a cap cannot be read: new
+ *   permissions and buys are refused for everyone as configuration, and the
+ *   operator gets an [alert] naming the setting; exits continue.
+ */
+export const SOLANA_LIVE_NOT_OPEN = "Live trading is not open for this account yet. Paper trading is available.";
+export const SOLANA_LIVE_PAUSED = "Live trading is paused for this account: exits, revoke and withdraw still work.";
+export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. Exits, revoke and withdraw still work.";
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -421,6 +440,46 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       return fail("The independent SOL price tolerance is misconfigured.", "configuration");
     }
+  }
+  /**
+   * A live rollout setting (solana-live-rollout.ts), or a configuration refusal
+   * of new permissions and buys that also says an [alert] to the operator, at
+   * most once a minute per process. The line names the setting and the entry's
+   * position, never the value (the list names other tenants).
+   */
+  let rolloutAlertAtMs: number | undefined;
+  function rollout<T>(read: () => T): T {
+    try { return read(); } catch (error) {
+      if (!(error instanceof SolanaLiveRolloutError)) throw error;
+      const at = now();
+      if (rolloutAlertAtMs === undefined || at < rolloutAlertAtMs || at - rolloutAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
+        rolloutAlertAtMs = at;
+        try {
+          log(`[alert] solana-live-rollout misconfigured: ${error.message}; no new live Solana permission or live buy is admitted until it is fixed `
+            + "(exits, revoke and withdraw continue)");
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return fail(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration");
+    }
+  }
+  /** Whether MERRYMEN_SOLANA_LIVE_TENANTS names this tenant (case-insensitively). Read on every ask, from this runtime's env. */
+  function liveListed(tenant: string): boolean { return rollout(() => solanaLiveTenants(env)).has(tenant.toLowerCase()); }
+  /** The live caps in force (MERRYMEN_SOLANA_LIVE_MAX_*), from this runtime's env. */
+  function liveCaps(): SolanaLiveCaps { return rollout(() => solanaLiveCaps(env)); }
+  /** The account went live: it has a registered permission or a live book. Off the list, such an account is exits-only. */
+  async function wentLive(s: SolanaTradingStore): Promise<boolean> { return !!(await s.session()) || !!(await s.liveBook()); }
+  /**
+   * Refuses a new live permission or a buy: for a tenant off the list as
+   * "permission", in the words its account calls for, and for everyone while the
+   * list cannot be read as "configuration". Never asked by an exit, a revoke, a
+   * withdrawal or a status read.
+   */
+  async function requireLiveOpen(s: SolanaTradingStore): Promise<void> {
+    if (!liveListed(s.scope.tenant)) fail(await wentLive(s) ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN, "permission");
+  }
+  /** A registered permission's own limits, as the vault holds them, against the caps. */
+  function sessionAboveCaps(state: { perTrade: bigint; daily: bigint; perTradeWsol: bigint; dailyWsol: bigint }, caps: SolanaLiveCaps): boolean {
+    return solanaLiveCapsExceeded({ perTradeUsdg: state.perTrade, dailyUsdg: state.daily, perTradeWsol: state.perTradeWsol, dailyWsol: state.dailyWsol }, caps).length > 0;
   }
   /**
    * Why admission (recordSigned) would refuse every live trade, exits included,
@@ -867,6 +926,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (setup.signature !== signature || setup.signedTransactionBase64 !== input.signedTransactionBase64) notSaved("Another owner transaction is already saved.");
       return ownerStatus(s, setup);
     }
+    // New permission bytes are saved, and sent, only for a tenant the live rollout admits (bytes already saved are answered above).
+    if (kind === "session") await requireLiveOpen(s).catch((error: unknown) => error instanceof SolanaAppRuntimeError ? notSaved(error.message) : Promise.reject(error));
     const signed: SolanaPreparedSetup = { ...setup, signature, signedTransactionBase64: input.signedTransactionBase64, status: "pending" };
     // The store refuses (expired, changed settings, a pending trade) before it writes anything.
     // Its limit check (validateSolanaAccountLimits) refuses the same way, before the
@@ -931,6 +992,11 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (unreadable) blockers.push("Owner transaction confirmation is unavailable.");
       }
       const session = await s.session();
+      // The live rollout: whether this tenant may open new live permissions and buy, and the caps in force.
+      // Neither ever stops an exit; a setting that cannot be read leaves the account off the list (and says the [alert]).
+      let onList = false, caps: SolanaLiveCaps | null = null, rolloutMisconfigured = false;
+      try { onList = liveListed(scope.tenant); } catch { rolloutMisconfigured = true; }
+      try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string | null; level: FeePayerLevel } | null = null;
@@ -1008,6 +1074,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             const storedSeed = await s.sessionSeed(dek());
             if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
               fail("The saved trading permission cannot be opened.", "configuration");
+            // Registered above caps lowered since: buys are refused before anything is signed (trade), exits keep the signed limits.
+            if (onList && caps && sessionAboveCaps(live.state, caps)) buysOnly(solanaLiveSessionAboveCaps(caps));
           }
           // A finalized registration activateLive never activates (the epoch moved more than its own landing: a
           // revocation landed before it, beside it or outside Merrymen) whose session is still live on Solana.
@@ -1043,6 +1111,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
         }
       } catch (error) { blockers.push(statusBlocker(error)); }
+      // Off the list, or while the rollout settings cannot be read, an account that went live (or chose live mode) is exits-only:
+      // its buys and new permissions are refused, and exits, revoke and withdraw continue. One that never went live has nothing to
+      // exit; liveAccess below says why it cannot go live.
+      if (binding.requestedMode === "live" || session || await s.liveBook()) {
+        if (rolloutMisconfigured) buysOnly(SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
+        else if (!onList) buysOnly(SOLANA_LIVE_PAUSED);
+      }
+      // Saved live limits above the caps (saved before they were lowered) cannot be registered; a permission already registered is judged above.
+      if (onList && caps && binding.requestedMode === "live" && binding.limits && solanaLiveCapsExceeded(binding.limits, caps).length) warnings.push(solanaLiveSavedAboveCaps(caps));
       // The builder's own key rule: a key every live route would refuse (blank, too long,
       // unprintable) blocks trades and exits as a missing one does, and pages the operator.
       if (!jupiterKeyUsable()) blockers.push("Configure Jupiter quote access.");
@@ -1066,6 +1143,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const heartbeat = await s.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
       const lastSeenAtMs = heartbeat ? Number(heartbeat.last_seen_at_ms) : null;
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
+        // Whether this account may go live (never the list itself), and the caps a new live permission must fit.
+        liveAccess: { onList, misconfigured: rolloutMisconfigured, caps },
         automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, recoverable, programId, vault, cashTokenAccount, session: session?.session ?? null,
@@ -1094,9 +1173,28 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const { writtenOff, ...paper } = await paperService(s).writeOff(scope.owner, input.mint);
       return { paper, writtenOff };
     },
+    /**
+     * Whether the owner may save live mode with `limits`: the settings route asks
+     * before it saves (the binding store has no env of its own). A tenant on the
+     * live list saves limits within the caps. Off the list, or while a rollout
+     * setting cannot be read, only an account that already went live may save
+     * live mode, and without the caps: live mode is how its exits are sold, while
+     * a new permission stays refused (prepareLive) until it is back on the list,
+     * where its limits must fit the caps.
+     */
+    async checkLiveSettings(scope: SolanaAccountScope, limits: SolanaPaperLimits): Promise<void> {
+      const s = await store(scope);
+      let listed: boolean, caps: SolanaLiveCaps;
+      try { listed = liveListed(scope.tenant); caps = liveCaps(); } catch (error) { if (await wentLive(s)) return; throw error; }
+      if (!listed) { if (await wentLive(s)) return; fail(SOLANA_LIVE_NOT_OPEN, "permission"); }
+      const capped = solanaLiveCapRefusal(limits, caps, "save");
+      if (capped) fail(capped, "permission");
+    },
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {
       const s = await store(scope), parsed = intent(input.intent, input.mode);
       if (input.mode === "paper") return paperService(s).preview(scope.owner, parsed);
+      // A live buy is previewed only for a tenant the live rollout admits; a sale (an exit) always is.
+      if (parsed.inputMint === SOLANA_USDG_MINT) await requireLiveOpen(s);
       const cfg = config(); parseSolanaLiveIntent({ ...parsed, mode: "live", owner: scope.owner, vault: await deriveSolanaVaultAddress(cfg.programId, scope.owner) });
       const quote = await market().quote(parsed); validateSolanaQuote(quote, parsed, now());
       return { intent: { ...parsed, mode: "live" }, quote };
@@ -1111,6 +1209,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         if (JSON.stringify(expected) !== JSON.stringify(prior.submission.intent)) fail("The request ID already belongs to a different live trade.");
         return publicTrade(await reconcileSolanaSubmission(rpc(), s, scope.owner, parsed.requestId, now) ?? prior);
       }
+      // The live rollout gates buys only, after a recorded request was returned above: a sale back to USDG (an exit) never reads
+      // the list or the caps. Off the list, or with a setting unreadable, a buy is refused before anything is read or signed.
+      const buyCaps = parsed.inputMint === SOLANA_USDG_MINT ? (await requireLiveOpen(s), liveCaps()) : null;
       const cfg = config(), prices = computeUnitPrices(), maxFee = maxFeeLamports(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       // Refused as configuration before anything is signed; the store counts with it at admission.
@@ -1136,6 +1237,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         journal, maxFeeLamports: maxFee.toString(), now, signal: input.signal,
         computeUnitPriceMicroLamports: prices.minimum, maxComputeUnitPriceMicroLamports: prices.maximum,
         assessRisk: async ({ intent: current, quote, slot, vaultState }) => {
+          // A buy under a permission the owner registered above caps lowered since: refused before anything is signed, by
+          // the limits the vault itself holds for this session. Exits keep them; a new permission within the caps lifts it.
+          if (buyCaps && current.inputMint === SOLANA_USDG_MINT && sessionAboveCaps(vaultState, buyCaps)) fail(solanaLiveSessionAboveCaps(buyCaps), "permission");
           const observedAtMs = now();
           // Every provider, each at or after the prepared slot, in one session apiece: the vault's balances,
           // which must agree (one provider cannot show a phantom balance), the slot admission may persist
@@ -1195,7 +1299,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return publicTrade(await executor.execute({ ...parsed, mode: "live", owner: scope.owner, vault }, { minOutAmount }));
     },
     async prepareLive(scope: SolanaAccountScope, input: { limits: SolanaPaperLimits; sessionPublicKey: string }) {
-      const s = await store(scope), binding = await s.binding(), limits = validateSolanaAccountLimits(input.limits, now()), cfg = config();
+      const s = await store(scope), binding = await s.binding(), limits = validateSolanaAccountLimits(input.limits, now());
+      // A new permission only for a tenant the live rollout admits, before any chain read.
+      await requireLiveOpen(s);
+      const cfg = config();
       dek(); const feePayer = await getAddressFromPublicKey((await payer()).publicKey), session = address(input.sessionPublicKey);
       const vault = await deriveSolanaVaultAddress(cfg.programId, scope.owner);
       if (binding.requestedMode !== "live" || JSON.stringify(binding.limits) !== JSON.stringify(limits)) fail("Save the reviewed live trading limits first.", "permission");
@@ -1203,6 +1310,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       try { sell = requireSolanaLiveSellLimits(limits); } catch { return fail("Save per-trade and daily SOL sell limits before registering live trading.", "permission"); }
       // Admission refuses a live trade worth under 1 USDG: limits that could make only such trades are never signed.
       try { requireSolanaLiveTradeMinimum(limits); } catch (error) { return fail((error as Error).message, "permission"); }
+      // Within the platform's live caps, so the session signed on chain can never exceed them.
+      const capped = solanaLiveCapRefusal(limits, liveCaps(), "register");
+      if (capped) fail(capped, "permission");
       if (new Set([scope.owner, session, vault, feePayer]).size !== 4) fail("Owner, session, vault and fee payer must be separate accounts.");
       await verifyDeployment(cfg);
       // Every sale, exits included, sells at most perTradeWsol, and admission refuses one worth under 1 USDG
@@ -1245,6 +1355,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), cfg = config(), keyPair = await createKeyPairFromPrivateKeyBytes(seed(input.sessionSecretKey, "Invalid session seed."));
       const session = await getAddressFromPublicKey(keyPair.publicKey), previous = await s.session();
       if (previous?.registrationSignature === input.signature && previous.session === session) return { registered: true, session, vault: previous.vault };
+      // A new permission is activated only for a tenant the live rollout admits. Refused, the owner keeps the session key to finish later and can revoke it.
+      await requireLiveOpen(s);
       const setup = await s.setup();
       if (!setup || (setup.kind ?? "session") !== "session" || setup.signature !== input.signature || setup.session !== session || setup.programId !== cfg.programId) fail("The signed permission does not match this session key.");
       const status = await ownerStatus(s, setup);

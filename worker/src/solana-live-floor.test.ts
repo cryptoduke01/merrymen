@@ -19,7 +19,8 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SolanaAppRuntimeError } from "./solana-app-runtime";
+import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -178,7 +179,10 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   const market = { readMint, quote };
   const env = { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM, MERRYMEN_SOLANA_VAULT_SHA256: createHash("sha256").update(binary).digest("hex"),
     MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"),
-    MERRYMEN_JUPITER_API_KEY: "fixture-not-a-key", MERRYMEN_SOLANA_RPC_MAINNET: RPC, ...opts.env };
+    MERRYMEN_JUPITER_API_KEY: "fixture-not-a-key", MERRYMEN_SOLANA_RPC_MAINNET: RPC,
+    // On the live list, with caps at the fixture's limits (25 and 100 USDG, 0.2 and 1 SOL).
+    MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "25", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "100",
+    MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "0.2", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "1", ...opts.env };
   const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
   await bindings.bind(TENANT, "did:privy:owner", owner);
   await bindings.settings(TENANT, owner, 0, "live", limits);
@@ -1021,4 +1025,60 @@ test("a live trade that landed is not called a vault below its book, nor paged a
   await f.agent(app, line => lines.push(line)).tick();
   assert.deepEqual(lines.filter(line => /vault-below-book/.test(line)), []);
   assert.equal((await f.submissions())[0]!.submission.signature, (await recorded())!.signature);
+});
+
+/** A runtime refusal with exactly this code and owner-facing text. */
+const refusedAs = (message: string, code: SolanaAppRuntimeError["code"]) => (error: unknown) => {
+  assert.ok(error instanceof SolanaAppRuntimeError, String(error)); assert.equal(error.message, message); assert.equal(error.code, code); return true;
+};
+const SWAP_BUILD = "https://api.jup.ag/swap/v1/swap-instructions";
+
+test("live rollout: the autonomous worker places no live buy for a tenant off MERRYMEN_SOLANA_LIVE_TENANTS, nor does a manual buy, before any route is built; on the list the same tick buys", async t => {
+  // 1 SOL ($150) and 50 USDG; the strategy wants 90% SOL, so it buys.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 },
+    env: { MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "manual-off-list-buy") }), refusedAs(SOLANA_LIVE_PAUSED, "permission"));
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built, so nothing could be signed");
+  // The same account on the list: the worker's next tick buys.
+  f.clock.now += 61_000;
+  assert.deepEqual((await f.agent(f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: TENANT })).tick()).map(r => r.outcome), ["submitted"]);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
+});
+
+test("live rollout: a tenant taken off the list mid-session is exits-only: buys stop and status says so, while its sales back to USDG, manual and autonomous, are signed, admitted and sent", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 } });
+  assert.equal((await f.app.status(f.scope)).live.ready, true, "on the list it trades");
+  const off = f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `0x${"22".repeat(20)}` });
+  const status = await off.status(f.scope);
+  assert.deepEqual(status.live.blockers, [SOLANA_LIVE_PAUSED]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
+  assert.equal(status.liveAccess.onList, false);
+  await assert.rejects(off.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "paused-buy") }), refusedAs(SOLANA_LIVE_PAUSED, "permission"));
+  // The strategy wants 25% SOL: the worker sells, and the sale is admitted and sent.
+  assert.deepEqual((await f.agent(off).tick()).map(r => r.outcome), ["submitted"]);
+  const [sale] = await f.submissions();
+  assert.equal(sale!.submission.intent.inputMint, SOLANA_WRAPPED_SOL_MINT, "a sale back to USDG"); assert.equal(f.sends.length, 1);
+  // A manual sale too, in a fresh account off the list.
+  const g = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
+  const sold = await g.app.trade(g.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-off-list") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(g.sends.length, 1);
+});
+
+test("live rollout caps: under a permission registered above caps lowered since, buys are refused before anything is signed and the worker holds them; sales carry on", async t => {
+  // The registered permission allows 25 and 100 USDG, 0.2 and 1 SOL; the caps are lowered to the defaults (10 and 25 USDG, 0.1 and 0.25 SOL).
+  const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 }, env: lowered });
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, [solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)]); assert.equal(status.live.canExit, true);
+  assert.deepEqual(status.liveAccess.caps, SOLANA_LIVE_CAP_DEFAULTS);
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"], "the worker buys nothing");
+  // A manual buy within every cap is still refused: the session it would be signed under allows more.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "5000000", "buy-above-caps") }),
+    refusedAs(solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS), "permission"));
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0, "nothing signed or sent");
+  // A sale under the same permission (0.15 SOL, 22.5 USDG: above the 0.1 SOL and 10 USDG caps, within what the owner signed) is admitted and sent.
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "150000000", "exit-above-caps") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });

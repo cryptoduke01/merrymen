@@ -8,6 +8,7 @@ import * as auth from "./solana-auth";
 import * as bindings from "./solana-binding-store";
 import { CHAINS } from "../../../packages/core/src/ids";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_LIVE_STRATEGY_BELOW_MINIMUM } from "../../../packages/core/src/solana";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SolanaAppRuntimeError } from "../../../worker/src/solana-app-runtime";
 
 const tenant = `0x${"11".repeat(20)}` as const, owner = "So11111111111111111111111111111111111111112";
 const scope = { tenant, owner };
@@ -15,8 +16,10 @@ const limits = { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 
 let binding: bindings.SolanaBinding;
 let calls: Array<{ method: string; args: unknown[] }>;
 let deny = false;
+/** A runtime method's refusal for the next calls (the runtime itself decides the live rollout: solana-app-runtime.test.ts). */
+let refusals: Record<string, Error>;
 const routes: Record<string, (req: Request) => Promise<Response>> = {};
-const methods = ["setupPaper", "writeOffPaper", "preview", "trade", "prepareLive", "submitSetup", "activateLive", "prepareOwnerAction", "submitOwnerAction"];
+const methods = ["setupPaper", "writeOffPaper", "preview", "trade", "prepareLive", "submitSetup", "activateLive", "prepareOwnerAction", "submitOwnerAction", "checkLiveSettings"];
 // These exercise a deployment that offers Solana; solana-enabled.test.ts covers one that does not.
 const flag = process.env.MERRYMEN_SOLANA;
 after(() => { if (flag === undefined) delete process.env.MERRYMEN_SOLANA; else process.env.MERRYMEN_SOLANA = flag; });
@@ -35,7 +38,7 @@ before(() => {
           store: Object.fromEntries(["settings", "strategy"].map((method) => [method, async (...args: unknown[]) => { calls.push({ method, args }); return binding; }])) };
       } };
       if (id.endsWith("worker/src/solana-app-runtime")) return { getSolanaAppRuntime: () => Object.fromEntries(methods.map((method) => [method,
-        async (...args: unknown[]) => { calls.push({ method, args }); return { fixture: true }; }])) };
+        async (...args: unknown[]) => { calls.push({ method, args }); if (refusals[method]) throw refusals[method]; return { fixture: true }; }])) };
     }
     return original.call(this, id, parent, isMain);
   });
@@ -44,7 +47,7 @@ before(() => {
   } finally { interception.mock.restore(); }
 });
 beforeEach(() => {
-  calls = []; deny = false;
+  calls = []; deny = false; refusals = {};
   binding = { tenant, did: "did:privy:alice", owner, chain: CHAINS.solana, requestedMode: "paper", limits, strategy: null, revision: 2, createdAtMs: 1, updatedAtMs: 1 };
 });
 async function post(route: string, body: unknown) {
@@ -100,10 +103,29 @@ test("live mode requires explicit separate consent and registration requires sav
   assert.deepEqual(calls, []);
   const live = { ...limits, perTradeWsol: "100000000", dailyWsol: "500000000" };
   assert.equal((await post("settings", { mode: "live", limits: live, revision: 2, liveConsent: true })).status, 200);
-  assert.deepEqual(calls.pop(), { method: "settings", args: [tenant, owner, 2, "live", live] });
+  // The runtime decides the live rollout (list and caps) for the verified scope first, then the binding is saved.
+  assert.deepEqual(calls.splice(0), [{ method: "checkLiveSettings", args: [scope, live] }, { method: "settings", args: [tenant, owner, 2, "live", live] }]);
   binding.requestedMode = "live"; binding.limits = live;
   assert.equal((await post("setup", { stage: "prepare", sessionPublicKey: owner })).status, 200);
   assert.deepEqual(calls.pop(), { method: "prepareLive", args: [scope, { limits: live, sessionPublicKey: owner }] });
+});
+test("live settings the runtime's live rollout refuses are answered in its words and never saved; paper never asks it", async () => {
+  const live = { ...limits, perTradeWsol: "100000000", dailyWsol: "500000000" };
+  // Off the live list (or above a cap): a 409 in the owner's words, and the binding is not saved.
+  refusals.checkLiveSettings = new SolanaAppRuntimeError("permission", SOLANA_LIVE_NOT_OPEN);
+  const refused = await post("settings", { mode: "live", limits: live, revision: 2, liveConsent: true });
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json() as { error: string }).error, SOLANA_LIVE_NOT_OPEN);
+  assert.deepEqual(calls.splice(0).map(c => c.method), ["checkLiveSettings"], "nothing saved");
+  // A rollout setting that cannot be read: answered as unavailable, never naming the setting, and nothing saved.
+  refusals.checkLiveSettings = new SolanaAppRuntimeError("configuration", SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
+  const unavailable = await post("settings", { mode: "live", limits: live, revision: 2, liveConsent: true });
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json() as { error: string }).error, "Solana trading is not available.");
+  assert.deepEqual(calls.splice(0).map(c => c.method), ["checkLiveSettings"]);
+  // Paper is saved without asking.
+  assert.equal((await post("settings", { mode: "paper", limits, revision: 2 })).status, 200);
+  assert.deepEqual(calls.splice(0).map(c => c.method), ["settings"]);
 });
 test("settings refuse paper limits beyond the account bounds with a 400 before saving anything", async () => {
   // Paper limits carry no SOL sell caps, and used to be checked only for shape here.
