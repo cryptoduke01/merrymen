@@ -362,8 +362,11 @@ reads both from its own env, so the web and the Solana worker decide alike.
   registered off the list, and status says instead "Live trading is paused for
   this account: revoke and withdraw still work. Selling needs a current trading
   permission, and a new one cannot be registered while live trading is paused."
-  (likewise for a misconfigured setting). Such an account may save live mode again, without the caps, because live
-  mode is how its exits are sold. A renewal it prepared and submitted while
+  (likewise for a misconfigured setting). Such an account may save live mode
+  again, because live mode is how its exits are sold: each limit at most the
+  larger of its cap and the limit of the permission it registered (kept when
+  activateLive registered it), so its sales are never narrowed below what it
+  signed and never go beyond both. A renewal it prepared and submitted while
   listed that lands after it left the list is still activated: on Solana it
   already replaced the permission before it, so without it nothing could be
   sold. It grants no buys. A first permission that lands after the tenant left
@@ -1363,8 +1366,8 @@ says where to change it. Superseded choices are listed under the current one.
 | Decision | Default now | Alternatives | Change |
 |---|---|---|---|
 | Who may go live | Nobody until named in `MERRYMEN_SOLANA_LIVE_TENANTS` | Every bound tenant; Robinhood-style levels (observe, exits-only, trade) | `MERRYMEN_SOLANA_LIVE_TENANTS` |
-| Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again (without the caps) so exits can be sold | Refuse saving live mode too | `checkLiveSettings` in `solana-app-runtime.ts` |
-| A permission that lands after the tenant left the list | A renewal of an account that already went live is activated for exits only (it replaced the old permission on Solana, so refusing it would leave nothing to sell under; buys stay refused). A first permission is not activated; the page keeps its session key, Revoke ends it | Never activate off the list (rejected: a renewal landing after delisting would leave the account unable to sell until listed again) | `activateLive` (`requireLiveOpenOrWentLive`) |
+| Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again so exits can be sold, each limit at most the larger of its cap and the registered permission's (a departure from the brief, which refuses live mode off the list: **needs Milla's sign-off before the canary**) | Refuse saving live mode too (the literal brief); or cap it at the caps alone (rejected: it could narrow sales below the permission the owner signed) | `checkLiveSettings` in `solana-app-runtime.ts` |
+| A permission that lands after the tenant left the list | A renewal of an account that already went live is activated for exits only (it replaced the old permission on Solana, so refusing it would leave nothing to sell under; buys stay refused). A first permission is not activated; the page keeps its session key, Revoke ends it. A departure from the brief, which refuses activation off the list: **needs Milla's sign-off before the canary** | Never activate off the list (rejected: a renewal landing after delisting would leave the account unable to sell until listed again) | `activateLive` (`requireLiveOpenOrWentLive`) |
 | Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap, which limits spending only) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
 | Exits and the caps | Buys keep room for exits: a buy is refused when, after it, the whole position could not be sold inside the rolling 24-hour limits at the independent price plus the tolerance (`SOLANA_LIVE_EXIT_RESERVE`). The signed limits stay within the caps, so a day's buys stop at about half the USDG cap and a position stays within what one day can sell. Sales are never refused by it | Let the signed limits carry exit headroom beyond the caps (a separate `MERRYMEN_SOLANA_LIVE_MAX_EXIT_*`; rejected: it widens what a session key may do on chain); let the caps bound exits (rejected: an owner must always be able to exit); also reserve operations for the exit's sales (not done: the operation limit is the owner's own setting, not a platform cap) | `solanaBuyKeepsExitRoom` in `solana-trading-store.ts`, `assessRisk` in `solana-app-runtime.ts` |
 | A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |

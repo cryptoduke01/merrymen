@@ -53,7 +53,7 @@ import { displaySolanaAmount, solanaUnits } from "../../web/src/lib/solana-amoun
 import { SOLANA_LIVE_CAP_DECIMALS, SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_CAP_FIELDS, type SolanaLiveCapField, type SolanaLiveCaps } from "../../web/src/lib/solana-live-caps";
 import { SOLANA_LIVE_MIN_TRADE_USDG_RAW } from "../../packages/core/src/solana";
 // The caps' types, defaults and owner-facing text are shared with the page (web/src/lib/solana-live-caps.ts).
-export { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps,
+export { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveExitLimitsRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps,
   type SolanaLiveCapField, type SolanaLiveCappedLimits, type SolanaLiveCaps } from "../../web/src/lib/solana-live-caps";
 
 export const SOLANA_LIVE_TENANTS_ENV = "MERRYMEN_SOLANA_LIVE_TENANTS";

@@ -40,8 +40,8 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
   solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
-import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveRolloutFingerprint, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps,
-  solanaLiveTenants, type SolanaLiveCaps } from "./solana-live-rollout";
+import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveExitLimitsRefusal, solanaLiveRolloutFingerprint, solanaLiveSavedAboveCaps,
+  solanaLiveSessionAboveCaps, solanaLiveTenants, type SolanaLiveCapField, type SolanaLiveCaps } from "./solana-live-rollout";
 import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "../../web/src/lib/solana-live-caps";
 
@@ -1325,16 +1325,31 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * before it saves (the binding store has no env of its own). A tenant on the
      * live list saves limits within the caps. Off the list, or while a rollout
      * setting cannot be read, only an account that already went live may save
-     * live mode, and without the caps: live mode is how its exits are sold, while
-     * a new permission stays refused (prepareLive) until it is back on the list,
-     * where its limits must fit the caps.
+     * live mode: live mode is how its exits are sold, while a new permission stays
+     * refused (prepareLive) until it is back on the list. Its limits may then reach,
+     * for each, the larger of the cap and the limit of the permission it registered
+     * (as activateLive kept it), so its sales are never narrowed below what it
+     * signed, and never beyond both. Only a session recorded before its limits were
+     * kept, while the caps cannot be read, leaves nothing to bound them by.
      */
     async checkLiveSettings(scope: SolanaAccountScope, limits: SolanaPaperLimits): Promise<void> {
       const s = await store(scope);
-      let listed: boolean, caps: SolanaLiveCaps;
-      try { listed = liveListed(s); caps = liveCaps(); } catch (error) { if (await wentLive(s)) return; throw error; }
-      if (!listed) { if (await wentLive(s)) return; fail(SOLANA_LIVE_NOT_OPEN, "permission"); }
-      const capped = solanaLiveCapRefusal(limits, caps, "save");
+      let listed = false, caps: SolanaLiveCaps | null = null, unreadable: unknown;
+      try { listed = liveListed(s); } catch (error) { unreadable = error; }
+      try { caps = liveCaps(); } catch (error) { unreadable ??= error; }
+      if (listed && caps) {
+        const capped = solanaLiveCapRefusal(limits, caps, "save");
+        if (capped) fail(capped, "permission");
+        return;
+      }
+      if (!(await wentLive(s))) { if (unreadable) throw unreadable; fail(SOLANA_LIVE_NOT_OPEN, "permission"); }
+      const kept = (await s.session())?.limits;
+      if (!caps && !kept) return;
+      const ceiling = Object.fromEntries((["perTradeUsdg", "dailyUsdg", "perTradeWsol", "dailyWsol"] as const).map((field: SolanaLiveCapField) => {
+        const known = [caps?.[field], kept?.[field]].filter((value): value is string => value !== undefined).map(BigInt);
+        return [field, known.reduce((a, b) => a > b ? a : b).toString()];
+      })) as SolanaLiveCaps;
+      const capped = solanaLiveExitLimitsRefusal(limits, ceiling);
       if (capped) fail(capped, "permission");
     },
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {

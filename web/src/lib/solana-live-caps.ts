@@ -79,6 +79,16 @@ export function solanaLiveCapRefusal(limits: SolanaLiveCappedLimits, caps: Solan
     + (when === "save" ? "Lower them and save again. Nothing was saved." : when === "register" ? "Save live limits within them, then register. Nothing was prepared."
       : "Save live limits within them and register again. Nothing was sent.");
 }
+/**
+ * Off the live list (exits-only), or while a rollout setting cannot be read, the refusal of live limits above `ceiling`: for
+ * each limit the larger of the cap and what the permission the account registered allows (whichever of them is known). Its
+ * live limits are how its exits are sold, so they may reach that permission's own, never beyond it or the caps. Null within it.
+ */
+export function solanaLiveExitLimitsRefusal(limits: SolanaLiveCappedLimits, ceiling: SolanaLiveCaps): string | null {
+  if (!solanaLiveCapsExceeded(limits, ceiling).length) return null;
+  return `While live trading is paused for this account, its live limits may be at most this platform's live caps or, where it allows more, the permission `
+    + `you registered: ${solanaLiveCapsText(ceiling)}. Lower them and save again. Nothing was saved.`;
+}
 /** The status blocker, and a buy's refusal, while the registered permission allows more than the caps. */
 export function solanaLiveSessionAboveCaps(caps: SolanaLiveCaps): string {
   return `Your registered live permission allows more than this platform's live caps (${solanaLiveCapsText(caps)}). Buying is paused until you register a new `

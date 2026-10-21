@@ -32,7 +32,7 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
   SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
 import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "./solana-app-runtime";
-import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
+import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveExitLimitsRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 /** A Token-2022 USDG mint carrying the TransferHook extension (type 14): the issuer holds its authority, `hook` names the program or none. */
@@ -2493,8 +2493,22 @@ test("live rollout: a tenant taken off the list after going live is exits-only: 
     await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "paused-buy" } }), rollout(SOLANA_LIVE_PAUSED, "permission"));
     await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_PAUSED, "permission"));
     assert.deepEqual(f.calls, [], "refused before any chain read");
-    // Live mode may be saved again, whatever the limits: it is how its exits are sold, and they can never be registered while it is off the list.
-    await off.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "900000000" });
+    // Live mode may be saved again: it is how its exits are sold (they can never be registered while it is off the list). Within the caps;
+    // this session was recorded before its limits were kept, so the caps alone bound them.
+    await off.checkLiveSettings(f.scope, limits);
+    const ceiling = (dailyUsdg: string) => ({ perTradeUsdg: "10000000", dailyUsdg, perTradeWsol: "100000000", dailyWsol: "500000000" });
+    await assert.rejects(off.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "900000000" }),
+      rollout(solanaLiveExitLimitsRefusal({ ...limits, dailyUsdg: "900000000" }, ceiling("50000000"))!, "permission"));
+    // Up to what the permission it registered allows where that is more (kept when activateLive registered it): its sales are never narrowed.
+    const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions").get() as { record_json: string }).record_json);
+    await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=?").run(JSON.stringify({ ...record, limits: ceiling("100000000") }));
+    await off.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "100000000" });
+    await assert.rejects(off.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "100000001" }),
+      rollout(solanaLiveExitLimitsRefusal({ ...limits, dailyUsdg: "100000001" }, ceiling("100000000"))!, "permission"));
+    // With the caps unreadable, the permission's own limits bound them.
+    const unreadable = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "lots" }, log: () => {} });
+    await unreadable.checkLiveSettings(f.scope, { ...limits, dailyUsdg: "100000000" });
+    await assert.rejects(unreadable.checkLiveSettings(f.scope, { ...limits, dailyWsol: "500000001" }), /permission you registered/);
     // Withdraw USDG, wrapped SOL and native SOL, then revoke: each is prepared; the revocation is signed and sent.
     f.controls.unsyncedWsolLamports = 13; f.controls.vaultNativeLamports = 100;
     for (const action of [{ action: "withdraw" as const, mint: SOLANA_USDG_MINT, amountRaw: "1000000" }, { action: "withdraw" as const, mint: SOLANA_WRAPPED_SOL_MINT, amountRaw: "13" },
