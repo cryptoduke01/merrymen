@@ -198,7 +198,7 @@ export function createSolanaLiveMarket(options: {
         useSharedAccounts: true, dynamicSlippage: false, dynamicComputeUnitLimit: false,
         skipUserAccountsRpcCalls: true, computeUnitPriceMicroLamports: 0,
       });
-      const slot = await options.rpc.read(async rpc => requireSolanaSlot(await rpc("getSlot", [{ commitment: "confirmed" }])));
+      const slot = await options.rpc.read(async rpc => requireSolanaSlot(await rpc("getSlot", [{ commitment: "finalized" }])));
       // Outside the RPC's slot window: a provider (or RPC) lagging, never a route the vault refuses.
       if (quote.contextSlot < slot - 75 || quote.contextSlot > slot + 32) return fail("provider");
       // A provider slow enough for its quote to go stale meanwhile.

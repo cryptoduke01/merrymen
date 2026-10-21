@@ -158,7 +158,8 @@ test("checks every provider must pass refuse a transport with fewer than two, ex
   } });
   assert.deepEqual(await readSolanaEachProvider(single, r => r("getSlot")), [9]);
 });
-test("send broadcasts the identical bytes to both providers and rebroadcasts a dropped send until it is seen (audit G2-1)", async () => {
+// "confirmed" is the same state as "finalized" since Alpenglow, and a provider may report either until Agave removes it.
+for (const reported of ["confirmed", "finalized"] as const) test(`send broadcasts the identical bytes to both providers and rebroadcasts a dropped send until it is seen ${reported} (audit G2-1)`, async () => {
   const tx = await signed(), time = clock(), calls: Call[] = [];
   const rounds: Record<string, number> = { "primary.example": 0, "fallback.example": 0 };
   const rpc = createSolanaLiveRpc({ env, now: time.now, sleep: time.sleep, fetch: async (url, init) => {
@@ -172,9 +173,9 @@ test("send broadcasts the identical bytes to both providers and rebroadcasts a d
     }
     if (body.method === "getSignatureStatuses") {
       assert.deepEqual(body.params, [[tx.signature]]);
-      // Processed after round 2 (its fork may still be dropped), confirmed after round 3.
+      // Processed after round 2 (its fork may still be dropped), confirmed or finalized after round 3.
       const status = host !== "fallback.example" || rounds[host]! < 2 ? null
-        : { confirmationStatus: rounds[host]! >= 3 ? "confirmed" : "processed", confirmations: 0, err: null };
+        : { confirmationStatus: rounds[host]! >= 3 ? reported : "processed", confirmations: 0, err: null };
       return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 9 }, value: [status] } });
     }
     assert.equal(body.method, "isBlockhashValid"); assert.deepEqual(body.params, [BLOCKHASH, { commitment: "processed", minContextSlot: 5 }]);
@@ -182,11 +183,11 @@ test("send broadcasts the identical bytes to both providers and rebroadcasts a d
   } });
   assert.equal(await rpc.send(tx.wire, 5, undefined, { untilMs: 30_000 }), tx.signature);
   const sends = calls.filter(call => call.method === "sendTransaction");
-  assert.equal(sends.length, 6, "three rounds to both providers, stopping once the signature is confirmed");
+  assert.equal(sends.length, 6, `three rounds to both providers, stopping once the signature is ${reported}`);
   assert.deepEqual(new Set(sends.map(call => call.host)), new Set(["primary.example", "fallback.example"]));
   for (const call of sends) {
     assert.equal(call.params[0], tx.wire, "never anything but the saved bytes");
-    assert.deepEqual(call.params[1], { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 0, minContextSlot: 5 });
+    assert.deepEqual(call.params[1], { encoding: "base64", skipPreflight: false, preflightCommitment: "finalized", maxRetries: 0, minContextSlot: 5 });
   }
   assert.deepEqual(time.state.sleeps, [2000, 2000, 2000]);
 });

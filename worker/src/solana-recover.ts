@@ -193,8 +193,8 @@ export interface SolanaRecoveryState {
   owner: string;
   programId: string;
   vault: string;
+  /** The finalized slot every balance below was read at. */
   slot: number;
-  commitment: "confirmed" | "finalized";
   vaultState: SolanaVaultState;
   /** True while a session key is set: it can still trade until revoked. */
   sessionActive: boolean;
@@ -212,9 +212,8 @@ export interface SolanaRecoveryState {
   ownerLamports: bigint;
 }
 
-/** One consistent read of the vault, its token accounts and the owner's, at a single slot. */
-export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: string, owner: string,
-  commitment: "confirmed" | "finalized", minContextSlot = 1): Promise<SolanaRecoveryState> {
+/** One consistent finalized read of the vault, its token accounts and the owner's, at a single slot. */
+export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: string, owner: string, minContextSlot = 1): Promise<SolanaRecoveryState> {
   canonical(programId, "program ID"); canonical(owner, "owner");
   const vault = await deriveSolanaVaultAddress(programId, owner);
   const [vaultUsdg, vaultWsol, ownerUsdg, ownerWsol] = await Promise.all([
@@ -222,10 +221,10 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     deriveSolanaAta(owner, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM), deriveSolanaAta(owner, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM),
   ]);
   return rpc.read(async (read: SolanaLiveRead) => {
-    const slot = integer(await read("getSlot", [{ commitment, minContextSlot }]));
+    const slot = integer(await read("getSlot", [{ commitment: "finalized", minContextSlot }]));
     if (slot < minContextSlot) fail("The Solana RPC is behind the last recovery step; try again shortly.");
     const result = await read("getMultipleAccounts", [[vault, vaultUsdg, vaultWsol, owner, ownerUsdg, ownerWsol],
-      { encoding: "base64", commitment, minContextSlot: slot }]);
+      { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
     if (!object(result) || !object(result.context) || integer(result.context.slot) < slot || !Array.isArray(result.value) || result.value.length !== 6) {
       fail("The Solana RPC returned malformed account data.");
     }
@@ -236,7 +235,7 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     try { vaultState = decodeSolanaVaultAccount(new Uint8Array(vaultRaw.data)); }
     catch { return fail("The vault account is not a Merrymen vault this tool understands."); }
     if (vaultState.owner !== owner) fail("The vault belongs to a different owner.");
-    const reserve = BigInt(integer(await read("getMinimumBalanceForRentExemption", [vaultRaw.data.length, { commitment }])));
+    const reserve = BigInt(integer(await read("getMinimumBalanceForRentExemption", [vaultRaw.data.length, { commitment: "finalized" }])));
     const usdg = usdgRaw ? tokenAccount(usdgRaw, TOKEN_2022_PROGRAM, SOLANA_USDG_MINT, vault) : null;
     const wsol = wsolRaw ? tokenAccount(wsolRaw, SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_WRAPPED_SOL_MINT, vault) : null;
     if (wsol && wsol.nativeReserve === null) fail("The vault's WSOL account is not a native SOL account.");
@@ -248,7 +247,7 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
     if (usdg && usdg.amount > 0n && !usdg.frozen) {
       try {
         hookAccounts = await readSolanaWithdrawHookAccounts(read, { mint: SOLANA_USDG_MINT, tokenProgram: TOKEN_2022_PROGRAM, vault, owner, vaultToken: vaultUsdg,
-          ownerToken: ownerUsdg, amount: usdg.amount, commitment, minContextSlot: slot });
+          ownerToken: ownerUsdg, amount: usdg.amount, minContextSlot: slot });
       } catch (error) {
         if (error instanceof SolanaVaultValidationError) hookRefusal = error.message;
         else if (error instanceof SolanaTransferHookReadError) fail("The Solana RPC returned malformed account data.");
@@ -256,7 +255,7 @@ export async function readSolanaRecoveryState(rpc: SolanaLiveRpc, programId: str
       }
     }
     return {
-      owner, programId, vault, slot: integer(result.context.slot), commitment, vaultState,
+      owner, programId, vault, slot: integer(result.context.slot), vaultState,
       sessionActive: vaultState.session !== NO_SESSION,
       usdg: { vaultAccount: vaultUsdg, ownerAccount: ownerUsdg, exists: !!usdg, frozen: !!usdg?.frozen, amountRaw: usdg?.amount ?? 0n, ownerAccountExists: !!ownerUsdgRaw,
         ownerAccountFrozen: ownerAccountFrozen(ownerUsdgRaw, TOKEN_2022_PROGRAM), hookAccounts, hookRefusal },
@@ -363,7 +362,7 @@ export function describeSolanaRecovery(state: SolanaRecoveryState, sending: bool
     `Vault:     ${state.vault}`,
     vaultState.session === NO_SESSION ? "Session:   none (already revoked)"
       : `Session:   ${vaultState.session}, expires ${when(vaultState.expiresAt)}${vaultState.paused ? ", buys paused" : ""}`,
-    `Balances (${state.commitment}, slot ${state.slot}):`,
+    `Balances (finalized, slot ${state.slot}):`,
     `  USDG       ${formatSolanaUnits(state.usdg.amountRaw, 6)}${state.usdg.exists ? "" : " (no vault USDG account)"}${state.usdg.frozen ? " (frozen)" : ""}`,
     `  WSOL       ${formatSolanaUnits(state.wsol.amountRaw, 9)}${state.wsol.exists ? "" : " (no vault WSOL account)"}${state.wsol.unsyncedRaw > 0n ? ` (includes ${formatSolanaUnits(state.wsol.unsyncedRaw, 9)} unsynced)` : ""}`,
     `  SOL        ${formatSolanaUnits(state.sol.excess, 9)} above the vault account's rent reserve`,
@@ -390,7 +389,7 @@ export function describeSolanaRecovery(state: SolanaRecoveryState, sending: bool
 interface Block { blockhash: Blockhash; lastValidBlockHeight: bigint; slot: number }
 async function latestBlock(rpc: SolanaLiveRpc): Promise<Block> {
   return rpc.read(async (read) => {
-    const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
+    const result = await read("getLatestBlockhash", [{ commitment: "finalized" }]);
     if (!object(result) || !object(result.context) || !object(result.value) || typeof result.value.blockhash !== "string") fail("The Solana RPC returned a malformed blockhash.");
     canonical(result.value.blockhash, "blockhash");
     return { blockhash: result.value.blockhash as Blockhash, lastValidBlockHeight: BigInt(integer(result.value.lastValidBlockHeight)), slot: integer(result.context.slot) };
@@ -443,7 +442,7 @@ async function sendAndFinalize(rpc: SolanaLiveRpc, keyPair: CryptoKeyPair, owner
       + `could not be read. ${consequence}Wait about two minutes, then run the command again: it re-reads the chain before sending anything.`, "unknown");
   }
   if (sent !== signature) fail(`The Solana RPC answered ${label} with a different signature than ${signature}. Check an explorer before running again.`, "unknown");
-  // Accepted: rebroadcast the same bytes until the RPC sees them confirmed or
+  // Accepted: rebroadcast the same bytes until the RPC sees them finalized or
   // the blockhash expires, which helps them land under congestion. Whatever
   // this phase reports, the outcome is decided below from the chain alone.
   try { await rpc.send(wire, block.slot, undefined, { untilMs: deadline }); }
@@ -566,7 +565,7 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   } else {
     io.log("Program binary NOT VERIFIED: not a released Merrymen vault program and no --program-sha256 given. This plan only reads; --send refuses it.");
   }
-  const plan = await readSolanaRecoveryState(rpc, programId, owner, "confirmed");
+  const plan = await readSolanaRecoveryState(rpc, programId, owner);
   for (const line of describeSolanaRecovery(plan, options.send)) io.log(line);
   if (!options.send) return { sent: false, plan };
   if (plan.ownerLamports === 0n) fail(`The owner wallet has no SOL for fees. Send a little SOL (0.01 is plenty) to ${owner} and run again.`);
@@ -579,9 +578,9 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   }
 
   const result: SolanaRecoveryResult = { sent: true, plan };
-  // The plan's confirmed slot may be ahead of the finalized tip, and an RPC
-  // refuses a finalized read below its minContextSlot; only a finalized
-  // signature's slot is a safe floor.
+  // Only a finalized signature's slot raises the floor of the reads after it:
+  // the plan only shows the owner what step 2 will withdraw, and step 2 reads
+  // its amounts again below.
   let minSlot = 1;
   const revoke = solanaRecoveryRevokeInstructions(plan);
   if (revoke.length) {
@@ -590,7 +589,7 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
   }
   // Amounts come only from finalized state after the revoke: no session can
   // move funds any more, and balances can only grow from here.
-  const settled = await readSolanaRecoveryState(rpc, programId, owner, "finalized", minSlot);
+  const settled = await readSolanaRecoveryState(rpc, programId, owner, minSlot);
   if (settled.sessionActive) fail("A session key is still set after revoke_all finalized. Nothing was withdrawn; run the command again.");
   const legs = solanaRecoveryWithdrawLegs(settled);
   result.withdrawals = [];
@@ -613,7 +612,7 @@ export async function runSolanaRecovery(options: SolanaRecoveryOptions, io: Sola
       result.withdrawals.push({ asset: leg.asset, amountRaw: leg.amountRaw, state: unknown ? "unknown" : "not-withdrawn", error: error.message });
     }
   }
-  result.final = await readSolanaRecoveryState(rpc, programId, owner, "finalized", minSlot);
+  result.final = await readSolanaRecoveryState(rpc, programId, owner, minSlot);
   const left = solanaRecoveryWithdrawal(result.final);
   io.log(`Done. Left in the vault: ${formatSolanaUnits(left.usdgRaw, 6)} USDG, ${formatSolanaUnits(left.wsolRaw, 9)} WSOL, ${formatSolanaUnits(left.solLamports, 9)} SOL above rent.`);
   const unfinished = result.withdrawals.filter((w) => w.state !== "withdrawn");

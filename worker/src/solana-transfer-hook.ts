@@ -36,7 +36,7 @@ function accountOf(value: unknown): { owner: string; data: Uint8Array } | null {
 
 /**
  * The remaining accounts for withdrawing `amount` of `mint` from the vault's
- * token account to the owner's, read at `commitment` no earlier than
+ * token account to the owner's, read finalized no earlier than
  * `minContextSlot`: none for a classic-token mint or a Token-2022 mint that
  * names no hook program, otherwise the resolved hook accounts. Throws when the
  * mint or the hook's list cannot be read or resolved, and when the hook needs
@@ -44,11 +44,11 @@ function accountOf(value: unknown): { owner: string; data: Uint8Array } | null {
  */
 export async function readSolanaWithdrawHookAccounts(read: SolanaLiveRead, p: {
   mint: string; tokenProgram: string; vault: string; owner: string; vaultToken: string; ownerToken: string; amount: bigint;
-  commitment: "confirmed" | "finalized"; minContextSlot?: number;
+  minContextSlot?: number;
 }): Promise<SolanaTransferHookAccount[]> {
   if (p.tokenProgram !== TOKEN_2022_PROGRAM) return [];
   const accounts = async (keys: string[]) => {
-    const found = await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: p.commitment, minContextSlot: p.minContextSlot ?? 1 }]);
+    const found = await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "finalized", minContextSlot: p.minContextSlot ?? 1 }]);
     if (!object(found) || !Array.isArray(found.value) || found.value.length !== keys.length) throw new SolanaTransferHookReadError();
     return found.value.map(accountOf);
   };

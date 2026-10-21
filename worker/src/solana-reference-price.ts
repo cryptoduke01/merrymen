@@ -322,7 +322,7 @@ export async function readSolanaReferencePrice(read: SolanaLiveRead, minContextS
     // Anything passed that is not a generation is refused here, and said as generation=invalid.
     const chosen = options.generation ?? SOLANA_PYTH_DEFAULT_GENERATION, feed = solanaPythFeed(chosen);
     generation = chosen;
-    const result = await read("getAccountInfo", [feed.account, { encoding: "base64", commitment: "confirmed", minContextSlot }]);
+    const result = await read("getAccountInfo", [feed.account, { encoding: "base64", commitment: "finalized", minContextSlot }]);
     if (!object(result) || !object(result.context) || !Object.hasOwn(result, "value")) return fail("response");
     const slot = safe(result.context.slot, "response");
     if (slot < minContextSlot) return fail("rpc-slot", { contextSlot: slot, minContextSlot });

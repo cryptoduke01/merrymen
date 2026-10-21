@@ -254,7 +254,7 @@ describe("bounded read-only RPC fallback", () => {
   it("re-verifies fallback and restarts a read after primary failure mid-operation", async () => {
     const calls: Array<[string, string]> = [];
     const result = await withSolanaMainnetRead(config, async rpc => {
-      await rpc("getSlot", [{ commitment: "confirmed" }]);
+      await rpc("getSlot", [{ commitment: "finalized" }]);
       return rpc("getAccountInfo");
     }, { fetch: async (input, init) => {
       const { id, method } = bodyOf(init); calls.push([String(input), method]);

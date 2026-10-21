@@ -343,9 +343,9 @@ function unsyncedWsolLamports(account: ChainAccount, holder: string): bigint {
 function syncNative(tokenAccount: string): Instruction {
   return { programAddress: address(SOLANA_CLASSIC_TOKEN_PROGRAM), accounts: [{ address: address(tokenAccount), role: 1 }], data: Uint8Array.of(17) };
 }
-/** Confirmed accounts in one call; a missing account is null. */
+/** Finalized accounts in one call; a missing account is null. */
 async function readAccounts(read: SolanaLiveRead, keys: readonly string[]): Promise<ChainAccount[]> {
-  const result = await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed" }]);
+  const result = await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "finalized" }]);
   if (!object(result) || !object(result.context) || !Array.isArray(result.value) || result.value.length !== keys.length) return fail("Invalid Solana account data.");
   return result.value.map(chainAccount);
 }
@@ -744,7 +744,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   async function rentFor(read: SolanaLiveRead, size: number): Promise<bigint> {
     const at = now(), hit = rents.get(size);
     if (hit && at >= hit.atMs && at - hit.atMs < SOLANA_DEPLOYMENT_RECHECK_MS) return hit.lamports;
-    const value = await read("getMinimumBalanceForRentExemption", [size, { commitment: "confirmed" }]);
+    const value = await read("getMinimumBalanceForRentExemption", [size, { commitment: "finalized" }]);
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) fail("Invalid Solana rent data.");
     rents.set(size, { lamports: BigInt(value), atMs: at });
     return BigInt(value);
@@ -1020,7 +1020,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const bounded: SolanaLiveRead = (method, params) => { if (abandoned) throw new Error("abandoned"); return read(method, params); };
       const probe = getBase64EncodedWireTransaction(compile([...solanaComputeBudgetInstructions(MAX_COMPUTE_UNITS, 0n), ...instructions]));
       if (Buffer.from(probe, "base64").length > 1232) return null;
-      const sim = await bounded("simulateTransaction", [probe, { encoding: "base64", commitment: "confirmed", sigVerify: false, replaceRecentBlockhash: false }]);
+      const sim = await bounded("simulateTransaction", [probe, { encoding: "base64", commitment: "finalized", sigVerify: false, replaceRecentBlockhash: false }]);
       if (!object(sim) || !object(sim.value) || sim.value.err !== null) return null;
       const consumed = sim.value.unitsConsumed;
       if (typeof consumed !== "number" || !Number.isSafeInteger(consumed) || consumed < 1 || consumed > MAX_COMPUTE_UNITS) return null;
@@ -1067,7 +1067,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     if (landed && !solanaLiveAfterRevoke(landed, { session: details.session, sessionEpoch: details.priorSessionEpoch })) fail(SOLANA_REVOKE_ALREADY_LANDED, "pending");
     const owner = s.scope.owner, live = rpc();
     const { block, cost } = await live.read(async read => {
-      const result = await read("getLatestBlockhash", [{ commitment: "confirmed" }]);
+      const result = await read("getLatestBlockhash", [{ commitment: "finalized" }]);
       if (!object(result) || !object(result.value) || typeof result.value.blockhash !== "string") fail("Invalid Solana blockhash response.");
       return { block: { blockhash: address(result.value.blockhash) as unknown as Blockhash, lastValidBlockHeight: BigInt(integer(result.value.lastValidBlockHeight)) },
         cost: await ownerCost(read, owner, details.vault, creates) };
@@ -1095,7 +1095,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   /**
    * The Pyth SOL/USD price as EVERY provider serves it, each read at or after
-   * its own fresh confirmed slot. A refusal from either provider refuses the
+   * its own fresh finalized slot. A refusal from either provider refuses the
    * whole read: a lying or broken provider can withhold a price, never choose
    * it. Callers take the stricter or the lower of the answers, whichever is
    * conservative for them. (A trade reads it beside its balances, at the
@@ -1103,7 +1103,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    */
   async function referencePrices(live: SolanaLiveRpc, generation: SolanaPythGeneration): Promise<SolanaReferencePrice[]> {
     return readSolanaEachProvider(live, async read =>
-      readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "confirmed" }])), now(), { generation }));
+      readSolanaReferencePrice(read, integer(await read("getSlot", [{ commitment: "finalized" }])), now(), { generation }));
   }
   /**
    * What withdrawing `amountRaw` of WSOL is worth now: an executable WSOL→USDG
@@ -1317,7 +1317,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             // book slot. Unbooked excess is never traded or valued, so failing to read or book it now (the
             // providers disagree, an owner transaction is pending, say) must not block exits; it retries next read.
             try {
-              const observedAtMs = now(), finalized = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
+              const observedAtMs = now(), finalized = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot);
               if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
             } catch { /* Retried on the next status read. */ }
           }
@@ -1561,7 +1561,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
               const held = await readSolanaVaultBalancesWith(read, vault, slot);
               const { seq, sessionEpoch, perTrade, daily, perTradeWsol, dailyWsol } = await readSolanaVaultStateWith(read, cfg.programId, vault, scope.owner, slot);
               const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
-              return { ...held, seq, sessionEpoch, perTrade, daily, perTradeWsol, dailyWsol, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
+              return { ...held, seq, sessionEpoch, perTrade, daily, perTradeWsol, dailyWsol, price, fresh: integer(await read("getSlot", [{ commitment: "finalized" }])) };
             }));
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
@@ -1662,8 +1662,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const floor = await ownerReadFloor(s);
       const prior = await rpc().read(async read => {
         // Never earlier than anything already booked (ownerReadFloor), nor than this provider's own current slot.
-        const slot = Math.max(integer(await read("getSlot", [{ commitment: "confirmed" }])), floor ?? 1);
-        const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]);
+        const slot = Math.max(integer(await read("getSlot", [{ commitment: "finalized" }])), floor ?? 1);
+        const found = await read("getAccountInfo", [vault, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]);
         if (!object(found) || !object(found.context) || integer(found.context.slot) < slot || !Object.hasOwn(found, "value")) fail("The vault account could not be read.");
         if (found.value === null) return null;
         if (!object(found.value) || found.value.owner !== cfg.programId || !Array.isArray(found.value.data) || typeof found.value.data[0] !== "string" || found.value.data[1] !== "base64"
@@ -1759,7 +1759,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         }
         if (book) {
           const observedAtMs = now();
-          const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot, "finalized");
+          const finalized = await readSolanaVaultBalances(rpc(), vault, book.slot);
           // Book any inflow first, so a stranger's WSOL can be withdrawn instead of blocking the owner:
           // only when nothing is short (as status books it), and only what both providers agree on.
           // Best effort, as in status: anyone can send the vault one raw token, so a provider that is
@@ -1767,7 +1767,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // stays as it was and the cap below (the lower of book and vault) still bounds the amount.
           if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) {
             try {
-              const agreed = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot, "finalized");
+              const agreed = await readSolanaVaultBalancesQuorum(rpc(), vault, book.slot);
               if (!shortOfBook(book, agreed) && aboveBook(book, agreed)) await s.reconcileExternalInflows({ ...agreed, observedAtMs, commitment: "finalized" });
             } catch { /* Booked by a later read. */ }
           }
@@ -1793,7 +1793,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         let hookAccounts: SolanaTransferHookAccount[];
         try {
           hookAccounts = await rpc().read(read => readSolanaWithdrawHookAccounts(read, { mint: input.mint!, tokenProgram: program, vault, owner: scope.owner, vaultToken, ownerToken, amount,
-            commitment: "finalized", minContextSlot: floor }));
+            minContextSlot: floor }));
         } catch (error) {
           if (error instanceof SolanaVaultValidationError) fail(`USDG cannot be withdrawn here: ${error.message}`);
           if (error instanceof SolanaTransferHookReadError) fail(error.message);

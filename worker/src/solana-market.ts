@@ -311,8 +311,8 @@ export function createSolanaMarket(options: MarketOptions = {}): SolanaMarket {
       if (!address(mint)) throw new SolanaMarketError("invalid-address");
       return withSolanaMainnetRead(config, async rpc => {
         const observedAtMs = timestamp(now);
-        const slot = requireSolanaSlot(await rpc("getSlot", [{ commitment: "confirmed" }]));
-        const raw = await rpc("getAccountInfo", [mint, { encoding: "jsonParsed", commitment: "confirmed", minContextSlot: slot }]);
+        const slot = requireSolanaSlot(await rpc("getSlot", [{ commitment: "finalized" }]));
+        const raw = await rpc("getAccountInfo", [mint, { encoding: "jsonParsed", commitment: "finalized", minContextSlot: slot }]);
         return mintFromRpc(raw, mint, slot, observedAtMs);
       }, readOptions);
     },
@@ -340,7 +340,7 @@ export function createSolanaMarket(options: MarketOptions = {}): SolanaMarket {
         throw new SolanaMarketError("invalid-quote");
       }
       const currentSlot = await withSolanaMainnetRead(config, async rpc =>
-        requireSolanaSlot(await rpc("getSlot", [{ commitment: "confirmed" }])), readOptions);
+        requireSolanaSlot(await rpc("getSlot", [{ commitment: "finalized" }])), readOptions);
       if (raw.contextSlot < currentSlot - SOLANA_MARKET_MAX_SLOT_LAG || raw.contextSlot > currentSlot + SOLANA_MARKET_MAX_SLOT_LEAD) {
         throw new SolanaMarketError("stale-quote");
       }

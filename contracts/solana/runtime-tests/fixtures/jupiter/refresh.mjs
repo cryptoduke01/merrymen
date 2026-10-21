@@ -219,7 +219,7 @@ export async function fetchRaw(raw, { vaultProgram = declaredId(), ownerSeed = O
   const keys = unique([...built.swapInstruction.accounts.map(a => a.pubkey), ...(built.addressLookupTableAddresses ?? []), USDG, WSOL]);
   if (keys.length > 100) throw new Error(`${keys.length} accounts: getMultipleAccounts takes 100`);
   at = utcNow();
-  const accounts = await rpc("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed" }]);
+  const accounts = await rpc("getMultipleAccounts", [keys, { encoding: "base64", commitment: "finalized" }]);
   write("route/accounts.json", { rpc: rpcUrl, fetchedAtUtc: at, keys, result: accounts });
   const slot = accounts.context.slot;
   write("route/block-time.json", { rpc: rpcUrl, slot, blockTime: await rpc("getBlockTime", [slot]) });
@@ -229,14 +229,14 @@ export async function fetchRaw(raw, { vaultProgram = declaredId(), ownerSeed = O
   for (const program of unique([...executables, ATA_PROGRAM])) {
     const [name] = PROGRAMS[program] ?? [program];
     const readAtUtc = utcNow();
-    const info = await rpc("getAccountInfo", [program, { encoding: "base64", commitment: "confirmed" }]);
+    const info = await rpc("getAccountInfo", [program, { encoding: "base64", commitment: "finalized" }]);
     if (!info.value?.executable) throw new Error(`${program} is not an executable account`);
     const data = Buffer.from(info.value.data[0], "base64");
     if (info.value.owner === LOADER_V3) {
       // UpgradeableLoaderState::Program: tag 2, then the programdata address.
       if (data.length !== 36 || data.readUInt32LE(0) !== 2) throw new Error(`${program}: not a loader-v3 program account`);
       const programdata = b58encode(data.subarray(4, 36));
-      const pd = await rpc("getAccountInfo", [programdata, { encoding: "base64", commitment: "confirmed" }]);
+      const pd = await rpc("getAccountInfo", [programdata, { encoding: "base64", commitment: "finalized" }]);
       const bytes = Buffer.from(pd.value.data[0], "base64");
       // ProgramData: tag 3, deploy slot, Option<upgrade authority>, then the ELF.
       if (pd.value.owner !== LOADER_V3 || bytes.readUInt32LE(0) !== 3) throw new Error(`${programdata}: not programdata`);
@@ -351,7 +351,7 @@ export function buildFixtures(raw, { out = HERE, elfOut = out } = {}) {
   omitted[vaultAccounts.join(", ")] = "builtFor's swap authority, temporary input ATA and WSOL ATA: absent on mainnet, created by the test (under its own build's vault program)";
   const accounts = {
     provenance: {
-      rpc: a.rpc, method: "getMultipleAccounts", commitment: "confirmed", encoding: "base64", slot,
+      rpc: a.rpc, method: "getMultipleAccounts", commitment: "finalized", encoding: "base64", slot,
       apiVersion: a.result.context.apiVersion,
       apiVersionSource: "the getMultipleAccounts response context: the RPC node's software version, not the test runtime's",
       fetchedAtUtc: a.fetchedAtUtc, blockTime: bt.blockTime, blockTimeSource: "getBlockTime(slot) on the same RPC",

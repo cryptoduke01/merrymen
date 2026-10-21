@@ -76,13 +76,13 @@ const rpcError = (code: SolanaRpcError["code"]) => (error: unknown) => {
 };
 
 describe("Solana mint reads", () => {
-  it("verifies mainnet each time and reads a confirmed mint with minContextSlot", async () => {
+  it("verifies mainnet each time and reads a finalized mint with minContextSlot", async () => {
     const { market, calls } = fixture();
     assert.deepEqual(await market.readMint(TOKEN), { address: TOKEN, program: SPL_TOKEN_PROGRAM,
       decimals: 9, slot: SLOT, observedAtMs: NOW, buyBlockedReasons: [] });
     assert.deepEqual(calls.map(c => c.method), ["getGenesisHash", "getSlot", "getAccountInfo"]);
-    assert.deepEqual(calls[1]?.params, [{ commitment: "confirmed" }]);
-    assert.deepEqual(calls[2]?.params, [TOKEN, { encoding: "jsonParsed", commitment: "confirmed", minContextSlot: SLOT }]);
+    assert.deepEqual(calls[1]?.params, [{ commitment: "finalized" }]);
+    assert.deepEqual(calls[2]?.params, [TOKEN, { encoding: "jsonParsed", commitment: "finalized", minContextSlot: SLOT }]);
     await market.readMint(TOKEN);
     assert.equal(calls.filter(c => c.method === "getGenesisHash").length, 2);
     for (const call of calls) { assert.equal(call.init?.redirect, "error"); assert.equal(call.init?.method, "POST"); }

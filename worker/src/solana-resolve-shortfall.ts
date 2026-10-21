@@ -188,7 +188,7 @@ export async function resolveSolanaShortfall(input: SolanaShortfallInput): Promi
     const base = { label: provider.label, hostId: hostId(provider.host), ...(provider.label === input.exclude ? { excluded: true as const } : {}) };
     try {
       views.push({ ...base, balances: await provider.read(async read => {
-        const held = await readSolanaVaultBalancesWith(read, vault, recorded.slot, "finalized");
+        const held = await readSolanaVaultBalancesWith(read, vault, recorded.slot);
         return { ...held, fresh: integer(await read("getSlot", [{ commitment: "finalized" }])) };
       }) });
     } catch (error) { views.push({ ...base, error: viewError(error) }); }

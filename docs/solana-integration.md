@@ -585,14 +585,26 @@ rent, the fee payer's balance, an owner transaction's priority-fee simulation,
 the withdrawal cap's finalized read, and the status display (including the
 below-book check). Jupiter quotes come from Jupiter.
 
+**Commitment.** Every read is `finalized`: accounts, slots, blockhashes, rent,
+simulations, fee quotes, Pyth, mints, the send's preflight, in the app, the
+operator tools and `merrymen solana-recover`. Since Alpenglow (mainnet epoch
+1064, 2026-10-21; Votor from slot 459,653,000) `confirmed` and `finalized` are
+the same state, a block with a finalization certificate about 150 ms after it is
+produced, and Agave will remove `confirmed` in a later release. A provider may
+still report a signature's status as `confirmed`: the rebroadcast stops on it
+as on `finalized`, and only `finalized` settles a trade or an owner
+transaction. On a cluster still on TowerBFT (`getAgGenesisCert` answers null)
+every read would trail the tip by about 12.8 seconds and a blockhash would have
+that much less life; mainnet is past that.
+
 **Slots.** A slot persisted from several providers (an inflow's book slot, a
 first book's risk slot, a trade expiry's settlement slot, an owner transaction's
 expiry proof, in the app and in `solana:resolve owner`) is the lowest context slot
 any of them answered at; an owner expiry books the whole proof read at that slot,
 so its slot and height come from one bank. A reading is refused when one provider's slot runs more
-than 150 slots (`SOLANA_PROVIDER_SLOT_SKEW`, about a minute) past another
-provider's fresh slot at the same commitment. A provider a slot or two behind
-the prepared slot is asked again up to 5 times, 400 ms apart. The executor
+than 150 slots (`SOLANA_PROVIDER_SLOT_SKEW`, about 30 seconds at 200 ms slots)
+past another provider's fresh finalized slot. A provider a slot or two behind
+the prepared slot is asked again up to 5 times, 400 ms apart (about ten slots). The executor
 reads the vault no earlier than the later of the book's slot and the latest
 finalized owner transaction's slot (a finalized native SOL withdrawal also
 raises the book's slot), so a lagging provider errors instead of returning a
@@ -605,13 +617,20 @@ bank's slot with an unchanged sequence (or, for an owner transaction, its own
 unchanged mark), and both providers must show it.
 
 **Sending.** A live swap's signed bytes go to both providers and are rebroadcast
-every 2 seconds until a provider reports the signature confirmed, both report
-the blockhash invalid, or the signed `execute_swap` deadline passes (at most
-about 30 seconds after the quote). Bytes are never re-signed, so a signature can
+every 2 seconds until a provider reports the signature finalized (or
+`confirmed`), both report the blockhash invalid, or the signed `execute_swap`
+deadline passes (at most about 30 seconds after the quote). A blockhash lives
+150 blocks: about 30 seconds at 200 ms slots, so it and the deadline now end at
+about the same time. Bytes are never re-signed, so a signature can
 land at most once. A manual trade request or an agent tick can therefore take
 up to that deadline under congestion. Owner transactions get the same
 two-provider send with a 15-second window, and each status read re-sends saved
-owner bytes while no provider has seen them and their blockhash is valid.
+owner bytes while no provider has seen them and their blockhash is valid. The
+owner's 45-second review window and the server's 60 seconds
+(`expiresAtMs`) now outlast that blockhash: bytes signed after about 30
+seconds cannot land and expire like any others. The 60 seconds must never be
+shorter than a blockhash's life, since an unsigned prepared withdrawal counts
+as lapsed once they pass.
 
 **Swap priority fee.** The compute-unit price is the 75th percentile of recent
 fees on the swap's writable accounts, clamped between
@@ -841,7 +860,7 @@ release entry ships in the published CLI.
 
 ## A vault below its book
 
-**What it means.** The vault's confirmed USDG or WSOL balance is below its book
+**What it means.** The vault's finalized USDG or WSOL balance is below its book
 (cash; position plus quarantined WSOL) while no live trade is pending and no
 signed owner transaction is unresolved. Tokens left the vault outside Merrymen.
 A trade or in-app withdrawal that has landed but not settled is not a shortfall.
@@ -1488,7 +1507,8 @@ says where to change it. Superseded choices are listed under the current one.
 | Bad tolerance | Blocker and `[alert]` (reversed the earlier no-alert choice) | Blocker only | `solana-app-runtime.ts` |
 | Stale-price alert wording | States only the 120 s limit | Per-generation post counts; a tighter limit for `upgraded` | `SOLANA_REFERENCE_MAX_AGE_MS` |
 | Pyth across providers | Stricter bound, no agreement band | Refuse when prices differ by more than the confidence | `assessRisk` in `solana-app-runtime.ts` |
-| Provider slot skew | 150 slots | No check; 32 slots | `SOLANA_PROVIDER_SLOT_SKEW` |
+| Provider slot skew | 150 slots (a minute at 400 ms slots, 30 s at 200 ms) | No check; 32 slots; 300 slots to keep a minute | `SOLANA_PROVIDER_SLOT_SKEW` |
+| Read commitment | `finalized` everywhere (Alpenglow made it the same state as `confirmed`, which Agave will remove) | Keep `confirmed` until it is removed | every Solana read |
 | Lagging-provider catch-up | 5 attempts, 400 ms apart | No retry; longer | `SOLANA_CATCH_UP_*` |
 | Pre-sign simulation | On every provider, refuse on any refusal | Accept the residual risk | `solana-executor.ts` |
 | Trade snapshot sequence and epoch | Refused unless every provider agrees | Rely on the durable floor | `assessRisk` |

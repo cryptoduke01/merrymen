@@ -128,7 +128,7 @@ async function fixture(options: { declared?: string } = {}) {
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
     if (method === "simulateTransaction" && controls.simulatedUnits !== null) {
-      assert.deepEqual(params[1], { encoding: "base64", commitment: "confirmed", sigVerify: false, replaceRecentBlockhash: false });
+      assert.deepEqual(params[1], { encoding: "base64", commitment: "finalized", sigVerify: false, replaceRecentBlockhash: false });
       return response({ err: controls.simulationFails ? { InstructionError: [0, { Custom: 6000 }] } : null, unitsConsumed: controls.simulatedUnits, logs: [], accounts: null });
     }
     if (method === "getRecentPrioritizationFees" && controls.priorityFees) return controls.priorityFees.map((prioritizationFee, index) => ({ slot: 1000 - index, prioritizationFee }));
@@ -2181,6 +2181,33 @@ async function rejectsWith(promise: Promise<unknown>, code: SolanaAppRuntimeErro
   });
 }
 
+test("every read for a live permission, its status and an owner transaction asks for finalized: Alpenglow made confirmed the same state, and Agave will remove it", async () => {
+  const f = await fixture();
+  try {
+    const asked = new Set<string>();
+    const recorded: SolanaLiveRead = async (method, params = []) => {
+      for (const param of params) {
+        if (!param || typeof param !== "object" || Array.isArray(param)) continue;
+        for (const [field, value] of Object.entries(param)) if (/commitment/i.test(field)) asked.add(`${method} ${field}=${String(value)}`);
+      }
+      return f.read(method, params);
+    };
+    f.providers.primary = recorded; f.providers.fallback = recorded;
+    f.controls.simulatedUnits = 20_000; f.controls.priorityFees = [50_000];
+    await f.live(); const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    const first = await f.app.submitSetup(f.scope, { signedTransactionBase64 });
+    f.controls.initialized = true; f.controls.finalized = true;
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "finalized");
+    assert.deepEqual(await f.app.activateLive(f.scope, { signature: first.signature, sessionSecretKey: f.sessionSeed.toString("base64") }),
+      { registered: true, session: f.session, vault: f.vault });
+    await f.app.status(f.scope);
+    assert.notEqual((await f.app.prepareOwnerAction(f.scope, { action: "revoke" })).priorityFeeLamports, "0", "the fee estimate's simulation ran");
+    assert.deepEqual([...asked].sort(), ["getAccountInfo", "getLatestBlockhash", "getMinimumBalanceForRentExemption", "getMultipleAccounts",
+      "getSlot", "getTransaction", "simulateTransaction"].map(method => `${method} commitment=finalized`));
+  } finally { f.raw.close(); }
+});
+
 test("an activation reads the vault no earlier than the slot its permission finalized at, so a lagging RPC cannot refuse a valid permission", async () => {
   const f = await fixture();
   try {
@@ -2197,7 +2224,7 @@ test("an activation reads the vault no earlier than the slot its permission fina
     const stale = f.state(); keyBytes(key(5)).copy(stale, 42);
     const floors: unknown[] = [];
     f.providers.primary = async (method, params = []) => {
-      if (method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "confirmed") {
+      if (method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "finalized") {
         const floor = (params[1] as { minContextSlot?: number }).minContextSlot; floors.push(floor);
         if ((floor ?? 0) > 999) throw new SolanaRpcError("rpc");
         return { context: { slot: 999 }, value: account(stale) };

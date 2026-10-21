@@ -119,6 +119,8 @@ class FakeChain {
   sent: { signature: string; instructions: Decoded[]; wire: string }[] = [];
   broadcasts = 0;
   calls: string[] = [];
+  /** Every commitment a request asked for, as "<method> <field>=<value>". */
+  commitments = new Set<string>();
   statuses = new Map<string, { slot: number; err: unknown; polls: number }>();
   /**
    * Per transaction, in the order first submitted: land (default, at once), drop
@@ -213,6 +215,10 @@ class FakeChain {
     assert.equal(String(input), RPC, "only the RPC the owner supplied is contacted");
     const body = JSON.parse(String(init?.body));
     this.calls.push(body.method);
+    for (const param of body.params ?? []) {
+      if (!param || typeof param !== "object" || Array.isArray(param)) continue;
+      for (const [field, value] of Object.entries(param)) if (/commitment/i.test(field)) this.commitments.add(`${body.method} ${field}=${String(value)}`);
+    }
     const reply = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
     const error = () => new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32002, message: "simulation failed" } }));
     const encode = (a: Account | undefined) => a ? { owner: a.owner, lamports: Number(a.lamports), data: [a.data.toString("base64"), "base64"],
@@ -536,6 +542,11 @@ describe("solana-recover", () => {
     assert.match(out, /Step 2 \(withdraw\): 2\.345678 USDG, 0\.6 WSOL, 0\.003 SOL, from finalized slot \d+, one transaction per asset/);
     assert.match(out, /One transaction per asset \(SOL, then USDG, then WSOL\)/);
     assert.match(out, /Left in the vault: 0 USDG, 0 WSOL, 0 SOL above rent/);
+    assert.match(out, /Balances \(finalized, slot \d+\):/);
+    // Every read, the plan's included, and the send's preflight ask for finalized (Alpenglow made confirmed the same state).
+    assert.deepEqual([...fake.commitments].sort(), ["getAccountInfo commitment=finalized", "getBlockHeight commitment=finalized", "getLatestBlockhash commitment=finalized",
+      "getMinimumBalanceForRentExemption commitment=finalized", "getMultipleAccounts commitment=finalized", "getSlot commitment=finalized",
+      "sendTransaction preflightCommitment=finalized"]);
     assert.match(out, /Delete the exported key file now/);
     // RPC carries a fixture key and comes by --rpc: the one warning is about that, and does not repeat it.
     assert.equal(warnings, SOLANA_RECOVER_RPC_ARG_WARNING);
