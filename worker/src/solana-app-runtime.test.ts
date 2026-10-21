@@ -2521,6 +2521,25 @@ test("live rollout: a tenant taken off the list after going live is exits-only: 
   } finally { f.raw.close(); }
 });
 
+test("live rollout: a live book without a registered permission also means the account went live: off the list it is paused (not 'not open'), and keeps live mode for its exits", async () => {
+  const f = await fixture();
+  try {
+    // A live book but no session row: as if books were created another way (a resolve tool, say). Off the list.
+    await f.live(); f.controls.initialized = true; await ensureSolanaTradingSchema(f.db); await cashBook(f);
+    const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT } });
+    const status = await off.status(f.scope);
+    assert.ok(status.live.blockers.includes(SOLANA_LIVE_PAUSED_NO_PERMISSION), status.live.blockers.join(" | "));
+    assert.ok(!status.live.blockers.includes(SOLANA_LIVE_NOT_OPEN));
+    await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_PAUSED, "permission"));
+    await off.checkLiveSettings(f.scope, limits);
+    // The same account with no book: never went live, so not open, and it may not save live mode.
+    await f.db.prepare("DELETE FROM solana_runtime_live_books").run();
+    assert.ok((await off.status(f.scope)).live.blockers.includes(SOLANA_LIVE_NOT_OPEN));
+    await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+    await assert.rejects(off.checkLiveSettings(f.scope, limits), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
+  } finally { f.raw.close(); }
+});
+
 test("live rollout: off the list, withdrawals made outside Merrymen are still recorded", async () => {
   const f = await fixture();
   try {
