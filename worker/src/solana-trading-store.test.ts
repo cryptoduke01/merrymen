@@ -1561,5 +1561,14 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     f.clock.value += 30_000; await worker.publishLiveRollout();
     await assert.rejects(worker.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
     assert.equal((await rows()).length, 2);
+    // A worker heartbeat (read back as a number on either database) beside a worker digest over 90 s old: the web holds buys,
+    // whatever the digest said; once the heartbeat is old too, nothing is compared.
+    const same = runtime({ MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "24" });
+    await assert.rejects(same.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
+    f.clock.value += 91_000;
+    await f.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(f.clock.value);
+    await assert.rejects(same.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
+    f.clock.value += 91_000;
+    await assert.rejects(same.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
   });
 }
