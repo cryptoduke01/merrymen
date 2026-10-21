@@ -1465,6 +1465,38 @@ test("the position above its exit room is judged within the registered permissio
   assert.deepEqual((await f.runtime({}, split(f, roomy, roomy)).status(f.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]);
 });
 
+test("the position above its exit room is priced as the exit reserve prices it: at the highest price any provider serves, plus the configured reference tolerance", async t => {
+  // 25 USDG bought in the window, 100 USDG a day. 0.45 SOL held fits at $150 (25 + 67.50 + 3% = 94.53) but not where one
+  // provider serves $170 (25 + 76.50 + 3% = 103.80): the higher value holds buys, as assessRisk would refuse them.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 450_000_000n, mark: "fair", build: { kind: "fair" } });
+  await windowRow(f, "earlier-buy", "finalized", 3_600_000, SOLANA_USDG_MINT, "25000000", "25000000");
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, [], "fits at $150 from both providers");
+  for (const via of [split(f, undefined, pythAt(17_000_000_000n)), split(f, pythAt(17_000_000_000n))]) {
+    const status = await f.runtime({}, via).status(f.scope);
+    assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.canExit, true);
+  }
+  await assert.rejects(f.runtime({}, split(f, undefined, pythAt(17_000_000_000n))).trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "1000000", "buy-at-170") }),
+    (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  // 0.49 SOL ($73.50) fits only were the tolerance ignored (25 + 73.50 = 98.50; 25 + 75.71 with the default 300 bps is over 100).
+  const g = await fixture(t, { cash: 50_000_000n, wsol: 490_000_000n, mark: "fair", build: { kind: "fair" } });
+  await windowRow(g, "earlier-buy", "finalized", 3_600_000, SOLANA_USDG_MINT, "25000000", "25000000");
+  assert.deepEqual((await g.app.status(g.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]);
+  // The configured tolerance, not a fixed one: at 200 bps it fits (25 + 74.97).
+  assert.deepEqual((await g.runtime({ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "200" }).status(g.scope)).live.blockers, []);
+});
+
+test("the position above its exit room is priced only while a buy that still counts is in the window: a failed or expired buy, released, reads no price and holds nothing", async t => {
+  // 0.7 SOL held ($105, more than the 100 USDG a day with the 3% tolerance) and the only buys in the window failed or expired.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 700_000_000n, mark: "fair", build: { kind: "fair" } });
+  await windowRow(f, "failed-buy", "failed", 3_600_000, SOLANA_USDG_MINT, "25000000", "25000000");
+  await windowRow(f, "expired-buy", "expired", 3_500_000, SOLANA_USDG_MINT, "25000000", "25000000");
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, []); assert.deepEqual(f.pythReads, [], "no price was read for it");
+  // Had the failed buy landed, it would count: priced, and buys held.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET status='finalized' WHERE request_id='failed-buy'").run();
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.ok(f.pythReads.length > 0);
+});
+
 test("live rollout caps: on the list, an account whose permission is registered above caps lowered since may save its live limits up to what it signed, so a re-save never narrows its exits; buys stay refused", async t => {
   // The registered permission allows 25 and 100 USDG, 0.2 and 1 SOL (kept as activateLive keeps it); the caps are lowered to the defaults.
   const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
