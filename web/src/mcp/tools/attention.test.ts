@@ -512,8 +512,9 @@ test("a recovery hold is tested first: the held agent gets one item with no chor
   assert.deepEqual(lifted.items.map((i) => i.kind), ["permission-expired"], "the owner's step comes back once the hold lifts");
 
   d.raw.prepare("UPDATE fleet_recovery_health SET held = 1, cause = 'not-a-cause'").run();
-  const unread = await ask();
+  const unread = await ask({ seen_keys: [`recovery-hold:${SLUG_A}:on`] });
   assert.ok(unread.not_checked.some((n) => n.part === `recovery hold of agent ${SLUG_A}` && n.scope === null));
+  assert.deepEqual(unread.resolved_keys, [], "an unreadable report does not say the hold lifted");
   assert.equal(only(unread, "permission-expired").severity, "act_now", "an unreadable report never becomes a hold");
 });
 

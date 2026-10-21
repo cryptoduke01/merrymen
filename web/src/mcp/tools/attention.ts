@@ -94,6 +94,7 @@ const getAttention = defineTool({
     const items: AttentionItem[] = [];
     const eventsCut = new Set<string>();
     const held = new Set<string>();
+    const holdUnread = new Set<string>();
     await ctx.ledger(async (db) => {
       for (const a of agents) {
         const r = await readAgentAttention(db, {
@@ -102,6 +103,7 @@ const getAttention = defineTool({
         });
         if (r.held) held.add(a.slug);
         if (r.holdUnread) {
+          holdUnread.add(a.slug);
           notChecked.push({ part: `recovery hold of agent ${a.slug}`, why: "Its recovery report could not be read, so it was judged as if it were not held.", scope: null });
         }
         names.set(a.slug, untrusted(r.name, 64));
@@ -182,6 +184,8 @@ const getAttention = defineTool({
       if (kind === "proposal-waiting") return !proposalsCut && kindChecked(rest.split(".")[0]!) && (agent === "-" ? ref === undefined : slugs.has(agent));
       // A held agent was judged on its hold alone: its other conditions are unknown, not gone.
       if (held.has(agent) && kind !== "recovery-hold") return false;
+      // An unreadable recovery report says nothing about whether a hold lifted.
+      if (kind === "recovery-hold" && holdUnread.has(agent)) return false;
       return slugs.has(agent);
     };
     const resolved = [...seen].filter((k) => !openConditions.has(conditionOfKey(k)) && looked(k));
