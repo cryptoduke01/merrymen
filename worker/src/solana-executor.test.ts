@@ -244,6 +244,25 @@ test("builds real two-signer v0 bytes, verifies them, persists before one send a
   assert.equal(finalized?.settlement?.feeLamports, "10000");
 });
 
+test("every read of a live trade, from the deployment check to its settlement, asks for finalized: Alpenglow made confirmed the same state, and Agave will remove it", async () => {
+  const f = await fixture(), asked = new Set<string>();
+  const recorded = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    for (const param of params) {
+      if (!param || typeof param !== "object" || Array.isArray(param)) continue;
+      for (const [field, value] of Object.entries(param)) if (/commitment/i.test(field)) asked.add(`${method} ${field}=${String(value)}`);
+    }
+    return read(method, params);
+  };
+  const inner = f.options.rpc;
+  const rpc: SolanaLiveRpc = { read: operation => inner.read(read => operation(recorded(read))),
+    readEach: operation => inner.readEach!(read => operation(recorded(read))), send: (...args) => inner.send(...args) };
+  const executor = createSolanaExecutor({ ...f.options, rpc });
+  assert.equal((await executor.execute(f.intent)).status, "pending");
+  f.controls.finalized = true;
+  assert.equal((await executor.reconcile(f.intent.owner, f.intent.requestId))?.status, "finalized");
+  assert.deepEqual([...asked].sort(), ["getAccountInfo", "getFeeForMessage", "getLatestBlockhash", "getMinimumBalanceForRentExemption",
+    "getMultipleAccounts", "getSlot", "getTransaction", "simulateTransaction"].map(method => `${method} commitment=finalized`));
+});
 test("lost send response and mismatched returned signature stay durable pending, never re-sign or resend", async () => {
   for (const mode of ["failSend", "wrongSignature"] as const) {
     const f = await fixture(); f.controls[mode] = true; const executor = createSolanaExecutor(f.options);
