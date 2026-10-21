@@ -1050,6 +1050,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   return {
     /**
+     * Publishes the live rollout settings this process runs (SETTINGS THAT MUST MATCH, CHECKED): the Solana worker's agent
+     * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades.
+     */
+    async publishLiveRollout(): Promise<void> {
+      const db = options.db ?? await getSolanaRuntimeDb();
+      await ensureSolanaTradingSchema(db, !!env.DATABASE_URL);
+      await publishRollout(db);
+    },
+    /**
      * The shared fee payer's level for the worker's periodic check (the agent's,
      * every SOLANA_AGENT_FEE_PAYER_CHECK_MS), read and judged as status reads and
      * judges it and said through the same [alert]s (one line per change of level,
@@ -1059,15 +1068,6 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * vault's is the same size); without one, the upper bound. Throws while live
      * trading is not configured: there is nothing to check.
      */
-    /**
-     * Publishes the live rollout settings this process runs (SETTINGS THAT MUST MATCH, CHECKED): the Solana worker's agent
-     * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades.
-     */
-    async publishLiveRollout(): Promise<void> {
-      const db = options.db ?? await getSolanaRuntimeDb();
-      await ensureSolanaTradingSchema(db, !!env.DATABASE_URL);
-      await publishRollout(db);
-    },
     async feePayerCheck(input: { vault?: string } = {}): Promise<FeePayerLevel> {
       config();
       const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
