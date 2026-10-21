@@ -858,7 +858,9 @@ about half the USDG cap). Withdraw is never limited.
    The web, still on the old ones, sees the worker's new digest and holds every
    live buy, for every tenant, until it is deployed too (above). Once deployed,
    the web publishes the new settings when it serves a Solana request (the page
-   opened, by an owner or by you), and both buy again. So any change, taking
+   opened by an owner, or by you signed in with a bound Solana wallet: paper is
+   enough, as an account with none is served no Solana status), and both buy
+   again. So any change, taking
    tenants off or adding them, lowering or raising the caps, needs no hold: once
    the worker has published the new ones (its first tick), no buy is made under
    the old ones, and paper, sales, revoke and withdrawals carry on throughout.
