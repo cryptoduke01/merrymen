@@ -346,6 +346,8 @@ test("D3: a SOL mark that fails any other way still refuses a buy; so does a zer
 
 test("D4: the agent plans around SOL dust that no route buys back instead of stopping at it; any other mark failure still stops the tick", async t => {
   const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000n, mark: "zero", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 5000 } });
+  // The web served a Solana request on the same settings (published its digest): the worker buys only once it has.
+  await f.app.publishLiveRollout();
   assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["submitted"]);
   const [row] = await f.submissions();
   assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(row!.submission.intent.amountRaw, "25000000");
@@ -1066,8 +1068,9 @@ test("live rollout: the autonomous worker places no live buy for a tenant off ME
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "manual-off-list-buy") }), refusedAs(SOLANA_LIVE_PAUSED, "permission"));
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
   assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built, so nothing could be signed");
-  // The same account on the list: the worker's next tick buys.
+  // The same account on the list, on both services (the web has served a Solana request with it): the worker's next tick buys.
   f.clock.now += 61_000;
+  await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: TENANT }).publishLiveRollout();
   assert.deepEqual((await f.agent(f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: TENANT }, undefined, undefined, "worker")).tick()).map(r => r.outcome), ["submitted"]);
   const [row] = await f.submissions();
   assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
@@ -1315,6 +1318,29 @@ test("live rollout: the worker publishes its settings with its heartbeat; once t
     localTestDeployment: true })).tick(), []);
   assert.ok(await idle.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get(), "published with the heartbeat");
   assert.deepEqual((await idle.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"33".repeat(20)}` }, undefined, () => {}).status(idle.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+});
+
+test("live rollout: on a fresh deployment, before the web has published any digest, the worker's tick builds no route for a buy yet still sells, and buys once the web publishes the same settings", async t => {
+  // 0.1 SOL ($15) and 50 USDG; the strategy wants 90% SOL, so it buys. No web digest at all: the web has served no Solana request yet.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 100_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
+  const lines: string[] = [];
+  const worker = f.runtime({}, undefined, line => lines.push(line), "worker");
+  assert.deepEqual((await f.agent(worker).tick()).map(r => r.outcome), ["held"]);
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built for a buy the worker holds");
+  assert.equal(lines.filter(line => line.startsWith("[alert] solana-live-rollout differs: the web has not published")).length, 1);
+  // The web serves its first Solana request on the same settings: the worker's next tick buys.
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, []);
+  f.clock.now += 61_000;
+  assert.deepEqual((await f.agent(worker).tick()).map(r => r.outcome), ["submitted"]);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
+  // A sale is never held: 1 SOL held, the strategy wants 25% SOL, and the worker sells with no web digest at all.
+  const g = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 } });
+  assert.deepEqual((await g.agent(g.runtime({}, undefined, () => {}, "worker")).tick()).map(r => r.outcome), ["submitted"]);
+  const [sale] = await g.submissions();
+  assert.equal(sale!.submission.intent.inputMint, SOLANA_WRAPPED_SOL_MINT, "a sale back to USDG"); assert.equal(g.sends.length, 1);
+  assert.equal(await g.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='web'").get(), undefined, "still no web digest");
 });
 
 /** A provider that serves the vault with these session limits (raw: USDG per trade and per 24 hours, SOL sold per trade and per 24 hours). */

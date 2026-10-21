@@ -2768,7 +2768,8 @@ test("live rollout, the runbook's order: deployed to the worker first, a tenant 
     // Both ran the old list, and the web served a request: its digest is published.
     const web = f.runtime({ env: f.env, log: () => {} });
     await web.status(f.scope);
-    // The worker is redeployed first, with this tenant taken off: it runs the new list at once, never judging the web's older digest.
+    // The worker is redeployed first, with this tenant taken off: it runs the new list at once (and holds every other tenant's
+    // buys meanwhile, as the web's digest differs from its own).
     f.clock.now += 1;
     const worker = f.runtime({ env: removed, service: "worker", log: () => {} });
     await worker.publishLiveRollout();
@@ -2843,11 +2844,12 @@ test("live rollout: while the web and the Solana worker run different list or ca
     // A worker that stopped publishing (offline over 90 s) is not compared.
     f.clock.now += 91_000;
     assert.deepEqual((await web.status(f.scope)).live.blockers, []);
-    // A worker started after the web last published does not judge that row: it may predate the change this worker brings.
+    // A worker started after the web last published still judges that row, whatever its age: the web, which has no heartbeat,
+    // may still run what it published then.
     f.clock.now += 1;
     const restarted = f.runtime({ env: f.env, service: "worker", log: () => {} });
-    assert.deepEqual((await restarted.status(f.scope)).live.blockers, []);
-    // The same settings, however spelled, add nothing on either side.
+    assert.deepEqual((await restarted.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    // The same settings, however spelled, add nothing on either side: once the web publishes them, the worker's buys are let through.
     f.clock.now += 30_000;
     const same = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: ` ${TENANT} , ${TENANT}`, MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "10" }, log: () => {} });
     assert.deepEqual((await same.status(f.scope)).live.blockers, []);
@@ -2855,6 +2857,81 @@ test("live rollout: while the web and the Solana worker run different list or ca
     // Published as the web from then on, the web's different settings hold the restarted worker's buys.
     f.clock.now += 30_000; await web.status(f.scope);
     assert.deepEqual((await restarted.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: a restarted worker judges the web's latest digest whatever its age: a tenant re-added on the worker first buys nothing until the web runs the same list and publishes it; its exits stay open throughout", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const lines: string[] = [];
+    const differs = () => lines.filter(line => line.startsWith("[alert] solana-live-rollout differs: the web last published different")).length;
+    const buy = (requestId: string) => ({ mode: "live" as const, intent: { ...f.trade, mode: "live", requestId } });
+    const sale = { ...f.trade, mode: "live", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "100000000" };
+    // The tenant traded, then was taken off both lists; the web last served a Solana request on that list half an hour ago
+    // (any age: the fixture's saved limits bound how far this clock can move).
+    await f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT }, log: () => {} }).status(f.scope);
+    f.clock.now += 1_800_000;
+    // The worker is redeployed first with the tenant back on its list: the web, still on the old list, would refuse this buy.
+    const worker = f.runtime({ env: f.env, service: "worker", log: line => lines.push(line) });
+    await worker.publishLiveRollout();
+    const held = await worker.status(f.scope);
+    assert.deepEqual(held.live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]); assert.equal(held.live.ready, false); assert.equal(held.live.canExit, true);
+    await assert.rejects(worker.trade(f.scope, buy("re-added-buy")), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    await assert.rejects(worker.preview(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    assert.ok((await worker.preview(f.scope, { mode: "live", intent: sale })).quote, "a sale is still previewed");
+    assert.equal(differs(), 1, "said once a minute"); assert.ok(!lines.some(line => line.includes(TENANT) || line.includes(OTHER_TENANT)), "never a tenant");
+    // Still held later on, however old the web's digest: only an equal one lets the worker buy.
+    f.clock.now += 900_000;
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    assert.equal(differs(), 2);
+    // The web is deployed with the same list and serves a Solana request: its digest now equals the worker's.
+    f.clock.now += 1;
+    assert.deepEqual((await f.runtime({ env: f.env, log: () => {} }).status(f.scope)).live.blockers, []);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    assert.equal(f.controls.sends, 0, "no buy was sent while they differed");
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: a worker restarted with the settings the web last published is not held, however old that digest is", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const lines: string[] = [];
+    await f.runtime({ env: f.env, log: () => {} }).status(f.scope);
+    f.clock.now += 3_000_000;
+    const restarted = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: ` ${TENANT} ` }, service: "worker", log: line => lines.push(line) });
+    await restarted.publishLiveRollout();
+    assert.deepEqual((await restarted.status(f.scope)).live.blockers, []);
+    assert.deepEqual(lines, []);
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: on a fresh deployment, before the web has published any digest, the worker holds live buys only, says why once a minute, and lets them through as soon as the web publishes the same settings", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const lines: string[] = [];
+    const unpublished = () => lines.filter(line => line.startsWith("[alert] solana-live-rollout differs: the web has not published")).length;
+    const worker = f.runtime({ env: f.env, service: "worker", log: line => lines.push(line) });
+    await worker.publishLiveRollout();
+    assert.equal(await f.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='web'").get(), undefined, "no web digest yet");
+    const held = await worker.status(f.scope);
+    assert.deepEqual(held.live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]); assert.equal(held.live.ready, false); assert.equal(held.live.canExit, true, "exits stay open");
+    await assert.rejects(worker.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "fresh-buy" } }), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    const sale = { ...f.trade, mode: "live", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "100000000" };
+    assert.ok((await worker.preview(f.scope, { mode: "live", intent: sale })).quote, "a sale is still previewed");
+    assert.equal(unpublished(), 1, "once a minute per process, however often it is read");
+    assert.match(lines[0]!, /open its Solana page/);
+    f.clock.now += 60_000; await worker.status(f.scope);
+    assert.equal(unpublished(), 2, "said again after a minute");
+    // The web serves its first Solana request, on the same settings: the worker's very next check lets buys through.
+    f.clock.now += 1;
+    assert.deepEqual((await f.runtime({ env: f.env, log: () => {} }).status(f.scope)).live.blockers, []);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    f.clock.now += 60_000; await worker.status(f.scope);
+    assert.equal(unpublished(), 2, "nothing more to say");
+    assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });
 

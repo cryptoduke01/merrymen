@@ -504,14 +504,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    *   own now: the worker's clock runs ahead, which must hold buys rather than skip the check). A worker whose heartbeat is
    *   current while its digest is missing or older (one deployed from code that publishes none, or whose publish keeps
    *   failing) runs settings the web cannot see: that counts as differing too, so the web never takes it as agreement;
-   * - the worker judges the web's once the web published it after this worker started (one from before may predate the very
-   *   change this worker was deployed with). Until the web serves a Solana request after its own redeploy, the worker cannot
-   *   know of it: the runbook deploys every change to the worker first, then the web ("Turning Solana on", step 4), so the
-   *   worker runs the new settings at once and the web holds buys until it does too.
+   * - the worker judges the web's latest digest whatever its age, and only one equal to its own lets its buys through: the web
+   *   has no heartbeat, so an old digest cannot be told from a web still running what it published then. A missing one (a
+   *   fresh deployment, before the web served any Solana request) holds them too, as the web holds a worker it cannot check.
+   *   The web publishes only when it serves a Solana request, so after any change the worker's buys wait for the first one on
+   *   the redeployed web (the runbook opens the Solana page then: "Turning Solana on"). A worker restarted with the settings
+   *   the web runs is never held; one restarted with new settings (a tenant re-added, caps raised) is held until the web runs
+   *   them too, so it never buys under settings the web does not run, however long ago the web last published.
    * While they differ every live buy is held, here and there: status says so as a buys-only blocker, trade and preview refuse
    * buys as configuration, and the operator is told with an [alert] at most once a minute. Exits, revoke and withdraw never ask.
    */
-  const service = options.service ?? "web", otherService = service === "web" ? "worker" : "web", startedAtMs = now();
+  const service = options.service ?? "web", otherService = service === "web" ? "worker" : "web";
   let rolloutPublished: { fingerprint: string; atMs: number } | undefined, rolloutDiffersAlertAtMs: number | undefined;
   /** `everyTime`: written whatever was published last (the worker's heartbeat), not at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS. */
   async function publishRollout(db: Db, everyTime = false): Promise<void> {
@@ -526,23 +529,34 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     await publishRollout(db);
     const row = await db.prepare("SELECT fingerprint,seen_at_ms FROM solana_runtime_live_rollout_seen WHERE service=?").get(otherService) as
       { fingerprint: string; seen_at_ms: number | string } | undefined;
-    // The worker stamps both rows with its own clock. One stamped after this process's now (the worker's clock runs ahead)
-    // counts as current, never as missing: a check that holds buys fails closed on clock skew, not open.
-    const at = now(), recent = (ms: number) => at - ms < SOLANA_WORKER_ONLINE_MS;
-    const current = !!row && (otherService === "worker" ? recent(Number(row.seen_at_ms)) : Number(row.seen_at_ms) >= startedAtMs);
-    // The web, of a worker whose heartbeat is current but whose digest is not: running settings nobody can compare.
-    let unseen = false;
-    if (!current && otherService === "worker") {
-      const beat = await db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
-      unseen = !!beat && recent(Number(beat.last_seen_at_ms));
-    }
-    if (!unseen && (!current || row!.fingerprint === solanaLiveRolloutFingerprint(env))) return false;
+    const at = now(), mine = solanaLiveRolloutFingerprint(env);
+    // Why buys are held, or null when the settings match (or there is no running worker to compare with).
+    let held: "differs" | "worker-unseen" | "web-unpublished" | null;
+    if (otherService === "worker") {
+      // The worker stamps both rows with its own clock. One stamped after this process's now (the worker's clock runs ahead)
+      // counts as current, never as missing: a check that holds buys fails closed on clock skew, not open.
+      const recent = (ms: number) => at - ms < SOLANA_WORKER_ONLINE_MS;
+      if (row && recent(Number(row.seen_at_ms))) held = row.fingerprint === mine ? null : "differs";
+      else {
+        // A worker whose heartbeat is current but whose digest is not: running settings nobody can compare.
+        const beat = await db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string } | undefined;
+        held = beat && recent(Number(beat.last_seen_at_ms)) ? "worker-unseen" : null;
+      }
+    } else held = !row ? "web-unpublished" : row.fingerprint === mine ? null : "differs";
+    if (!held) return false;
     if (rolloutDiffersAlertAtMs === undefined || at < rolloutDiffersAlertAtMs || at - rolloutDiffersAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
       rolloutDiffersAlertAtMs = at;
       try {
-        log(unseen ? "[alert] solana-live-rollout differs: the Solana worker is running but has not published its MERRYMEN_SOLANA_LIVE_TENANTS and "
+        log(held === "worker-unseen" ? "[alert] solana-live-rollout differs: the Solana worker is running but has not published its MERRYMEN_SOLANA_LIVE_TENANTS and "
           + "MERRYMEN_SOLANA_LIVE_MAX_* settings for over 90 s (code that publishes none, or a failing publish), so the web cannot check them; no live "
           + "Solana buy is admitted until it does (exits, revoke and withdraw continue)"
+          : held === "web-unpublished" ? "[alert] solana-live-rollout differs: the web has not published its MERRYMEN_SOLANA_LIVE_TENANTS and "
+          + "MERRYMEN_SOLANA_LIVE_MAX_* settings yet (it does when it serves Solana status, a preview or a trade), so the Solana worker cannot check them; "
+          + "the worker admits no live Solana buy until it does: once the web runs the same settings, open its Solana page (exits, revoke and withdraw continue)"
+          : service === "worker" ? "[alert] solana-live-rollout differs: the web last published different MERRYMEN_SOLANA_LIVE_TENANTS or "
+          + "MERRYMEN_SOLANA_LIVE_MAX_* settings from the Solana worker's (one was redeployed without the other, or the web has not served a Solana request "
+          + "since it was); the worker admits no live Solana buy until both run the same values and the web has published them: open its Solana page "
+          + "(exits, revoke and withdraw continue)"
           : "[alert] solana-live-rollout differs: the web and the Solana worker run different MERRYMEN_SOLANA_LIVE_TENANTS or MERRYMEN_SOLANA_LIVE_MAX_* "
           + "settings; no live Solana buy is admitted until both are deployed with the same values (exits, revoke and withdraw continue)");
       } catch { /* Logging never changes an outcome. */ }

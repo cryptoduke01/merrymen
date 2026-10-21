@@ -841,23 +841,33 @@ about half the USDG cap). Withdraw is never limited.
    Status should show the vault program verified and the fee payer funded.
 3. **The canary tenant.** Set `MERRYMEN_SOLANA_LIVE_TENANTS=0x<canary>` on web
    and worker, with the caps at the smallest amounts the canary needs, and
-   deploy both. Run the canary checks in the release gates: a small funded
-   trade, restart and outage, full exit, withdraw and revoke, expiry.
+   deploy both, the worker first, then the web, then open the Solana page: the
+   worker buys nothing live until the web has published the same settings,
+   which it does when it serves a Solana request (until then the worker says
+   `[alert] solana-live-rollout differs: the web has not published …`, or
+   `… the web last published different …`). Run the canary checks in the
+   release gates: a small funded trade, restart and outage, full exit, withdraw
+   and revoke, expiry.
 4. **Widen.** Add tenants to the list, a few at a time, and raise the caps only
    as an owner decision. Every change to the list or the caps goes on web and
-   worker, **the Solana worker first, then the web**, each applying it only
-   once redeployed. The worker restarts with the new settings and judges only a
-   web digest published after it started, so it applies them at once; the web,
-   still on the old ones, sees the worker's new digest and holds every live
-   buy, for every tenant, until it is deployed too (above). So taking tenants
-   off the list or lowering the caps needs no hold: once the worker has
-   published the new ones (its first tick), no buy is made under the old ones,
-   and paper, sales, revoke and withdrawals carry on throughout. Once both are
-   deployed, check
-   status shows no `[alert] solana-live-rollout differs`; those taken off are
-   exits-only from then on. Deployed the other way round, the worker would
-   keep buying under its old settings until the web next serves a Solana
-   request (an owner opening the page). For an incident, hold trading: `npm
+   worker, **the Solana worker first, then the web, then open the Solana
+   page**, each service applying it only once redeployed. The worker restarts
+   with the new settings and compares them with the web's latest digest,
+   whatever its age: while they differ it holds every live buy, so it never
+   buys under settings the web does not run (a tenant re-added, caps raised).
+   The web, still on the old ones, sees the worker's new digest and holds every
+   live buy, for every tenant, until it is deployed too (above). Once deployed,
+   the web publishes the new settings when it serves a Solana request (the page
+   opened, by an owner or by you), and both buy again. So any change, taking
+   tenants off or adding them, lowering or raising the caps, needs no hold: once
+   the worker has published the new ones (its first tick), no buy is made under
+   the old ones, and paper, sales, revoke and withdrawals carry on throughout.
+   Once both are deployed and the page opened, check no
+   `[alert] solana-live-rollout differs` follows; those taken off are
+   exits-only from then on. A worker restarted with unchanged settings is not
+   held. Deployed the other way round, the worker would keep buying under its
+   old settings until the web next serves a Solana request (an owner opening
+   the page). For an incident, hold trading: `npm
    run solana:hold -- set all --reason "…"` refuses every new trade for
    everyone, paper and live, buys and sales alike (revoke, withdrawals and
    receipt recovery continue), and `set 0x<tenant>` holds one tenant the same
