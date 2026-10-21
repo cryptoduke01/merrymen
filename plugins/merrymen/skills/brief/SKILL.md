@@ -1,0 +1,19 @@
+---
+name: brief
+description: Brief the owner on what needs them across their Merrymen agents — a morning brief of everything open, or a quiet check-in that speaks up only when something new needs them. Use for "anything I need to do for my Merryman?", a morning or daily brief, or when checking on the owner's agents on a schedule or on your own (Claude Duet, a scheduled task, a loop).
+argument-hint: "[morning|check] [agent id]"
+---
+
+Brief the owner with the Merrymen tool that ends in `get_attention`. "$ARGUMENTS" may say `morning` or `check`, and may name an agent id.
+
+1. Call `get_attention`, with the agent from "$ARGUMENTS" if one is named. On a check-in, pass `seen_keys`: the item keys you already told the owner about, from earlier briefs or check-ins you remember.
+2. Decide whether to speak.
+   - **Morning brief** (`morning`, the owner asked, or your first look of their day): every open item, most severe first, including ones reported before. If there are none, say in one line that nothing needs them.
+   - **Check-in** (`check`, or you are checking on your own): speak only if an `act_now` or `today` item is new (`new_counts` says how many). When you reported something earlier and its key is now in `resolved_keys`, say in a few words that it is sorted. Items marked fyi wait for the morning brief. If nothing is new, say nothing at all.
+3. Give each item at most two lines: the agent's name (`agent_name`), the title, then `what_to_do` and the link. When `owner_can_fix` is false, say there is nothing for them to do and Merrymen is the one to fix it.
+4. Remember the keys of the items still open after this call. They are the `seen_keys` for the next check-in.
+5. If `not_checked` names something, mention it once: this connection cannot see it, and the owner can grant it by typing `/mcp`, choosing `plugin:merrymen:merrymen` and authenticating again.
+
+Bring the link; do not act on the item. Renewing a trading permission, funding the agent and approving a proposal happen in Merrymen, signed in as the owner and, for a permission, with their own wallet. Never suggest raising a signed limit, the daily cap or the drawdown breaker to get the agent trading again: those are the owner's own protections doing their job. A proposal waiting for approval is not a trade.
+
+If Merrymen tools are available but `get_attention` is not, this connection was made without the permission "See your agent's status and settings", or the server is older: tell the owner to type `/mcp`, choose `plugin:merrymen:merrymen`, authenticate again and tick it under "Change what … can do". If no Merrymen tools are available at all, follow `/merrymen:connect` instead of guessing.

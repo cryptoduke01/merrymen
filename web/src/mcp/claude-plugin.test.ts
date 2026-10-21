@@ -59,7 +59,7 @@ function schemaKeys(schema: unknown, into = new Set<string>(), depth = 0): Set<s
 
 test("every skill has a name matching its folder and a description, and names only real tools and their real fields", () => {
   const tools = new Map(ALL_TOOLS.map((t) => [t.name, t]));
-  assert.deepEqual(skills, ["connect", "portfolio", "status", "token", "week", "why"]);
+  assert.deepEqual(skills, ["brief", "connect", "portfolio", "status", "token", "week", "why"]);
   for (const skill of skills) {
     const text = read(`${PLUGIN}skills/${skill}/SKILL.md`).replace(/\r\n/g, "\n");
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
@@ -91,7 +91,7 @@ test("every skill has a name matching its folder and a description, and names on
  * run is fingerprinted here, and changing it fails until `version` is bumped.
  * (The README is left out: Claude Code does not show it.)
  */
-const PLUGIN_RELEASE = { version: "1.1.0", sha256: "8d25dbfc1c53144242e5f0acce45516b275ee8e21d3ec24b48c6195a82f42f12" };
+const PLUGIN_RELEASE = { version: "1.2.0", sha256: "7028689a53c8f432b19c226a107b8a84162206f11a4774adf373fc4582033639" };
 
 function pluginFingerprint(): string {
   const files: string[] = [".mcp.json"];
