@@ -38,7 +38,7 @@ const attention = ATTENTION_TOOLS.find((t) => t.name === "get_attention") as unk
 const draftPost = PROPOSAL_TOOLS.find((t) => t.name === "draft_post") as unknown as ToolDef;
 
 interface Item { key: string; severity: string; kind: string; agent: string | null; title: string; detail: string; owner_can_fix: boolean; what_to_do: string | null; link: string | null; started_at: string | null; ends_at: string | null; new: boolean }
-interface Answer { items: Item[]; counts: Record<string, number>; new_counts: Record<string, number>; resolved_keys: string[]; agents_checked: string[]; not_checked: Array<{ part: string; why: string }> }
+interface Answer { items: Item[]; counts: Record<string, number>; new_counts: Record<string, number>; resolved_keys: string[]; agents_checked: string[]; not_checked: Array<{ part: string; why: string; scope: string | null }> }
 
 async function setup(o: { agentA?: Partial<OwnedAgent>; scopes?: string[] } = {}) {
   const d = await makeTestDb();
@@ -91,7 +91,9 @@ test("a healthy agent needs nothing, and the parts this connection cannot see ar
   assert.deepEqual(r.items, []);
   assert.deepEqual(r.counts, { act_now: 0, today: 0, fyi: 0 });
   assert.deepEqual(r.agents_checked, [SLUG_A]);
-  assert.deepEqual(r.not_checked.map((n) => n.part), ["trade proposals", "settings proposals and agent setup drafts", "post drafts", "alert deliveries"]);
+  assert.deepEqual(r.not_checked.map((n) => [n.part, n.scope]), [
+    ["trade proposals", "trade:propose"], ["settings proposals and agent setup drafts", "drafts:write"], ["post drafts", "social:write"], ["alert deliveries", "notifications:manage"],
+  ]);
 });
 
 test("permission expiry rises through fyi, today and act_now, each a new key, and an old expiry quietens to fyi", async () => {
@@ -451,7 +453,7 @@ test("a breaker hidden behind more newer warnings than one read takes is not rep
   const r = await ask({ seen_keys: [`breaker:${SLUG_A}:on`] });
   assert.deepEqual(r.items.filter((i) => i.kind === "breaker"), [], "out of the page");
   assert.deepEqual(r.resolved_keys, [], "but its absence was not established");
-  assert.ok(r.not_checked.some((n) => n.part === `older warnings of agent ${SLUG_A}`));
+  assert.ok(r.not_checked.some((n) => n.part === `older warnings of agent ${SLUG_A}` && n.scope === null), "no scope grants a longer read");
 });
 
 test("another owner's agent never appears, and asking for it by id is not found", async () => {
@@ -472,7 +474,7 @@ test("the connector-directory listing has the tool too, and says it cannot see p
   agentRow(d, ACCOUNT_A, { blocker: "no-gas" });
   const r = await ask({}, (await directory()).principal);
   assert.equal(only(r, "live-blocker").severity, "act_now");
-  assert.deepEqual(r.not_checked, [{ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen." }]);
+  assert.deepEqual(r.not_checked, [{ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen.", scope: null }]);
 });
 
 test("runStart walks back while sightings stay within the gap, and says unknown when the read could have cut the run off", () => {

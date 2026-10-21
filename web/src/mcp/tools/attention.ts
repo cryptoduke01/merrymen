@@ -70,7 +70,11 @@ const getAttention = defineTool({
     resolved_keys: z.array(z.string()).describe("Keys from seen_keys whose condition no longer holds: renewed, funded, recovered, approved or lapsed. A key replaced by a more severe one for the same condition is not resolved"),
     severity_meaning: z.object({ act_now: z.string(), today: z.string(), fyi: z.string() }),
     agents_checked: z.array(z.string()),
-    not_checked: z.array(z.object({ part: z.string(), why: z.string() })).describe("What this read could not look at, and why; an absent item there is unknown, not fine"),
+    not_checked: z.array(z.object({
+      part: z.string(),
+      why: z.string(),
+      scope: z.string().nullable().describe("The scope that would let this connection see it, or null when no scope can (a read that was cut, the directory listing)"),
+    })).describe("What this read could not look at, and why; an absent item there is unknown, not fine"),
     observed_at: z.string(),
   }),
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -83,8 +87,8 @@ const getAttention = defineTool({
     const agents = ref !== undefined ? [await ctx.agent(ref)] : await ctx.agents();
     const slugs = new Set(agents.map((a) => a.slug));
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
-    const notChecked: Array<{ part: string; why: string }> = [];
-    if (!agents.length) notChecked.push({ part: "agents", why: "No agent is shared with this connection." });
+    const notChecked: Array<{ part: string; why: string; scope: string | null }> = [];
+    if (!agents.length) notChecked.push({ part: "agents", why: "No agent is shared with this connection.", scope: null });
 
     const names = new Map<string, string | null>();
     const items: AttentionItem[] = [];
@@ -96,7 +100,7 @@ const getAttention = defineTool({
         items.push(...r.items);
         if (r.eventsCut) {
           eventsCut.add(a.slug);
-          notChecked.push({ part: `older warnings of agent ${a.slug}`, why: "More warnings and errors were recorded in the last day than one read takes; only the newest were read, so an older breaker, provider or arm-failure sighting may be missing." });
+          notChecked.push({ part: `older warnings of agent ${a.slug}`, why: "More warnings and errors were recorded in the last day than one read takes; only the newest were read, so an older breaker, provider or arm-failure sighting may be missing.", scope: null });
         }
       }
     });
@@ -122,10 +126,10 @@ const getAttention = defineTool({
       items.push(...proposalItems(waiting));
     }
     if ((ctx.principal.profile ?? "full") === "directory") {
-      notChecked.push({ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen." });
+      notChecked.push({ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen.", scope: null });
     } else {
       for (const s of PROPOSAL_SCOPES) {
-        if (!hasCapability(ctx.principal, s.capability)) notChecked.push({ part: s.what, why: `Seeing them needs the ${scopeFor(s.capability)} scope.` });
+        if (!hasCapability(ctx.principal, s.capability)) notChecked.push({ part: s.what, why: `Seeing them needs the ${scopeFor(s.capability)} scope.`, scope: scopeFor(s.capability) });
       }
     }
 
@@ -152,7 +156,7 @@ const getAttention = defineTool({
         items.push(...deliveryItems({ count, first: Number(dead.first), lastErrorCode: last?.code ?? null }, links, ref !== undefined ? agents[0]!.slug : null));
       }
     } else {
-      notChecked.push({ part: "alert deliveries", why: "Seeing whether alerts reached Telegram needs the notifications:manage scope." });
+      notChecked.push({ part: "alert deliveries", why: "Seeing whether alerts reached Telegram needs the notifications:manage scope.", scope: "notifications:manage" });
     }
 
     const seen = new Set(seen_keys ?? []);
