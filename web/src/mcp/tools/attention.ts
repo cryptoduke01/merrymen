@@ -105,7 +105,12 @@ const getAttention = defineTool({
       }
       items.push(...proposalItems(waiting));
     } else {
-      notChecked.push({ part: "proposals", why: "Seeing proposals needs one of the trade:propose, drafts:write or social:write scopes." });
+      notChecked.push({
+        part: "proposals",
+        why: (ctx.principal.profile ?? "full") === "directory"
+          ? "The connector-directory listing never sees proposals; they are listed in Merrymen."
+          : "Seeing proposals needs one of the trade:propose, drafts:write or social:write scopes.",
+      });
     }
 
     // Alert messages to the owner's Telegram that died in the last day.

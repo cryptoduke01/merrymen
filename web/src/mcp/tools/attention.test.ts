@@ -15,6 +15,7 @@ import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
 import { resetMetricsForTest } from "../observe";
 import { ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, errorOf, installFixtures, makeDeps, makeTestDb, type TestDb } from "../testing";
+import { toolInProfile } from "../server";
 import { runTool, type ToolDef } from "../tool";
 import { ATTENTION_TOOLS } from "./attention";
 import { PROPOSAL_TOOLS } from "./proposals";
@@ -51,12 +52,13 @@ async function setup(o: { agentA?: Partial<OwnedAgent>; scopes?: string[] } = {}
   restore = installFixtures(d, { directory, settings: { [OWNER_A]: { tickSeconds: 240 }, [OWNER_B]: { tickSeconds: 240 } } });
   const a = await connectAs(deps, OWNER_A, o.scopes ? { scopes: o.scopes } : {});
   const b = await connectAs(deps, OWNER_B);
+  const directory_ = () => connectAs(deps, OWNER_A, { profile: "directory", scopes: ["agents:read", "notifications:manage"] });
   const ask = async (args: Record<string, unknown> = {}, p: Principal = a.principal, at = NOW) => {
     const r = await runTool(attention, args, p, "trace-test", { now: () => at });
     assert.equal(r.isError, undefined, r.content[0]?.text);
     return r.structuredContent as unknown as Answer;
   };
-  return { d, pa: a.principal, pb: b.principal, ask };
+  return { d, pa: a.principal, pb: b.principal, ask, directory: directory_ };
 }
 
 function agentRow(d: TestDb, account: string, o: { status?: string; mode?: string; beat?: number; blocker?: string | null } = {}) {
@@ -266,6 +268,15 @@ test("another owner's agent never appears, and asking for it by id is not found"
   assert.ok(forB.items.length >= 2 && forB.items.every((i) => i.agent === SLUG_B));
   const r = await runTool(attention, { agent: SLUG_B }, (await setup()).pa, "trace-test", { now: () => NOW });
   assert.equal(errorOf(r).code, "not_found");
+});
+
+test("the connector-directory listing has the tool too, and says it cannot see proposals rather than asking for a scope it can never hold", async () => {
+  assert.ok(toolInProfile(attention, "directory"));
+  const { d, ask, directory } = await setup();
+  agentRow(d, ACCOUNT_A, { blocker: "no-gas" });
+  const r = await ask({}, (await directory()).principal);
+  assert.equal(only(r, "live-blocker").severity, "act_now");
+  assert.deepEqual(r.not_checked, [{ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen." }]);
 });
 
 test("runStart walks back while sightings stay within the gap, and says unknown when the read could have cut the run off", () => {
