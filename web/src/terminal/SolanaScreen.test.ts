@@ -16,7 +16,7 @@ import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-comm
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
-import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps } from "../lib/solana-live-caps";
 
 const OWNER = "So11111111111111111111111111111111111111112";
@@ -2597,3 +2597,26 @@ test("an account that went live and later chose paper keeps its live switch off 
   assert.equal(!!liveSwitch(), false);
 });
 
+test("the deposit address is offered only while the account may buy: exits-only off the list, or while the services' settings differ, it is not, and the page says why", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
+  const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
+  Object.assign(state.runtime.live, { session: OWNER, ready: true, canExit: true, blockers: [], vault, cashTokenAccount: await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM) });
+  const mount = async () => {
+    await ui.remount(React.createElement(SolanaScreen));
+    // Address derivation is asynchronous (WebCrypto); let it settle.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  };
+  const paused = "Buying is paused for this account, so no deposit address is shown";
+  await mount();
+  assert.match(ui.container.textContent!, /Fund the Solana vault/); assert.ok(!ui.container.textContent!.includes(paused));
+  // Taken off the list after going live: exits-only, so no deposit address, and the page says why.
+  runtime.liveAccess = access(false); Object.assign(state.runtime.live, { ready: false, canExit: true, blockers: [SOLANA_LIVE_PAUSED] });
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault")); assert.ok(ui.container.textContent!.includes(paused));
+  // On the list while the web and the worker run different settings: buying waits, and so does the deposit address.
+  runtime.liveAccess = access(true); Object.assign(state.runtime.live, { blockers: [SOLANA_LIVE_ROLLOUT_DIFFERS] });
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault")); assert.ok(ui.container.textContent!.includes(paused));
+});
