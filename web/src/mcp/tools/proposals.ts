@@ -48,7 +48,8 @@ const NOTE = z.string().max(280).refine(noControls, NO_CONTROLS);
 const IDEMPOTENCY = z.string().regex(/^[A-Za-z0-9_-]{8,128}$/, "8-128 letters, digits, _ or -")
   .describe("A key you choose for this request. Resending the same key returns the same proposal instead of creating another.");
 
-function approvalUrl(id: string): string {
+/** The Merrymen page where the owner approves or declines one proposal. */
+export function approvalUrl(id: string): string {
   return `${mcpConfig().issuer}/connect/approve/${id}`;
 }
 
