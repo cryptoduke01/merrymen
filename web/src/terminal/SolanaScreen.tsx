@@ -698,7 +698,7 @@ function ConnectedSolana() {
           </>}
         </div>
         {mode === "live" && liveCaps && <p>Live limits on this platform are {solanaLiveCapsText(liveCaps)}.</p>}
-        {mode === "live" && <p>Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits: a day of buys at the USDG limit leaves no room to sell until it passes. Withdrawing is never limited.</p>}
+        {mode === "live" && <p>Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits. So a buy is refused once it would leave too little of them to sell your whole SOL position within the same 24 hours: a day&apos;s buys stop at about half the USDG limit. Withdrawing is never limited.</p>}
         {mode === "live" && <p>Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller. Set at least 1 USDG per trade, and SOL sold per trade worth at least 1 USDG: registering checks it against the independent SOL price.</p>}
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
         <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>

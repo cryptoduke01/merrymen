@@ -11,15 +11,21 @@ import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
-import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED,
-  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes, solanaPendingOwnerTransactions, SolanaTradingStoreError,
-  type SolanaAccountScope } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE,
+  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExitReserveBuyRoom, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes,
+  solanaPendingOwnerTransactions, solanaRollingLimitUse, SolanaTradingStoreError, type SolanaAccountScope } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
   cashRaw: string; wsolRaw: string; solValueUsdgRaw: string; limits: SolanaPaperLimits;
   strategy: SolanaStrategy; mode: "paper" | "live"; revision: number; nowMs: number;
   /** The account's next autonomous attempt index (solanaAutonomousSchedule): each attempt has its own request ID. */
   attempt: number;
+  /**
+   * Live only: the largest buy that keeps room to sell the whole position inside the rolling window (solanaExitReserveBuyRoom,
+   * EXITS KEEP ROOM IN THE ROLLING LIMITS in solana-trading-store.ts). A buy is sized below it, and none is planned under the live
+   * minimum. Absent: not bounded here (paper; admission still checks it).
+   */
+  buyRoomUsdgRaw?: string;
 }
 /** Integer-only sizing against an executable full-position exit quote. */
 export function planSolanaRebalance(input: SolanaRebalanceInput) {
@@ -35,8 +41,8 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   const deviation = delta < 0n ? -delta : delta;
   if (deviation * 10_000n < equity * BigInt(strategy.rebalanceBps) || delta === 0n) return null;
   const notional = [deviation, BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
-  const buying = delta > 0n;
-  let amount = buying ? (notional < cash ? notional : cash) : held * notional / value;
+  const buying = delta > 0n, room = input.buyRoomUsdgRaw === undefined ? null : parseSolanaRawAmount(input.buyRoomUsdgRaw, true);
+  let amount = buying ? [notional, cash, ...(room === null ? [] : [room])].reduce((a, b) => a < b ? a : b) : held * notional / value;
   // A sell never asks for more WSOL input than the owner signed for one trade.
   if (!buying && limits.perTradeWsol !== undefined && amount > BigInt(limits.perTradeWsol)) amount = BigInt(limits.perTradeWsol);
   if (amount === 0n) return null;
@@ -240,7 +246,7 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         account, side, minimumUsdgRaw: SOLANA_LIVE_MIN_TRADE_USDG_RAW.toString(), intervalSeconds })} — the owner's strategy trade size, USDG per trade and SOL `
       + "sold per trade must each be worth at least 1 USDG (docs/solana-integration.md); a small vault's rebalance stays below it until the band widens");
   };
-  const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
+  const toleranceBps = options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, headroom = BigInt(10_000 - toleranceBps);
   // When each tenant's strategy last found nothing to do (in band), or admission refused it
   // because expired attempts used up its daily operations, by settings revision.
   // Only provider load rides on this: admission spacing is durable in the store.
@@ -329,7 +335,17 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             else if (row.requested_mode === "paper" || await options.runtime.solMarkDust?.(wsolRaw)) wsolRaw = "0";
             else throw new SolanaMarketError("invalid-quote");
           }
-          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
+          // A live buy keeps room to sell the whole position inside the rolling window (EXITS KEEP ROOM...): sized below it here, so
+          // no route is built for a buy assessRisk would refuse. The mark is Jupiter's guaranteed output, which may sit up to the
+          // tolerance below the independent price the check values the position at.
+          let buyRoomUsdgRaw: string | undefined;
+          if (row.requested_mode === "live") {
+            const used = await solanaRollingLimitUse(options.db, scope, now());
+            buyRoomUsdgRaw = solanaExitReserveBuyRoom({ usedUsdgRaw: used.notionalRaw, dailyUsdgRaw: BigInt(limits.dailyUsdg),
+              positionValueUsdgRaw: BigInt(solValueUsdgRaw) * 10_000n / headroom, toleranceBps }).toString();
+          }
+          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt,
+            ...(buyRoomUsdgRaw === undefined ? {} : { buyRoomUsdgRaw }) });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
           if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
           if (!intent) { said.delete(`below-minimum:${solanaAccountRef(scope)}`); inBand(); continue; }
@@ -345,6 +361,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (error.message === SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) { await expiredUse(scope, limits.maxOpsPerDay, true); inBand(); continue; }
             // Worth under the live minimum at the reference: in band until the interval passes (BELOW THE LIVE MINIMUM).
             if (error.message === SOLANA_LIVE_BELOW_MINIMUM) { belowMinimum(scope, intent.inputMint === SOLANA_USDG_MINT ? "buy" : "sell", strategy.intervalSeconds); inBand(); continue; }
+            // A buy that would leave too little room to sell the position (EXITS KEEP ROOM..., refused before anything was signed or at
+            // admission): in band until the interval passes, as the window moves or the price does. Never a sale.
+            if (error.message === SOLANA_LIVE_EXIT_RESERVE) { inBand(); continue; }
             throw error;
           }
           said.delete(`below-minimum:${solanaAccountRef(scope)}`);

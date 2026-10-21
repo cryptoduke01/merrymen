@@ -30,7 +30,8 @@ import { PYTH_SOL_USD_ACCOUNT, SOLANA_PYTH_FEEDS, readSolanaReferencePrice, sola
 import { pythAccount, pythReference } from "./solana-reference-price-fixture";
 import { SolanaMarketError } from "./solana-market";
 import { SOLANA_MAINNET_GENESIS_HASH } from "./solana-rpc";
-import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStore } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, SolanaTradingStore,
+  SolanaTradingStoreError } from "./solana-trading-store";
 import { sealSecret } from "./store-crypto";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -771,11 +772,13 @@ test("one provider's Pyth price cannot lower a live trade's floor: the stricter 
     { label: "buy, fallback lies high", input: SOLANA_USDG_MINT, amount: "25000000", primary: undefined, fallback: pythAt(17_000_000_000n) },
   ];
   for (const c of cases) {
-    const f = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    // A buy needs room left to sell the position it leaves (EXITS KEEP ROOM...): 0.1 SOL held then, rather than 1 SOL (the whole day's SOL sold limit).
+    const wsol = c.input === SOLANA_USDG_MINT ? 100_000_000n : 1_000_000_000n;
+    const f = await fixture(t, { cash: 100_000_000n, wsol, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
     await assert.rejects(f.runtime({}, split(f, c.primary, c.fallback)).trade(f.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") }), /refused: risk/, c.label);
     assert.deepEqual(await f.submissions(), [], c.label); assert.equal(f.sends.length, 0, c.label);
     // The same 10%-cheap route with that price from both providers would be admitted: the honest provider's bound is what refused it.
-    const both = await fixture(t, { cash: 100_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
+    const both = await fixture(t, { cash: 100_000_000n, wsol, mark: "fair", build: { kind: "factor", num: 90n, den: 100n } });
     const lie = (c.primary ?? c.fallback)!;
     const placed = await both.runtime({}, split(both, lie, lie)).trade(both.scope, { mode: "live", intent: manual(c.input, c.amount, "lying-pyth") });
     assert.ok("status" in placed && placed.status === "pending", c.label);
@@ -1035,8 +1038,8 @@ const refusedAs = (message: string, code: SolanaAppRuntimeError["code"]) => (err
 const SWAP_BUILD = "https://api.jup.ag/swap/v1/swap-instructions";
 
 test("live rollout: the autonomous worker places no live buy for a tenant off MERRYMEN_SOLANA_LIVE_TENANTS, nor does a manual buy, before any route is built; on the list the same tick buys", async t => {
-  // 1 SOL ($150) and 50 USDG; the strategy wants 90% SOL, so it buys.
-  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 },
+  // 0.1 SOL ($15) and 50 USDG; the strategy wants 90% SOL, so it buys (and the position it leaves can still be sold today).
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 100_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 },
     env: { MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
   assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "manual-off-list-buy") }), refusedAs(SOLANA_LIVE_PAUSED, "permission"));
@@ -1154,9 +1157,47 @@ test("a day's SOL sold limit used by sales is a status warning pointing to Withd
   assert.ok(!(await f.app.status(f.scope)).live.warnings.includes(SOLANA_STATUS_DAILY_SOL_SOLD_USED));
 });
 
+test("exits keep room: a live buy that would leave the whole position unsellable inside the rolling window is refused before anything is signed, at the highest price any provider serves; one that fits is sent", async t => {
+  // 25 USDG and 0.2 SOL per trade, 100 USDG and 1 SOL a day, $150 a SOL. 52 USDG of buys in the window; 0.15 SOL ($22.50) held.
+  const fresh = async () => {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 150_000_000n, mark: "fair", build: { kind: "fair" } });
+    for (const [i, usdg] of ["25000000", "25000000", "2000000"].entries()) await windowRow(f, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, usdg, usdg);
+    return f;
+  };
+  const exitReserve = (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE;
+  const placedAs = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => (await f.submissions()).filter(row => row.request_id === id);
+  // 25 USDG more would leave $47.50 of SOL to sell after 77 used: 77 + 48.93 > 100.
+  const f = await fresh();
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-too-much") }), exitReserve);
+  assert.deepEqual(await placedAs(f, "buy-too-much"), []); assert.equal(f.sends.length, 0, "nothing signed or sent");
+  // 12 USDG fits at $150 (64 + 35.54), but not where one provider serves $170 (64 + 40.27): the higher value is kept, and
+  // refused before anything is signed (admission, at the buy's own $150 reference, would have taken it).
+  const g = await fresh();
+  await assert.rejects(g.runtime({}, split(g, undefined, pythAt(17_000_000_000n))).trade(g.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12000000", "buy-high") }), exitReserve);
+  assert.deepEqual(await placedAs(g, "buy-high"), []); assert.equal(g.sends.length, 0);
+  const placed = await g.app.trade(g.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12000000", "buy-that-fits") });
+  assert.ok("status" in placed && placed.status === "pending"); assert.equal(g.sends.length, 1);
+  assert.equal((await placedAs(g, "buy-that-fits")).length, 1);
+});
+
+test("exits keep room: after the most buys the window admits, the worker buys nothing (no route built), a manual buy is refused, and the whole position is sold back to USDG", async t => {
+  // 75 USDG of buys in the window and 0.15 SOL ($22.50) held: 75 + 23.18 kept for its exit leaves no room for even a 1 USDG buy.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 150_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
+  for (let i = 0; i < 3; i++) await windowRow(f, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, "25000000", "25000000");
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, [], "a sale fits, and only the buy's own check knows what the position is worth");
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"], "sized below the live minimum by the room left: in band");
+  assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built for a buy that could not be admitted");
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "1000000", "one-more") }),
+    (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  assert.equal(f.sends.length, 0);
+  // The whole position, in one sale within the per-trade limits: 75 + 22.50 fits the day's 100 USDG.
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "150000000", "whole-exit") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+});
+
 test("live rollout: the worker publishes its settings with its heartbeat; once the web serves different ones (a tenant removed on the web only), its next tick holds the buy, and matching ones let it buy", async t => {
-  // 1 SOL ($150) and 50 USDG; the strategy wants 90% SOL, so it buys.
-  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
+  // 0.1 SOL ($15) and 50 USDG; the strategy wants 90% SOL, so it buys (and the position it leaves can still be sold today).
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 100_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
   const worker = f.runtime({}, undefined, () => {}, "worker");
   // The web was redeployed without this tenant; the worker was not. The owner's page reads status from the web.
   assert.deepEqual((await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: "" }, undefined, () => {}).status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED]);

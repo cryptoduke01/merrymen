@@ -10,7 +10,8 @@ import { applySolanaPaperCommit, applySolanaPaperWriteOff, solanaPaperIntentFing
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOffRecord } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import { solanaDebitWindowStart, type SolanaLiveJournal, type SolanaLiveRecord, type SolanaLiveSettlement, type SolanaSignedSubmission } from "./solana-executor";
-import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
+import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, solanaReferenceWsolValue, verifySolanaReferenceBound, type SolanaPythGeneration,
+  type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
 export class SolanaTradingStoreError extends Error {
@@ -403,23 +404,15 @@ export function solanaExpiredAttemptAllowance(env: Readonly<Record<string, strin
   if (!/^(0|[1-9][0-9]?)$/.test(value) || Number(value) > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
   return Number(value);
 }
-/** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
 /** An owner withdrawal larger than the recorded vault balance is never saved: it could not be booked once it landed. */
 export const SOLANA_WITHDRAWAL_ABOVE_BOOK = "The withdrawal exceeds the recorded vault balance, which changed since it was prepared. Prepare it again.";
+/** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
 export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.";
 /**
- * How proven-expired attempts use one account's daily operations at `nowMs`, by
- * the same rolling 24-hour window and arithmetic recordSigned admits by:
- * `counted` of the `expired` attempts count toward maxOpsPerDay (those beyond
- * the allowance), next to `operations` that landed, failed or are pending.
- * For status blockers and operator alerts; admission never reads it, and counts
- * the same rows itself under its lock.
- */
-/**
- * THE ROLLING 24-HOUR USDG AND SOL LIMITS, AS ADMISSION COUNTS THEM (recordSigned, and the status blocker below, share these).
+ * THE ROLLING 24-HOUR USDG AND SOL LIMITS, AS ADMISSION COUNTS THEM (recordSigned, the exit reserve and status share these).
  * Submissions created inside the window count until canonical failure or expiry evidence releases them, buys and sales alike:
  * the vault program charges a sale's USDG proceeds to the same per-trade and daily USDG limits as a buy's spend, and its SOL to
- * the SOL sold limits. So a day of buys at the USDG limit leaves no room to sell until it passes.
+ * the SOL sold limits. So buys must leave room for the position's exit (EXITS KEEP ROOM IN THE ROLLING LIMITS, below).
  */
 function countedInWindow<T extends { status: string }>(rows: T[]): T[] { return rows.filter(r => !["failed", "expired"].includes(r.status)); }
 /** The USDG notional of submissions that count, buys and sales alike. */
@@ -443,6 +436,63 @@ export async function solanaRollingLimitUse(db: Db, scope: SolanaAccountScope, n
   const counted = countedInWindow(rows);
   return { notionalRaw: windowNotional(counted), soldWsolRaw: windowSold(counted) };
 }
+/**
+ * EXITS KEEP ROOM IN THE ROLLING LIMITS: BUYS ARE REFUSED FIRST. Sales count
+ * against the same limits as buys (above), and the platform's live caps bound
+ * those limits, so a day of buys could otherwise leave no room to sell. A live
+ * buy is therefore admitted only while, after it, the account's whole recorded
+ * SOL position could still be sold inside the same 24-hour window at the
+ * independent SOL price: what the window already used, the buy, and the
+ * position's value plus the reference tolerance (a sale is charged at the
+ * higher of its quote and its reference value) fit the USDG per 24 hours limit,
+ * and the position fits what sales left of the SOL sold per 24 hours limit.
+ * Checked before anything is signed (the app runtime's assessRisk, at the
+ * highest price any provider serves) and again at admission (recordSigned, at
+ * the buy's own reference). It only ever refuses buys: a sale never reads it,
+ * and no limit is widened. So a day's buys stop at about half the USDG limit,
+ * and a position never grows beyond what one day's limits can sell at the
+ * price it was bought at (a later rise in the SOL price can still outgrow it;
+ * partial sales and Withdraw remain).
+ */
+export const SOLANA_LIVE_EXIT_RESERVE = "This buy was refused: it would leave too little of your 24-hour live limits to sell your whole SOL position back to USDG, "
+  + "and sales count against the same limits as buys. A smaller buy may fit; exits, revoke and withdraw still work.";
+/** The USDG a whole-position exit worth `valueUsdgRaw` at the reference must find left of the daily limit: its value plus the tolerance, rounded up. */
+export function solanaExitReserveUsdg(valueUsdgRaw: bigint, toleranceBps: number): bigint {
+  if (valueUsdgRaw < 0n || !Number.isSafeInteger(toleranceBps) || toleranceBps < 0 || toleranceBps > 10_000) refuse("Invalid Solana exit reserve.");
+  return (valueUsdgRaw * BigInt(10_000 + toleranceBps) + 9_999n) / 10_000n;
+}
+/**
+ * Whether a buy leaves the whole position after it sellable inside the window (EXITS KEEP ROOM...): `usedUsdgRaw` and
+ * `soldWsolRaw` are the window's use (solanaRollingLimitUse, or admission's own count), `positionAfterWsolRaw` the recorded
+ * position plus what the buy brings, and `positionAfterValueUsdgRaw` its value at the reference.
+ */
+export function solanaBuyKeepsExitRoom(input: { usedUsdgRaw: bigint; soldWsolRaw: bigint; buyUsdgRaw: bigint; positionAfterWsolRaw: bigint;
+  positionAfterValueUsdgRaw: bigint; dailyUsdgRaw: bigint; dailyWsolRaw: bigint; toleranceBps: number }): boolean {
+  return input.usedUsdgRaw + input.buyUsdgRaw + solanaExitReserveUsdg(input.positionAfterValueUsdgRaw, input.toleranceBps) <= input.dailyUsdgRaw
+    && input.soldWsolRaw + input.positionAfterWsolRaw <= input.dailyWsolRaw;
+}
+/**
+ * For planning only (the autonomous strategy sizes its buys by it, so it does not build a route admission would refuse): the
+ * largest buy, in USDG, that keeps the USDG room EXITS KEEP ROOM... asks for, with the position held worth `positionValueUsdgRaw`
+ * and what the buy brings valued at up to the tolerance above what it costs. Zero when none does. The SOL sold room is left to the
+ * check itself, which refuses such a buy before anything is signed.
+ */
+export function solanaExitReserveBuyRoom(input: { usedUsdgRaw: bigint; dailyUsdgRaw: bigint; positionValueUsdgRaw: bigint; toleranceBps: number }): bigint {
+  // Four base units below what is left, for the reserve's rounding up (of the position and the buy together).
+  const left = input.dailyUsdgRaw - input.usedUsdgRaw - solanaExitReserveUsdg(input.positionValueUsdgRaw, input.toleranceBps) - 4n;
+  if (left <= 0n) return 0n;
+  // b + b × (1 + t)² ≤ left, with t the tolerance: what the buy brings is reserved at its own value plus the tolerance, twice over.
+  const scale = 10_000n, grown = BigInt(10_000 + input.toleranceBps);
+  return left * scale * scale / (scale * scale + grown * grown);
+}
+/**
+ * How proven-expired attempts use one account's daily operations at `nowMs`, by
+ * the same rolling 24-hour window and arithmetic recordSigned admits by:
+ * `counted` of the `expired` attempts count toward maxOpsPerDay (those beyond
+ * the allowance), next to `operations` that landed, failed or are pending.
+ * For status blockers and operator alerts; admission never reads it, and counts
+ * the same rows itself under its lock.
+ */
 export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope, nowMs: number, allowance: number): Promise<{ expired: number; counted: number; operations: number }> {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(allowance) || allowance < 0) refuse("Invalid Solana expired-attempt query.");
   const rows = await db.prepare("SELECT status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string }>;
@@ -1097,6 +1147,15 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
           ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
         drawdownRefused = true; return false;
+      }
+      // EXITS KEEP ROOM IN THE ROLLING LIMITS: a buy that would leave the whole position after it unsellable inside this window,
+      // at this buy's own reference price, is refused (after the breaker above, which a buy in drawdown must still commit).
+      if (buying) {
+        const brought = [raw(s.quote.outAmount, false), raw(reference.referenceOut, false)].reduce((a, b) => a > b ? a : b);
+        const positionAfter = raw(book.wsolRaw) + brought;
+        if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: windowNotional(counted), soldWsolRaw: soldToday, buyUsdgRaw: notional, positionAfterWsolRaw: positionAfter,
+          positionAfterValueUsdgRaw: solanaReferenceWsolValue(positionAfter, reference.reference), dailyUsdgRaw: raw(limits.dailyUsdg, false),
+          dailyWsolRaw: sellLimits.dailyWsol, toleranceBps })) refuse(SOLANA_LIVE_EXIT_RESERVE);
       }
       this.checkAdmissionSignal();
       const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)

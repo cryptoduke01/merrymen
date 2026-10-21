@@ -33,7 +33,8 @@ import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestRefe
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, solanaBuyKeepsExitRoom, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse,
+  solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
   solanaRevokedBesideResume } from "./solana-trading-store";
@@ -114,9 +115,11 @@ function publicTrade(record: SolanaLiveRecord) {
 export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximum number of trades for the last 24 hours. Trading and automated exits resume as they leave the window.";
 /**
  * SALES COUNT AGAINST THE SAME LIMITS AS BUYS. The vault program charges a sale's USDG proceeds to the session's per-trade and
- * daily USDG limits, as it charges a buy's spend, and its SOL to the SOL sold limits; admission counts the same way. So a day
- * of buys at the USDG limit also stops sales until those buys leave the 24-hour window, and the platform's live caps
- * (MERRYMEN_SOLANA_LIVE_MAX_*), which bound those limits, bound exits too. Withdraw is never limited by either.
+ * daily USDG limits, as it charges a buy's spend, and its SOL to the SOL sold limits; admission counts the same way. Buys
+ * therefore keep room for the position's exit (EXITS KEEP ROOM IN THE ROLLING LIMITS, solana-trading-store.ts: assessRisk and
+ * admission refuse a buy that would leave too little), so the platform's live caps (MERRYMEN_SOLANA_LIVE_MAX_*), which bound
+ * those limits, stop buys before exits. Sales alone, or a rise in the SOL price, can still use a day's room; then status says
+ * so. Withdraw is never limited by either.
  * - SOLANA_STATUS_DAILY_USDG_USED, a blocker: under 1 USDG (the live minimum) is left of the USDG per 24 hours limit, so
  *   admission refuses every live trade of at least 1 USDG, buys and exits alike.
  * - SOLANA_STATUS_DAILY_SOL_SOLD_USED, a warning: the SOL sold per 24 hours limit is used, so admission refuses every sale;
@@ -1406,6 +1409,24 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
           const previous = await s.liveBook(), peak = previous ? BigInt(previous.hwmRaw) : equity;
+          // EXITS KEEP ROOM IN THE ROLLING LIMITS (solana-trading-store.ts): a buy that would leave the whole position after it
+          // unsellable inside this 24-hour window is refused before anything is signed, valued at the highest price any provider
+          // serves. Admission checks it again at the buy's own reference. Never asked of a sale.
+          if (current.inputMint === SOLANA_USDG_MINT) {
+            // Limits without SOL sell limits are refused at admission, with their own words.
+            const saved = (await s.binding()).limits;
+            let sellLimits: ReturnType<typeof requireSolanaLiveSellLimits> | null = null;
+            try { if (saved) sellLimits = requireSolanaLiveSellLimits(saved); } catch { /* Refused at admission. */ }
+            if (saved && sellLimits) {
+              const used = await solanaRollingLimitUse(s.db, s.scope, observedAtMs);
+              const brought = [BigInt(quote.outAmount), BigInt(reference.referenceOut)].reduce((a, b) => a > b ? a : b), positionAfter = held + brought;
+              const valued = views.map(view => solanaReferenceWsolValue(positionAfter, view.price)).reduce((a, b) => a > b ? a : b);
+              if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: used.notionalRaw, soldWsolRaw: used.soldWsolRaw, buyUsdgRaw: BigInt(current.amountRaw), positionAfterWsolRaw: positionAfter,
+                positionAfterValueUsdgRaw: valued, dailyUsdgRaw: BigInt(saved.dailyUsdg), dailyWsolRaw: sellLimits.dailyWsol, toleranceBps })) {
+                throw new SolanaTradingStoreError(SOLANA_LIVE_EXIT_RESERVE);
+              }
+            }
+          }
           for (const item of evidence) validateSolanaQuote(item.quote, item.intent, now());
           return { observedAtMs, slot: balances.slot, notionalUsdg: solanaReferenceNotional(current, quote.outAmount, reference).toString(),
             equityUsdg: equity.toString(), peakEquityUsdg: (peak > equity ? peak : equity).toString(), cashUsdg: balances.cashUsdg, wsolRaw: balances.wsolRaw, reference };

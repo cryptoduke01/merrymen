@@ -27,11 +27,13 @@
  * taken off the list after going live is exits-only, as Robinhood's exits-only
  * level is.
  *
- * The caps bound exits too: the vault program charges a sale's USDG proceeds
- * to the same per-trade and daily USDG limits as a buy, and its SOL to the SOL
- * sold limits, so a day of buys at the cap leaves no room to sell until it
- * passes (status says so and points to Withdraw, which no cap limits). Whether
- * they should bound buys only is an owner decision (docs/solana-integration.md).
+ * Sales count against the limits the caps bound: the vault program charges a
+ * sale's USDG proceeds to the same per-trade and daily USDG limits as a buy, and
+ * its SOL to the SOL sold limits. So buys keep room for exits: a buy is refused
+ * once it would leave too little of the rolling 24-hour limits to sell the whole
+ * position inside them (EXITS KEEP ROOM IN THE ROLLING LIMITS,
+ * solana-trading-store.ts). The caps therefore stop buys, never exits; Withdraw
+ * is never limited at all.
  *
  * Caps bound new permissions: live limits above one are refused where they are
  * saved, where the permission is prepared and where its signed bytes are

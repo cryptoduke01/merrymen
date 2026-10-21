@@ -25,7 +25,7 @@ import { pythBound } from "./solana-reference-price-fixture";
 import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
 import type { SolanaLiveBook } from "./solana-trading-store";
 import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
-import { solanaRollingLimitUse } from "./solana-trading-store";
+import { SOLANA_LIVE_EXIT_RESERVE, solanaExitReserveBuyRoom, solanaExitReserveUsdg, solanaRollingLimitUse } from "./solana-trading-store";
 import { createSolanaAppRuntime, SOLANA_LIVE_ROLLOUT_DIFFERS } from "./solana-app-runtime";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
@@ -134,8 +134,9 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal(book.cashRaw, CASH.toString()); assert.equal(book.wsolRaw, "0");
     assert.equal(book.networkFeesLamports, "0"); assert.equal(book.unresolvedFeeCount, 1); assert.equal(book.reservedUnknownFeeLamports, "10000");
     assert.equal((await f.store.pending()).length, 0); assert.equal(await f.store.recordSigned(original), false);
-    // Entire daily token allowance is available again, while the operation remains recorded.
-    await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, perTradeUsdg: "1000000", dailyUsdg: "1000000" });
+    // Entire daily token allowance is available again, while the operation remains recorded: 2.1 USDG a day fits the 1 USDG buy and
+    // the 1.03 USDG its SOL keeps for its exit (EXITS KEEP ROOM...), and would not with the expired buy's 1 USDG still counted.
+    await f.binding.settings(TENANT, OWNER, 1, "live", { ...limits, perTradeUsdg: "1000000", dailyUsdg: "2100000" });
     const next = submission("new-request"); next.risk.slot = 1001;
     assert.equal(await f.store.recordSigned(next), true); assert.equal((await f.store.history()).length, 2);
   });
@@ -693,6 +694,68 @@ test("a live trade worth under 1 USDG is refused at admission, except a sale of 
   assert.equal(await f.store.recordSigned(sale("whole", "1", "1980000", book)), true);
 });
 
+/** A buy of `usdg` raw USDG at $500/SOL (2 lamports per micro-USDG) against `book`, as the executor would sign it. */
+function buyFor(id: string, seq: string, usdg: bigint, book: { slot: number; cash: string; wsol: string }): SolanaSignedSubmission {
+  const s = submission(id, seq), out = usdg * 2n;
+  s.intent = { ...s.intent, amountRaw: usdg.toString() };
+  s.quote = { ...s.quote, inAmount: usdg.toString(), outAmount: out.toString(), minOutAmount: (out * 9_900n / 10_000n).toString() };
+  s.minOutAmount = s.quote.minOutAmount; s.quotedOutAmount = s.quote.outAmount;
+  s.risk = { ...s.risk, slot: book.slot, cashUsdg: book.cash, wsolRaw: book.wsol, notionalUsdg: usdg.toString(), reference: pythBound(s.intent, NOW) };
+  return s;
+}
+test("exits keep room in the rolling limits: a buy that would leave the whole position unsellable today is refused, smaller ones fit, and after the most buys admitted the whole position is still sold within the day", async t => {
+  // 10 USDG and 0.05 SOL per trade, 50 USDG and 0.12 SOL a day; $500 a SOL, 3% tolerance. Each fill books its guaranteed minimum.
+  const f = await fixture(t);
+  let book = { slot: 1000, cash: CASH.toString(), wsol: "0" }, seq = 0;
+  const filled = async (s: SolanaSignedSubmission) => {
+    const selling = s.intent.inputMint === SOLANA_WRAPPED_SOL_MINT, amountIn = s.intent.amountRaw, amountOut = s.minOutAmount;
+    await f.store.settle(OWNER, s.intent.requestId, s.signature, { status: "finalized", signature: s.signature, slot: 1001, feeLamports: "10000", amountIn, amountOut, finalizedAtMs: NOW + 1 });
+    book = { slot: 1001, cash: (BigInt(book.cash) + (selling ? BigInt(amountOut) : -BigInt(amountIn))).toString(),
+      wsol: (BigInt(book.wsol) + (selling ? -BigInt(amountIn) : BigInt(amountOut))).toString() };
+    seq++;
+  };
+  const buy = (id: string, usdg: bigint) => buyFor(id, String(seq), usdg, book);
+  // Two 10 USDG buys fit: 10 + 10 + 20.5 USDG kept for selling the 0.04 SOL they leave is within 50.
+  for (const id of ["buy-1", "buy-2"]) { const s = buy(id, 10_000_000n); assert.equal(await f.store.recordSigned(s), true, id); await filled(s); }
+  // A third would leave 0.0596 SOL ($29.80) to sell after 30 USDG used: 30 + 30.69 > 50. Refused, nothing reserved.
+  await assert.rejects(f.store.recordSigned(buy("buy-3", 10_000_000n)), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  assert.equal((await f.store.pending()).length, 0);
+  // The most that fits now is about 4.7 USDG; it is admitted, and then not even 1 USDG more.
+  const last = buy("buy-4", 4_700_000n); assert.equal(await f.store.recordSigned(last), true); await filled(last);
+  await assert.rejects(f.store.recordSigned(buy("buy-5", 1_000_000n)), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  // The whole position, 0.048906 SOL ($24.45), is sold back within the same day, in sales the 10 USDG per-trade limit allows.
+  const position = BigInt(book.wsol), piece = position / 3n;
+  for (const [i, amount] of [piece, piece, position - 2n * piece].entries()) {
+    const s = sale(`exit-${i}`, String(seq), amount.toString(), book);
+    assert.equal(await f.store.recordSigned(s), true, `exit ${i}`); await filled(s);
+  }
+  assert.equal(book.wsol, "0"); assert.equal((await f.store.liveBook())!.wsolRaw, "0", "the whole position was sold inside the window");
+  const used = await solanaRollingLimitUse(f.db, f.store.scope, NOW);
+  assert.ok(used.notionalRaw <= BigInt(limits.dailyUsdg) && used.soldWsolRaw <= BigInt(limits.dailyWsol));
+});
+test("exits keep room in the SOL sold limit too: a buy whose position after it is more SOL than sales left of the day's SOL sold limit is refused", async t => {
+  // 0.03 SOL a day may be sold; a 10 USDG buy brings 0.02 SOL, so the second would leave 0.04 SOL that cannot be sold today.
+  const f = await fixture(t);
+  await f.binding.settings(TENANT, OWNER, (await f.binding.get(TENANT))!.revision, "live", { ...limits, perTradeWsol: "30000000", dailyWsol: "30000000", dailyUsdg: "100000000" });
+  const first = buyFor("buy-1", "0", 10_000_000n, { slot: 1000, cash: CASH.toString(), wsol: "0" });
+  assert.equal(await f.store.recordSigned(first), true);
+  await f.store.settle(OWNER, "buy-1", first.signature, { status: "finalized", signature: first.signature, slot: 1001, feeLamports: "10000", amountIn: "10000000", amountOut: first.minOutAmount, finalizedAtMs: NOW + 1 });
+  const book = { slot: 1001, cash: "90000000", wsol: first.minOutAmount };
+  await assert.rejects(f.store.recordSigned(buyFor("buy-2", "1", 10_000_000n, book)), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  // A sale is never refused by it.
+  assert.equal(await f.store.recordSigned(sale("exit", "1", first.minOutAmount, book)), true);
+});
+test("the exit reserve's planning room: the largest buy it returns keeps room to sell the whole position, valued at up to the tolerance above its cost", () => {
+  for (const [used, daily, value] of [[0n, 100_000_000n, 0n], [52_000_000n, 100_000_000n, 22_500_000n], [10_000_000n, 25_000_000n, 3_000_000n]] as const) {
+    const room = solanaExitReserveBuyRoom({ usedUsdgRaw: used, dailyUsdgRaw: daily, positionValueUsdgRaw: value, toleranceBps: 300 });
+    const brought = (room * 10_300n + 9_999n) / 10_000n;
+    assert.equal(used + room + solanaExitReserveUsdg(value + brought, 300) <= daily, true, `${used}/${daily}/${value}`);
+    const more = room + room / 100n + 1n, broughtMore = (more * 10_300n + 9_999n) / 10_000n;
+    assert.equal(used + more + solanaExitReserveUsdg(value + broughtMore, 300) <= daily, false, "within 1% of the most that fits");
+  }
+  assert.equal(solanaExitReserveBuyRoom({ usedUsdgRaw: 75_000_000n, dailyUsdgRaw: 100_000_000n, positionValueUsdgRaw: 25_000_000n, toleranceBps: 300 }), 0n, "no room: none");
+  assert.equal(solanaExitReserveUsdg(1_000_000n, 300), 1_030_000n); assert.equal(solanaExitReserveUsdg(1n, 300), 2n, "rounded up");
+});
 test("live sells are bounded by the signed per-trade and rolling daily SOL sell limits", async t => {
   const f = await fixture(t), first = tenUsdgBuy(); await f.store.recordSigned(first);
   await f.store.settle(OWNER, first.intent.requestId, first.signature, tenUsdgFill(first));

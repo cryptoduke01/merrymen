@@ -10,7 +10,7 @@ import { boundSolanaRebalanceSell, createSolanaAgent, planSolanaRebalance } from
 import { wrapSqlite } from "./db";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { runSolanaHoldCommand } from "./solana-operator-hold";
-import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SolanaTradingStoreError } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, SolanaTradingStoreError } from "./solana-trading-store";
 import { SOLANA_LIVE_BELOW_MINIMUM } from "../../packages/core/src/solana";
 import { SOLANA_AGENT_ALERT_REPEAT_MS, SOLANA_AGENT_FEE_PAYER_CHECK_MS, SOLANA_PENDING_STUCK_MS, solanaAccountRef } from "./solana-agent";
 import { SolanaMarketError } from "./solana-market";
@@ -49,6 +49,15 @@ test("a live rebalance buy worth under the 1 USDG live minimum is in band; paper
   // The mark can be a dust quote, so a sale is planned and admission values it at the independent reference.
   const sell = planSolanaRebalance({ ...input, mode: "live", strategy: { ...strategy, tradeUsdgRaw: "500000" }, cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "100000000" })!;
   assert.equal(sell.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(sell.amountRaw, "5000000");
+});
+test("a live rebalance buy is sized below the room the exit reserve leaves, and none is planned when that room is under the live minimum; sales ignore it", () => {
+  const live = { ...input, mode: "live" as const };
+  assert.equal(planSolanaRebalance({ ...live, buyRoomUsdgRaw: "3000000" })!.amountRaw, "3000000");
+  assert.equal(planSolanaRebalance({ ...live, buyRoomUsdgRaw: "900000000" })!.amountRaw, "5000000", "the strategy size still bounds it");
+  assert.equal(planSolanaRebalance({ ...live, buyRoomUsdgRaw: "999999" }), null);
+  assert.equal(planSolanaRebalance({ ...live, buyRoomUsdgRaw: "0" }), null);
+  const sell = planSolanaRebalance({ ...live, buyRoomUsdgRaw: "0", cashRaw: "0", wsolRaw: "1000000000", solValueUsdgRaw: "100000000" })!;
+  assert.equal(sell.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(sell.amountRaw, "50000000");
 });
 test("request identity names the settings revision and the attempt, never the clock", () => {
   assert.equal(planSolanaRebalance(input)!.requestId, "rebalance-3-0");
@@ -525,6 +534,36 @@ test("a live rebalance admission refuses as below the 1 USDG minimum is tried at
   assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
   clock.now += 15_000; assert.deepEqual((await agent.tick()).map(r => r.outcome), ["unavailable"]);
   assert.equal(control.trades.length, before + 2);
+});
+
+test("a live buy refused for the exit reserve (before signing or at admission) is in band: tried again once per strategy interval, never every tick; sizing reads the window", async t => {
+  const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+  const clock = { now: NOW };
+  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+  await bindings.bind(TENANT, "did:privy:reserve", OWNER);
+  await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: NOW + 100 * 3_600_000 });
+  // 5 USDG strategy trades into a book of 100 USDG and no SOL: every rebalance is a buy.
+  await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 30 });
+  await ensureSolanaTradingSchema(db);
+  const control = { refuse: new SolanaTradingStoreError(SOLANA_LIVE_EXIT_RESERVE) as Error | null, trades: [] as Array<{ inputMint: string; amountRaw: string }>, statuses: 0 };
+  const runtime = {
+    status: async () => { control.statuses++; return { paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [], ready: true, canExit: true, blockers: [] } }; },
+    trade: async (_scope: unknown, request: { intent: { inputMint: string; amountRaw: string } }) => { control.trades.push(request.intent); if (control.refuse) throw control.refuse; return {}; },
+  } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+  const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("no SOL held, no mark"); } };
+  const agent = createSolanaAgent({ db, runtime, market, now: () => clock.now });
+  const outcomes: string[] = [];
+  for (let i = 0; i < 4; i++) { if (i) clock.now += 15_000; outcomes.push(...(await agent.tick()).map(r => r.outcome)); }
+  assert.deepEqual(outcomes, ["held", "waiting", "held", "waiting"]);
+  assert.equal(control.trades.length, 2, "once per 30 s interval");
+  assert.ok(control.trades.every(i => i.inputMint === SOLANA_USDG_MINT && i.amountRaw === "5000000"));
+  // 98.5 of the 100 USDG used in the window leaves no room for a 1 USDG buy and its exit (1 + 1.03 > 1.5): none is tried at all.
+  await db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(TENANT, OWNER, "used", "vault", "0", "sig-used", "finalized", clock.now - 1000, "98500000",
+    JSON.stringify({ intent: { requestId: "used", inputMint: SOLANA_USDG_MINT, amountRaw: "98500000" } }));
+  control.refuse = null; clock.now += 30_000;
+  assert.deepEqual((await agent.tick()).map(r => r.outcome), ["held"]);
+  assert.equal(control.trades.length, 2, "no buy planned below the live minimum");
 });
 
 test("expired attempts that count for more than half of the day's operations say a [warn]; within half, or covered by the allowance, nothing", async t => {
