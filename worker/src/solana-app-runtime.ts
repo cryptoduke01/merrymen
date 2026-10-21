@@ -498,8 +498,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * SETTINGS THAT MUST MATCH, CHECKED (solanaLiveRolloutFingerprint). The web and the Solana worker each read the list and the
    * caps from their own env, and apply a change only once redeployed: caps lowered, or a tenant removed, on the web alone would
    * leave the worker buying under the old ones. So this process publishes a digest of the settings it runs, under its service
-   * (at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS unless they changed: the worker's agent with every heartbeat, the web whenever
-   * it serves status, a preview or a trade), and judges the other service's:
+   * (the worker's agent with every heartbeat, so its digest is never older than its heartbeat; the web whenever it serves
+   * status, a preview or a trade, at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS unless they changed), and judges the other service's:
    * - the web judges the worker's while it is current (published within SOLANA_WORKER_ONLINE_MS, or stamped after the web's
    *   own now: the worker's clock runs ahead, which must hold buys rather than skip the check). A worker whose heartbeat is
    *   current while its digest is missing or older (one deployed from code that publishes none, or whose publish keeps
@@ -513,9 +513,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    */
   const service = options.service ?? "web", otherService = service === "web" ? "worker" : "web", startedAtMs = now();
   let rolloutPublished: { fingerprint: string; atMs: number } | undefined, rolloutDiffersAlertAtMs: number | undefined;
-  async function publishRollout(db: Db): Promise<void> {
+  /** `everyTime`: written whatever was published last (the worker's heartbeat), not at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS. */
+  async function publishRollout(db: Db, everyTime = false): Promise<void> {
     const fingerprint = solanaLiveRolloutFingerprint(env), at = now();
-    if (rolloutPublished?.fingerprint === fingerprint && at >= rolloutPublished.atMs && at - rolloutPublished.atMs < SOLANA_LIVE_ROLLOUT_PUBLISH_MS) return;
+    if (!everyTime && rolloutPublished?.fingerprint === fingerprint && at >= rolloutPublished.atMs && at - rolloutPublished.atMs < SOLANA_LIVE_ROLLOUT_PUBLISH_MS) return;
     await db.prepare(`INSERT INTO solana_runtime_live_rollout_seen(service,fingerprint,seen_at_ms) VALUES(?,?,?)
       ON CONFLICT(service) DO UPDATE SET fingerprint=excluded.fingerprint,seen_at_ms=excluded.seen_at_ms`).run(service, fingerprint, at);
     rolloutPublished = { fingerprint, atMs: at };
@@ -1067,11 +1068,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     /**
      * Publishes the live rollout settings this process runs (SETTINGS THAT MUST MATCH, CHECKED): the Solana worker's agent
      * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades.
+     * Written every time, never throttled: a digest older than the heartbeat beside it (one beat, a slow status read, then a
+     * stall) would be taken for a worker that publishes none, and hold every live buy with an [alert] about nothing.
      */
     async publishLiveRollout(): Promise<void> {
       const db = options.db ?? await getSolanaRuntimeDb();
       await ensureSolanaTradingSchema(db, !!env.DATABASE_URL);
-      await publishRollout(db);
+      await publishRollout(db, true);
     },
     /**
      * The shared fee payer's level for the worker's periodic check (the agent's,

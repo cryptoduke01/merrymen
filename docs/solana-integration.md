@@ -437,8 +437,9 @@ reads both from its own env, so the web and the Solana worker decide alike.
 - **Web and worker must match, and are checked.** Each service reads these
   settings from its own env and applies a change only once redeployed. Each
   publishes a digest of the list and caps it runs
-  (`solana_runtime_live_rollout_seen`; the worker with every heartbeat, the web
-  whenever it serves Solana status, a preview or a trade). The web judges the
+  (`solana_runtime_live_rollout_seen`; the worker with every heartbeat, so its
+  digest is never older than its heartbeat, and the web whenever it serves
+  Solana status, a preview or a trade, at most every 30 s). The web judges the
   worker's digest while it is under 90 s old, and counts a worker whose
   heartbeat is current but whose digest is missing or older (deployed from code
   that publishes none, or whose publish keeps failing) as differing. Both rows

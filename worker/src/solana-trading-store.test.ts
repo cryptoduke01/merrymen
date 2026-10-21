@@ -27,6 +27,7 @@ import type { SolanaLiveBook } from "./solana-trading-store";
 import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
 import { SOLANA_LIVE_EXIT_RESERVE, solanaExitReserveBuyRoom, solanaExitReserveUsdg, solanaRollingLimitUse } from "./solana-trading-store";
 import { createSolanaAppRuntime, SOLANA_LIVE_ROLLOUT_DIFFERS } from "./solana-app-runtime";
+import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
@@ -1580,11 +1581,13 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await worker.publishLiveRollout(); f.clock.value += 1; await worker.publishLiveRollout();
     const rows = async () => (await f.db.prepare("SELECT service,fingerprint,seen_at_ms FROM solana_runtime_live_rollout_seen ORDER BY service").all() as
       Array<{ service: string; fingerprint: string; seen_at_ms: number | string }>).map(r => [r.service, r.fingerprint.length, Number(r.seen_at_ms)]);
-    assert.deepEqual(await rows(), [["worker", 64, NOW]], "one row per service, written again only after the interval");
+    assert.deepEqual(await rows(), [["worker", 64, NOW + 1]], "one row per service; the worker's written again with every heartbeat");
     const buy = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "held-buy", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
       amountRaw: "1000000", slippageBps: 50 };
     await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
-    assert.deepEqual((await rows()).map(r => r[0]), ["web", "worker"]);
+    f.clock.value += 1;
+    await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
+    assert.deepEqual(await rows(), [["web", 64, NOW + 1], ["worker", 64, NOW + 1]], "the web's written again only after the interval");
     // Read back as numbers on either database: a worker silent for over 90 s is not compared (the preview goes on, to configuration).
     f.clock.value += 91_000;
     await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
@@ -1643,5 +1646,31 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal(await f.store.recordSigned(low), true);
     await f.store.settle(OWNER, "exit-2", low.signature, finalized(low, "599000"));
     assert.equal(await notional("exit-2"), low.risk.notionalUsdg);
+  });
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  const buy = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "web-buy", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
+    amountRaw: "1000000", slippageBps: 50 };
+  test(`${dialect}: the worker's digest is written with every heartbeat, so a worker on the same settings that beats late is never held as one that publishes none`, options, async t => {
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    const env = { MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, ...(dialect === "postgres" ? { DATABASE_URL: "postgres://already-connected" } : {}) };
+    const lines: string[] = [];
+    // The worker as runSolanaAgent runs it, and the web, on the same settings and database.
+    const worker = solanaWorkerRuntime({ db: f.db, env, now: () => f.clock.value, log: () => {} });
+    const web = createSolanaAppRuntime({ db: f.db, env, now: () => f.clock.value, log: line => lines.push(line) });
+    const market = { readMint: async () => assert.fail("no mint read"), quote: async () => assert.fail("no quote") } as unknown as Parameters<typeof createSolanaAgent>[0]["market"];
+    const agent = createSolanaAgent({ db: f.db, runtime: worker, market, now: () => f.clock.value, postgres: dialect === "postgres", log: () => {} });
+    // Two ticks 20 s apart: the second beats inside the publish interval.
+    assert.deepEqual(await agent.tick(), []); f.clock.value += 20_000; assert.deepEqual(await agent.tick(), []);
+    const beat = await f.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string };
+    const digest = await f.db.prepare("SELECT seen_at_ms FROM solana_runtime_live_rollout_seen WHERE service='worker'").get() as { seen_at_ms: number | string };
+    assert.equal(Number(digest.seen_at_ms), Number(beat.last_seen_at_ms), "the digest is as fresh as the heartbeat beside it");
+    // Then a slow status read keeps it from beating for 75 s: still running, and still on the web's settings. A buy preview is not held
+    // (it goes on, to configuration), and no [alert] sends the operator after a publish that does not fail.
+    f.clock.value += 75_000;
+    await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
+    assert.deepEqual(lines.filter(line => line.startsWith("[alert] solana-live-rollout differs")), []);
   });
 }
