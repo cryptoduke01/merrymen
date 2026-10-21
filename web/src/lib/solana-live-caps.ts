@@ -62,14 +62,16 @@ export function solanaLiveCapsText(caps: SolanaLiveCaps): string {
 /**
  * The owner-facing refusal of live limits above the caps, naming each cap
  * exceeded and all of them, or null when none is. `when`: where it was refused,
- * which says what was not done.
+ * which says what was not done: saving, preparing a permission, or sending one
+ * prepared before the caps were lowered.
  */
-export function solanaLiveCapRefusal(limits: SolanaLiveCappedLimits, caps: SolanaLiveCaps, when: "save" | "register"): string | null {
+export function solanaLiveCapRefusal(limits: SolanaLiveCappedLimits, caps: SolanaLiveCaps, when: "save" | "register" | "submit"): string | null {
   const over = solanaLiveCapsExceeded(limits, caps);
   if (!over.length) return null;
   const named = over.map(field => `${LABELS[field]} is above this platform's live cap of ${amount(caps, field)}`).join("; ");
   return `${named.charAt(0).toUpperCase()}${named.slice(1)}. Live limits here are ${solanaLiveCapsText(caps)}. `
-    + (when === "save" ? "Lower them and save again. Nothing was saved." : "Save live limits within them, then register. Nothing was prepared.");
+    + (when === "save" ? "Lower them and save again. Nothing was saved." : when === "register" ? "Save live limits within them, then register. Nothing was prepared."
+      : "Save live limits within them and register again. Nothing was sent.");
 }
 /** The status blocker, and a buy's refusal, while the registered permission allows more than the caps. */
 export function solanaLiveSessionAboveCaps(caps: SolanaLiveCaps): string {

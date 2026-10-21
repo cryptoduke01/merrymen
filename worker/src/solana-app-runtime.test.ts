@@ -2661,3 +2661,26 @@ test("live rollout: off the list, an account whose permission expired or was rep
     } finally { g.raw.close(); }
   }
 });
+
+test("live rollout caps: a permission prepared before the caps were lowered is neither saved nor sent once they are, naming the caps; within them it is", async () => {
+  const f = await fixture();
+  try {
+    // Prepared under the fixture's caps (50 USDG and 0.5 SOL a day) ...
+    await f.live(); f.controls.initialized = true;
+    const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+    const signedTransactionBase64 = await f.sign(setup.transactionBase64);
+    // ... and submitted after a deploy lowered them to the defaults (25 USDG and 0.25 SOL a day).
+    const lowered = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: undefined, MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: undefined } });
+    const said = solanaLiveCapRefusal(limits, SOLANA_LIVE_CAP_DEFAULTS, "submit")!;
+    assert.match(said, /^USDG per 24 hours is above this platform's live cap of 25 USDG; .* Save live limits within them and register again\. Nothing was sent\.$/);
+    await assert.rejects(lowered.submitSetup(f.scope, { signedTransactionBase64 }), rollout(said, "not-saved"));
+    assert.equal(f.controls.sends, 0, "nothing sent"); assert.equal((await new SolanaTradingStore(f.db, f.scope).setup())!.signature, undefined, "nothing saved");
+    // A cap that cannot be read refuses it as configuration, also unsaved.
+    await assert.rejects(f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "lots" }, log: () => {} }).submitSetup(f.scope, { signedTransactionBase64 }),
+      rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "not-saved"));
+    assert.equal(f.controls.sends, 0);
+    // Under the caps it was prepared within, the same bytes are saved and sent.
+    assert.equal((await f.app.submitSetup(f.scope, { signedTransactionBase64 })).status, "pending");
+    assert.equal(f.controls.sends, 1);
+  } finally { f.raw.close(); }
+});

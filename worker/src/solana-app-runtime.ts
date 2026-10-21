@@ -934,8 +934,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (setup.signature !== signature || setup.signedTransactionBase64 !== input.signedTransactionBase64) notSaved("Another owner transaction is already saved.");
       return ownerStatus(s, setup);
     }
-    // New permission bytes are saved, and sent, only for a tenant the live rollout admits (bytes already saved are answered above).
-    if (kind === "session") await requireLiveOpen(s).catch((error: unknown) => error instanceof SolanaAppRuntimeError ? notSaved(error.message) : Promise.reject(error));
+    // New permission bytes are saved, and sent, only for a tenant the live rollout admits, and only within the caps in force now:
+    // caps lowered after it was prepared refuse it here, so no session above them is ever sent (bytes already saved are answered above).
+    if (kind === "session") {
+      try {
+        await requireLiveOpen(s);
+        const capped = solanaLiveCapRefusal(setup.limits, liveCaps(), "submit");
+        if (capped) fail(capped, "permission");
+      } catch (error) { if (error instanceof SolanaAppRuntimeError) notSaved(error.message); throw error; }
+    }
     const signed: SolanaPreparedSetup = { ...setup, signature, signedTransactionBase64: input.signedTransactionBase64, status: "pending" };
     // The store refuses (expired, changed settings, a pending trade) before it writes anything.
     // Its limit check (validateSolanaAccountLimits) refuses the same way, before the

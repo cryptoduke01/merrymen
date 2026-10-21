@@ -371,8 +371,10 @@ reads both from its own env, so the web and the Solana worker decide alike.
 - **Caps.** `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG` and `…_MAX_DAILY_USDG`
   (default 10 and 25 USDG), `…_MAX_PER_TRADE_WSOL` and `…_MAX_DAILY_WSOL`
   (default 0.1 and 0.25 SOL). Live limits above a cap are refused where they are
-  saved and where a permission is prepared, naming the cap, so no signed session
-  exceeds them. A permission registered above caps lowered since may not buy:
+  saved, where a permission is prepared and again where its signed bytes are
+  submitted, naming the cap, so no permission above the caps in force when it is
+  sent reaches Solana. One registered (or already sent) before a deploy lowered
+  the caps is activated as signed, and may not buy:
   each buy is refused before it is signed, by the limits the vault holds for
   that session, and status says so; its exits keep the limits the owner signed,
   and a new permission within the caps lifts it. Paper limits are not capped.

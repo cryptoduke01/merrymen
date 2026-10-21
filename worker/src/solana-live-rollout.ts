@@ -28,9 +28,10 @@
  * level is.
  *
  * Caps bound new permissions: live limits above one are refused where they are
- * saved and where the permission is prepared, so a signed on-chain session can
- * never exceed them. A session registered above a cap lowered since keeps its
- * exits; its buys are refused before anything is signed until the owner
+ * saved, where the permission is prepared and where its signed bytes are
+ * submitted, so none above the caps in force is ever sent to Solana. A session
+ * registered (or sent) before a cap was lowered is activated as signed and keeps
+ * its exits; its buys are refused before anything is signed until the owner
  * registers a new permission within the caps.
  *
  * MALFORMED REFUSES, IT NEVER GUESSES, as for MERRYMEN_FLEET_ROLLOUT: an entry
