@@ -44,6 +44,9 @@ interface Answer { items: Item[]; counts: Record<string, number>; new_counts: Re
 
 async function setup(o: { agentA?: Partial<OwnedAgent>; scopes?: string[] } = {}) {
   const d = await makeTestDb();
+  grantExpiry.clear();
+  grantExpiry.set(o.agentA?.account ?? ACCOUNT_A, o.agentA?.expiresAt !== undefined ? o.agentA.expiresAt : 4102444800);
+  grantExpiry.set(ACCOUNT_B, NOW - HOUR);
   const directory: AgentDirectory = {
     async agentsFor(t) {
       const map: Record<string, OwnedAgent[]> = {
@@ -66,10 +69,13 @@ async function setup(o: { agentA?: Partial<OwnedAgent>; scopes?: string[] } = {}
   return { d, pa: a.principal, pb: b.principal, ask, directory: directory_ };
 }
 
-function agentRow(d: TestDb, account: string, o: { status?: string; mode?: string; beat?: number | null; blocker?: string | null } = {}) {
+/** The expiry each account's stored grant has in the current setup(): a worker that adopted it writes the same into its row. */
+const grantExpiry = new Map<string, number | null>();
+
+function agentRow(d: TestDb, account: string, o: { status?: string; mode?: string; beat?: number | null; blocker?: string | null; expires?: number } = {}) {
   d.raw.prepare(`INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, mode, beat_at, live_blocker, sponsor_gas, epoch)
-    VALUES (?, 'Alan', ?, '0x1', 4663, '{}', 1700000000, 4102444800, ?, ?, ?, ?, 0, 1)`)
-    .run(account, account === ACCOUNT_A ? OWNER_A : OWNER_B, o.status ?? "armed", o.mode ?? "live", o.beat === undefined ? NOW - 30 : o.beat, o.blocker ?? null);
+    VALUES (?, 'Alan', ?, '0x1', 4663, '{}', 1700000000, ?, ?, ?, ?, ?, 0, 1)`)
+    .run(account, account === ACCOUNT_A ? OWNER_A : OWNER_B, o.expires ?? grantExpiry.get(account) ?? 4102444800, o.status ?? "armed", o.mode ?? "live", o.beat === undefined ? NOW - 30 : o.beat, o.blocker ?? null);
 }
 
 function event(d: TestDb, account: string, message: string, at: number, level = "warn") {
@@ -246,6 +252,18 @@ test("a permission renewed on the same account after a kill or an expiry is pend
   const { d, ask } = await setup({ agentA: { grantedAt: NOW - 300 } });
   agentRow(d, ACCOUNT_A, { status: "killed", beat: NOW - 3 * HOUR });
   assert.deepEqual((await ask()).items, [], "five minutes after renewing is still start-up, and the old kill is not reported");
+});
+
+test("a renewal the old worker never took up is pending even while that worker keeps beating; once its row carries the new permission it is adopted", async () => {
+  const { d, ask } = await setup({ agentA: { grantedAt: NOW - 2 * HOUR, expiresAt: NOW + 30 * DAY } });
+  // The old worker: fresh heartbeat, its previous permission's expiry and blocker.
+  agentRow(d, ACCOUNT_A, { status: "armed", beat: NOW - 30, expires: NOW + 2 * DAY, blocker: "dead-policy" });
+  const r = await ask();
+  assert.deepEqual(r.items.map((i) => i.key), [`worker-stale:${SLUG_A}:since-${NOW - 2 * HOUR}`]);
+  assert.match(r.items[0]!.detail, /reports are for the previous permission/);
+
+  d.raw.prepare("UPDATE agents SET expires_at = ?, live_blocker = NULL").run(NOW + 30 * DAY);
+  assert.deepEqual((await ask()).items, [], "the row now carries the renewed permission: adopted and healthy");
 });
 
 test("a permission that failed to arm is an arm error at once, not a worker that never reported, however long ago the one failure event was written", async () => {

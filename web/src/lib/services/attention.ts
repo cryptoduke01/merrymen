@@ -345,12 +345,18 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   const beat = row?.beat_at ?? null;
   const signedAt = input.grantedAt ?? row?.granted_at ?? null;
   const live = input.expiresAt === null || input.expiresAt > now;
-  // A permission signed after the worker's last report (a first grant, or a
-  // renewal on the same account after a kill, an expiry or an arm error) is
-  // PENDING, as the inactivity diagnosis reads it (pendingGrant): the row's
-  // status, blocker and heartbeat all predate it, so none of them is the
-  // agent's state now. Only "has it reported since?" can be asked.
-  const pending = live && signedAt !== null && (beat === null || signedAt > beat);
+  // A permission the worker has not ADOPTED is PENDING: the row's status,
+  // blocker and heartbeat belong to an earlier one (a first grant not yet
+  // armed, or a renewal on the same account while the old worker may still be
+  // beating), so none of them is the agent's state now. Adoption is read from
+  // the worker's own row, as get_merryman_setup reads it (currentGrantSeen):
+  // a heartbeat at or after signing, in a row that carries this permission.
+  // The identity the worker writes for it is expires_at (ensureAgent updates
+  // it, with the caps and session key, on every grant; granted_at is written
+  // only with the account's first row), and the chain.
+  const adopted = row !== null && beat !== null && signedAt !== null && beat >= signedAt
+    && row.expires_at === input.expiresAt && (input.chainId === null || row.chain_id === input.chainId);
+  const pending = live && signedAt !== null && !adopted;
   // A condition the worker restates every tick is current while its newest
   // sighting is younger than two heartbeat windows (never under half an hour),
   // and a run of sightings is one occurrence while they are no further apart
@@ -408,7 +414,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     items.push({
       key: `worker-stale:${slug}:since-${signedAt}`, severity: "today", kind: "worker-stale", agent: slug,
       title: beat === null ? "The agent's worker has never reported" : "The agent's worker has not picked up the new permission",
-      detail: `The trading permission was signed at ${iso(signedAt!)}, but the agent's worker has not reported since, so it is not trading under it or running exits. Merrymen starts workers; the owner cannot fix this from here.`,
+      detail: `The trading permission was signed at ${iso(signedAt!)}, but ${beat === null ? "the agent's worker has not reported once since" : "the agent's worker has not taken it up (its reports are for the previous permission)"}, so it is not trading under it or running exits. Merrymen starts workers; the owner cannot fix this from here.`,
       owner_can_fix: false, what_to_do: null, link: null,
       started_at: signedAt! + grace, ends_at: null,
     });
