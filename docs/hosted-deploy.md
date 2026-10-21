@@ -778,6 +778,7 @@ it off; the full plan, settings and runbooks are in
   `[alert] solana-live-rollout misconfigured`,
   `[alert] solana-live-rollout differs` and
   `[alert] solana-live-rollout unchecked`. From the Solana worker only:
+  `[alert] solana-live-rollout unpublished`,
   `[alert] Solana transactions stuck pending`,
   `[alert] Solana vault below its book`,
   `[alert] Solana autonomous strategy refused: proven-expired attempts used up…`

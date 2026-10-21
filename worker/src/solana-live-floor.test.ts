@@ -1449,3 +1449,34 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     assert.equal(unchecked(), 2, "said again after a minute");
   });
 }
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  test(`${dialect}: a worker whose rollout digest publish fails keeps beating, recovering receipts and selling: only buys wait, and the operator is told`, dialectOptions(dialect), async t => {
+    const worker = (f: Awaited<ReturnType<typeof fixture>>, lines: string[]) => {
+      // The worker's runtime on a database that refuses the digest statements; the agent's own reads and heartbeat still work.
+      const runtime = createSolanaAppRuntime({ db: refusingDigest(f.db), rpc: f.rpc, market: f.market, env: f.env, now: () => f.clock.now, service: "worker", log: () => {} });
+      const calls = { status: 0 };
+      const spied = { ...runtime, status: async (...args: Parameters<typeof runtime.status>) => { calls.status++; return runtime.status(...args); } };
+      return { agent: f.agent(spied as typeof runtime, line => lines.push(line)), calls };
+    };
+    const unpublished = (lines: string[]) => lines.filter(line => line.startsWith("[alert] solana-live-rollout unpublished: ")).length;
+    // A trade awaiting its receipt: the tick still reaches receipt recovery, which reads it through status.
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 }, dialect });
+    await windowRow(f, "awaiting-receipt", "pending", 10_000, SOLANA_WRAPPED_SOL_MINT, "100000000", "15000000");
+    const lines: string[] = [], recovering = worker(f, lines);
+    assert.deepEqual((await recovering.agent.tick()).map(r => r.outcome), ["held"], "held by its own pending trade, as before");
+    assert.ok(recovering.calls.status >= 1, "receipt recovery ran");
+    const beat = await f.db.prepare("SELECT last_seen_at_ms FROM solana_runtime_worker_heartbeat WHERE worker='solana'").get() as { last_seen_at_ms: number | string };
+    assert.equal(Number(beat.last_seen_at_ms), NOW, "the heartbeat was written");
+    assert.equal(unpublished(lines), 1);
+    assert.ok(!lines.some(line => line.includes(TENANT) || line.includes("digest statement refused")), "no tenant, no database text");
+    f.clock.now += 61_000; await recovering.agent.tick();
+    assert.equal(unpublished(lines), 1, "not repeated within ten minutes");
+    // With nothing pending, the strategy's sale back to USDG is signed and sent.
+    const g = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 }, dialect });
+    const selling = worker(g, lines);
+    assert.deepEqual((await selling.agent.tick()).map(r => r.outcome), ["submitted"]);
+    const [sale] = await g.submissions();
+    assert.equal(sale!.submission.intent.inputMint, SOLANA_WRAPPED_SOL_MINT, "a sale back to USDG"); assert.equal(g.sends.length, 1);
+  });
+}

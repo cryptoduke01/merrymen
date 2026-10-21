@@ -276,8 +276,14 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         if (!force && at - beatAtMs < HEARTBEAT_REFRESH_MS) return;
         beatAtMs = at;
         await options.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(at);
-        // With the heartbeat, the live rollout settings this worker runs, which the web compares with its own.
-        await options.runtime.publishLiveRollout?.();
+        // With the heartbeat, the live rollout settings this worker runs, which the web compares with its own. Best effort: a
+        // publish that fails leaves a digest older than this heartbeat, which the web counts as differing and holds live buys
+        // for (SETTINGS THAT MUST MATCH, CHECKED, in the app runtime). It never stops receipt recovery, exits or this tick.
+        try { await options.runtime.publishLiveRollout?.(); said.delete("rollout-unpublished"); } catch {
+          say("rollout-unpublished", "[alert] solana-live-rollout unpublished: the Solana worker could not publish its MERRYMEN_SOLANA_LIVE_TENANTS and "
+            + "MERRYMEN_SOLANA_LIVE_MAX_* digest with its heartbeat (solana_runtime_live_rollout_seen), so the web holds every live Solana buy until it can; "
+            + "receipt recovery, exits, revoke and withdraw continue");
+        }
       };
       await beat(true);
       // Disabling a strategy never disables receipt recovery. Confirmation is
