@@ -378,6 +378,21 @@ reads both from its own env, so the web and the Solana worker decide alike.
   each buy is refused before it is signed, by the limits the vault holds for
   that session, and status says so; its exits keep the limits the owner signed,
   and a new permission within the caps lifts it. Paper limits are not capped.
+- **The caps bound exits too.** The vault program charges a sale's USDG
+  proceeds to the session's per-trade and daily USDG limits, as it charges a
+  buy's spend, and the SOL it sells to the SOL sold limits (`swap` in
+  `contracts/solana/programs/merrymen-vault/src/lib.rs`); admission counts the
+  same way. So the caps, which bound those limits, also bound how fast a
+  position can be sold: at the defaults at most 10 USDG and 0.1 SOL a sale, and
+  25 USDG of buys and sales together (0.25 SOL sold) in 24 hours. A day of buys
+  at the USDG limit leaves no room to sell until they leave the window: status
+  then says so with a blocker (`SOLANA_STATUS_DAILY_USDG_USED`; the worker holds
+  rather than trying) and, when the SOL sold limit is used, a warning
+  (`SOLANA_STATUS_DAILY_SOL_SOLD_USED`), each pointing to Withdraw, which no
+  limit or cap ever bounds. At the defaults a position worth W USDG takes at
+  least W / 25 days to sell in the app, and below about $100 a SOL a day of buys
+  can buy more than 0.25 SOL. Whether the caps should bound buys only is
+  Milla's decision (decision table, "Caps bound exits as well as buys").
 - **Malformed settings** (an empty or non-id entry, a cap that is not an exact
   positive amount or does not fit the program's u64, a per-trade cap above its
   daily cap, a USDG per-trade cap under the 1 USDG live minimum) refuse new
@@ -1315,7 +1330,8 @@ says where to change it. Superseded choices are listed under the current one.
 | Who may go live | Nobody until named in `MERRYMEN_SOLANA_LIVE_TENANTS` | Every bound tenant; Robinhood-style levels (observe, exits-only, trade) | `MERRYMEN_SOLANA_LIVE_TENANTS` |
 | Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again (without the caps) so exits can be sold | Refuse saving live mode too | `checkLiveSettings` in `solana-app-runtime.ts` |
 | A permission that lands after the tenant left the list | A renewal of an account that already went live is activated for exits only (it replaced the old permission on Solana, so refusing it would leave nothing to sell under; buys stay refused). A first permission is not activated; the page keeps its session key, Revoke ends it | Never activate off the list (rejected: a renewal landing after delisting would leave the account unable to sell until listed again) | `activateLive` (`requireLiveOpenOrWentLive`) |
-| Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
+| Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap, which limits spending only) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
+| Caps bound exits as well as buys | Yes, as the program charges them: a sale's USDG proceeds count against the same per-trade and daily USDG limits, and the SOL caps bound only sales. Status says when the rolling limits refuse sales and points to Withdraw (`SOLANA_STATUS_DAILY_USDG_USED`, `SOLANA_STATUS_DAILY_SOL_SOLD_USED`) | Enforce the USDG caps on rolling buy notional only (in `assessRisk` and admission) and let the signed limits carry bounded exit headroom (a separate `MERRYMEN_SOLANA_LIVE_MAX_EXIT_*`, or a multiple of the buy caps); that widens what a session may do on chain, so it is Milla's decision, never a way to make exits pass | `MERRYMEN_SOLANA_LIVE_MAX_*`, `solanaLiveCapRefusal` |
 | A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |
 | A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
 | Live buy previews off the list, or while a cap cannot be read | Refused before any quote, as the trade would be | Allowed. Not done: refusing the preview of a buy under a permission registered above caps lowered since (it needs a vault read, or the session's limits kept in its stored record; the trade refuses it before signing) | `preview` |

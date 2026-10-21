@@ -2563,6 +2563,8 @@ test("an account that went live and later chose paper keeps its live switch off 
   assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
   assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps: it cannot register while off the list");
   await act(async () => { liveSwitch()!.click(); });
+  // Live limits bound sales too: the program charges a sale's proceeds to the same USDG limits.
+  assert.match(ui.container.textContent!, /Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits/);
   await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
   await press("Save Solana mode and limits");
   assert.equal(saved.length, 1, ui.container.textContent!);

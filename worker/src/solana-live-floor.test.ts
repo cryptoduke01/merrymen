@@ -19,7 +19,8 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SolanaAppRuntimeError } from "./solana-app-runtime";
+import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
+  SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
@@ -1109,4 +1110,46 @@ test("live rollout: a renewal that landed after the tenant left the list is acti
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
   const [row] = await f.submissions();
   assert.equal(row!.submission.intent.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(row!.submission.sessionEpoch, "1", "signed under the renewal");
+});
+
+/** A live trade admitted `agoMs` before NOW, as admission records it, with the USDG notional it was charged and what it sold or spent. */
+async function windowRow(f: Awaited<ReturnType<typeof fixture>>, requestId: string, status: string, agoMs: number, inputMint: string, amountRaw: string, notionalRaw: string) {
+  await f.db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(TENANT, f.scope.owner, requestId, f.vault, requestId, `sig-${requestId}`, status, NOW - agoMs, notionalRaw,
+    JSON.stringify({ intent: { requestId, inputMint, amountRaw }, signature: `sig-${requestId}` }));
+}
+
+test("sales count against the rolling USDG limit as buys do: after a day of buys at it, status says no trade, exits included, is admitted and points to Withdraw, as admission refuses the sale", async t => {
+  // The fixture's limits (and caps): 25 USDG per trade, 100 USDG a day. The strategy wants 25% SOL, so it would sell.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500 } });
+  for (let i = 0; i < 4; i++) await windowRow(f, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, "25000000", "25000000");
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, [SOLANA_STATUS_DAILY_USDG_USED]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, false);
+  assert.match(SOLANA_STATUS_DAILY_USDG_USED, /Sales back to USDG count against it as buys do.*Withdraw works at any time\.$/);
+  // What admission does: the sale is refused before anything is sent, and the worker holds instead of trying it.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-after-buys") }), /The Solana rolling daily limit would be exceeded\./);
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
+  assert.equal(f.sends.length, 0);
+  // Under 1 USDG left is the same: no trade of at least the live minimum fits.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET notional_raw='24000001' WHERE request_id='buy-0'").run();
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, [SOLANA_STATUS_DAILY_USDG_USED]);
+  // Once a buy is released (failed) there is room again: no blocker, and the same sale is admitted and sent.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='buy-0'").run();
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, []);
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-with-room") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+});
+
+test("a day's SOL sold limit used by sales is a status warning pointing to Withdraw, as admission refuses the next sale; buys, which it does not limit, stay open", async t => {
+  // The fixture's limits: 0.2 SOL sold per trade, 1 SOL a day. Five sales of 0.2 SOL in the last 24 hours (charged 1 USDG each here).
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
+  for (let i = 0; i < 5; i++) await windowRow(f, `sale-${i}`, "finalized", 7_200_000 - i, SOLANA_WRAPPED_SOL_MINT, "200000000", "1000000");
+  const status = await f.app.status(f.scope);
+  assert.ok(status.live.warnings.includes(SOLANA_STATUS_DAILY_SOL_SOLD_USED), JSON.stringify(status.live.warnings));
+  assert.deepEqual(status.live.blockers, []); assert.equal(status.live.ready, true, "buys are not limited by SOL sold");
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "sale-over-sol") }), /rolling daily SOL sell limit would be exceeded/);
+  assert.equal(f.sends.length, 0);
+  // Failed sales are released: no warning.
+  await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='sale-0'").run();
+  assert.ok(!(await f.app.status(f.scope)).live.warnings.includes(SOLANA_STATUS_DAILY_SOL_SOLD_USED));
 });

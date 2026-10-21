@@ -33,7 +33,7 @@ import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestRefe
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse, solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
   solanaRevokedBesideResume } from "./solana-trading-store";
@@ -112,6 +112,20 @@ function publicTrade(record: SolanaLiveRecord) {
  * beyond the allowance are what used the day's operations up.
  */
 export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximum number of trades for the last 24 hours. Trading and automated exits resume as they leave the window.";
+/**
+ * SALES COUNT AGAINST THE SAME LIMITS AS BUYS. The vault program charges a sale's USDG proceeds to the session's per-trade and
+ * daily USDG limits, as it charges a buy's spend, and its SOL to the SOL sold limits; admission counts the same way. So a day
+ * of buys at the USDG limit also stops sales until those buys leave the 24-hour window, and the platform's live caps
+ * (MERRYMEN_SOLANA_LIVE_MAX_*), which bound those limits, bound exits too. Withdraw is never limited by either.
+ * - SOLANA_STATUS_DAILY_USDG_USED, a blocker: under 1 USDG (the live minimum) is left of the USDG per 24 hours limit, so
+ *   admission refuses every live trade of at least 1 USDG, buys and exits alike.
+ * - SOLANA_STATUS_DAILY_SOL_SOLD_USED, a warning: the SOL sold per 24 hours limit is used, so admission refuses every sale;
+ *   buys are not limited by it, so it does not stop them.
+ */
+export const SOLANA_STATUS_DAILY_USDG_USED = "This account's live trades in the last 24 hours used its USDG per 24 hours limit. Sales back to USDG count against it as "
+  + "buys do, so no live trade, exits included, is admitted until earlier trades leave the 24-hour window. Withdraw works at any time.";
+export const SOLANA_STATUS_DAILY_SOL_SOLD_USED = "This account's sales in the last 24 hours used its SOL sold per 24 hours limit: no sale back to USDG is admitted until "
+  + "earlier sales leave the 24-hour window. Withdraw works at any time.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
 /**
  * The status warning while MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS cannot be
@@ -1012,7 +1026,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       }
       const session = await s.session();
       // The live rollout: whether this tenant may open new live permissions and buy, and the caps in force.
-      // Neither ever stops an exit; a setting that cannot be read leaves the account off the list (and says the [alert]).
+      // The list never stops an exit (the caps bound new permissions' limits, which bound sales too: SALES COUNT AGAINST...);
+      // a setting that cannot be read leaves the account off the list (and says the [alert]).
       let onList = false, caps: SolanaLiveCaps | null = null, rolloutMisconfigured = false;
       // Whether the vault holds a current permission matching the one the app keeps ("unknown" while it could not be read):
       // without one nothing can be sold, so the exits-only blocker below must not say exits still work.
@@ -1161,6 +1176,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (binding.requestedMode === "live" && binding.limits && binding.limits.expiresAtMs > now()) {
         const used = await dailyOperationsUsed(s, binding.limits.maxOpsPerDay);
         if (used) blockers.push(used);
+        // Sales count against the rolling USDG and SOL sold limits as admission counts them (SALES COUNT AGAINST...).
+        const spent = await solanaRollingLimitUse(s.db, s.scope, now());
+        if (BigInt(binding.limits.dailyUsdg) - spent.notionalRaw < SOLANA_LIVE_MIN_TRADE_USDG_RAW) blockers.push(SOLANA_STATUS_DAILY_USDG_USED);
+        if (binding.limits.dailyWsol !== undefined && spent.soldWsolRaw >= BigInt(binding.limits.dailyWsol)) warnings.push(SOLANA_STATUS_DAILY_SOL_SOLD_USED);
       }
       const pending = (await s.pending()).map(publicTrade);
       if (pending.length) blockers.push("A live trade is awaiting final confirmation.");

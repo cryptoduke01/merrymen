@@ -18,7 +18,7 @@
  *   MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL   default 0.1 (SOL)
  *   MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL       default 0.25 (SOL)
  *
- * ONLY EVER STOPS NEW LIVE PERMISSIONS AND BUYS. A tenant off the list, or any
+ * THE LIST ONLY EVER STOPS NEW LIVE PERMISSIONS AND BUYS. A tenant off it, or any
  * tenant while a setting cannot be read, cannot save live mode for the first
  * time, prepare or submit a permission, activate a first one, or buy. Its owner
  * can always sell back to USDG within the permission already registered (a
@@ -26,6 +26,12 @@
  * withdraw, record outside withdrawals, use paper and read status: a tenant
  * taken off the list after going live is exits-only, as Robinhood's exits-only
  * level is.
+ *
+ * The caps bound exits too: the vault program charges a sale's USDG proceeds
+ * to the same per-trade and daily USDG limits as a buy, and its SOL to the SOL
+ * sold limits, so a day of buys at the cap leaves no room to sell until it
+ * passes (status says so and points to Withdraw, which no cap limits). Whether
+ * they should bound buys only is an owner decision (docs/solana-integration.md).
  *
  * Caps bound new permissions: live limits above one are refused where they are
  * saved, where the permission is prepared and where its signed bytes are

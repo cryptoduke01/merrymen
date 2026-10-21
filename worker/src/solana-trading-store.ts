@@ -412,6 +412,34 @@ export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions e
  * For status blockers and operator alerts; admission never reads it, and counts
  * the same rows itself under its lock.
  */
+/**
+ * THE ROLLING 24-HOUR USDG AND SOL LIMITS, AS ADMISSION COUNTS THEM (recordSigned, and the status blocker below, share these).
+ * Submissions created inside the window count until canonical failure or expiry evidence releases them, buys and sales alike:
+ * the vault program charges a sale's USDG proceeds to the same per-trade and daily USDG limits as a buy's spend, and its SOL to
+ * the SOL sold limits. So a day of buys at the USDG limit leaves no room to sell until it passes.
+ */
+function countedInWindow<T extends { status: string }>(rows: T[]): T[] { return rows.filter(r => !["failed", "expired"].includes(r.status)); }
+/** The USDG notional of submissions that count, buys and sales alike. */
+function windowNotional(counted: ReadonlyArray<{ notional_raw: string }>): bigint { return counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n); }
+/** The SOL their sales sold. */
+function windowSold(counted: ReadonlyArray<{ submission_json: string }>): bigint {
+  return counted.reduce((n, r) => {
+    const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
+    return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
+  }, 0n);
+}
+/**
+ * What one account's live trades used of its rolling 24-hour USDG and SOL sold limits at `nowMs`, by the same window and
+ * arithmetic recordSigned admits by. For status blockers and warnings; admission never reads it, and counts the same rows
+ * itself under its lock.
+ */
+export async function solanaRollingLimitUse(db: Db, scope: SolanaAccountScope, nowMs: number): Promise<{ notionalRaw: bigint; soldWsolRaw: bigint }> {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) refuse("Invalid Solana rolling limit query.");
+  const rows = await db.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?")
+    .all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
+  const counted = countedInWindow(rows);
+  return { notionalRaw: windowNotional(counted), soldWsolRaw: windowSold(counted) };
+}
 export async function solanaExpiredAttemptUse(db: Db, scope: SolanaAccountScope, nowMs: number, allowance: number): Promise<{ expired: number; counted: number; operations: number }> {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(allowance) || allowance < 0) refuse("Invalid Solana expired-attempt query.");
   const rows = await db.prepare("SELECT status FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?").all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string }>;
@@ -1032,8 +1060,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // a pending one counts until finalized evidence proves what it did. Token
       // notional is released only after canonical failure or expiry evidence.
       const operations = recent.filter(r => r.status !== "expired"), dropped = recent.length - operations.length;
-      const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
-      if (operations.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      const counted = countedInWindow(recent);
+      if (operations.length >= limits.maxOpsPerDay || windowNotional(counted) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
       // A proven expiry never landed and the program never counted it, but the
       // session key signed it: only the configured allowance of them leaves the
       // owner's operation count (by default none), so at most maxOpsPerDay plus
@@ -1041,10 +1069,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (operations.length + Math.max(0, dropped - allowance) >= limits.maxOpsPerDay) {
         refuse(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
       }
-      const soldToday = counted.reduce((n, r) => {
-        const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
-        return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
-      }, 0n);
+      const soldToday = windowSold(counted);
       if (sold > 0n && soldToday + sold > sellLimits.dailyWsol) refuse("The Solana rolling daily SOL sell limit would be exceeded.");
       let book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
       const equity = raw(s.risk.equityUsdg), peak = raw(s.risk.peakEquityUsdg), cash = raw(s.risk.cashUsdg), wsol = raw(s.risk.wsolRaw);

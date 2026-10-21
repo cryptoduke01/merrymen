@@ -804,8 +804,11 @@ Like Robinhood's rollout, a few tenants at a time, and each step only after the
 one before it looks right. `MERRYMEN_SOLANA_LIVE_TENANTS` names the tenants that
 may go live (unset or empty: nobody), and the `MERRYMEN_SOLANA_LIVE_MAX_*` caps
 bound the live limits anyone may sign (default 10 and 25 USDG, 0.1 and 0.25 SOL;
-details in `solana-integration.md`, "Live rollout"). Neither ever stops an
-owner's exits, revoke or withdrawals.
+details in `solana-integration.md`, "Live rollout"). The list never stops an
+owner's exits, revoke or withdrawals. The caps bound exits as well as buys: the
+vault program charges a sale's USDG proceeds to the same per-trade and daily
+limits as a buy, so a day of buys at the cap leaves no room to sell until it
+passes (status then says so and points to Withdraw). Withdraw is never limited.
 
 1. **Paper first.** On the web service set `MERRYMEN_SOLANA=1` with
    `MERRYMEN_SOLANA_LIVE_TENANTS` unset or empty. It needs
