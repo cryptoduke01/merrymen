@@ -208,8 +208,9 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   const status = await readAgentStatus(db, account, input.settings, now);
   const fresh = status.freshness;
   // A condition the worker restates every tick is current while its newest
-  // sighting is younger than two heartbeats (never under half an hour), and a
-  // run of sightings is one occurrence while they are under an hour apart.
+  // sighting is younger than two heartbeat windows (never under half an hour),
+  // and a run of sightings is one occurrence while they are no further apart
+  // than an hour, or two heartbeat windows when that is longer.
   const currentSec = Math.max(30 * MINUTE, 2 * fresh.fresh_within_s);
   const gapSec = Math.max(HOUR, 2 * fresh.fresh_within_s);
   const floor = now - ATTENTION_LOOKBACK_SEC;
