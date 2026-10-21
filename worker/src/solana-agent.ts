@@ -5,7 +5,7 @@ import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_BELOW_MINIMUM,
   type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
-import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_USDG_BUYS_USED } from "./solana-app-runtime";
+import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_USDG_BUYS_USED, type SolanaAppRuntimeOptions } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -381,6 +381,16 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
   };
 }
 
+/**
+ * The Solana worker's own app runtime, the one runSolanaAgent runs: it publishes the live rollout settings it runs as the
+ * worker's (solana_runtime_live_rollout_seen) and judges the web's (SETTINGS THAT MUST MATCH, CHECKED, in the app runtime).
+ * Built as the web's runtime instead, it would write over the web's digest and read a worker digest nobody writes, so
+ * neither service would ever see a difference.
+ */
+export function solanaWorkerRuntime(options: Omit<SolanaAppRuntimeOptions, "service"> = {}) {
+  return createSolanaAppRuntime({ localTestDeployment: false, ...options, service: "worker" });
+}
+
 /** Dedicated sibling worker; Solana addresses never enter the RH worker loop. */
 export async function runSolanaAgent(signal: AbortSignal) {
   const db = await getSolanaRuntimeDb();
@@ -395,7 +405,7 @@ export async function runSolanaAgent(signal: AbortSignal) {
   let expiredAttemptAllowance = SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
   try { expiredAttemptAllowance = solanaExpiredAttemptAllowance(process.env); } catch { /* Refused at trade time. */ }
   // The worker's own runtime: it publishes its live rollout settings as the worker's, and holds buys while the web's differ.
-  const agent = createSolanaAgent({ db, runtime: createSolanaAppRuntime({ localTestDeployment: false, service: "worker" }), market: createSolanaMarket(),
+  const agent = createSolanaAgent({ db, runtime: solanaWorkerRuntime(), market: createSolanaMarket(),
     postgres: !!process.env.DATABASE_URL, signal,
     referenceToleranceBps, expiredAttemptAllowance });
   while (!signal.aborted) {

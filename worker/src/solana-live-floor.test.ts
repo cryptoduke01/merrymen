@@ -18,7 +18,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
-import { createSolanaAgent } from "./solana-agent";
+import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SOLANA_STATUS_DAILY_USDG_BUYS_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
@@ -209,7 +209,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
   /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
   const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
-  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, get db() { return db; }, rpc, env, clock, sessionKeys, vault, vaultState, read, reopen, feePayer, cashAta, wsolAta };
+  return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, get db() { return db; }, rpc, env, clock, sessionKeys, vault, vaultState, read, reopen, feePayer, cashAta, wsolAta,
+    market };
 }
 /** The compute-unit limit and price a signed swap carries (ComputeBudget instructions 2 and 3). */
 function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
@@ -1227,14 +1228,16 @@ test("exits keep room: after the most buys the window admits, the worker buys no
 test("live rollout: the worker publishes its settings with its heartbeat; once the web serves different ones (a tenant removed on the web only), its next tick holds the buy, and matching ones let it buy", async t => {
   // 0.1 SOL ($15) and 50 USDG; the strategy wants 90% SOL, so it buys (and the position it leaves can still be sold today).
   const f = await fixture(t, { cash: 50_000_000n, wsol: 100_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
-  const worker = f.runtime({}, undefined, () => {}, "worker");
+  // The worker's own runtime as runSolanaAgent builds it (solanaWorkerRuntime), on this chain and clock.
+  const worker = solanaWorkerRuntime({ db: f.db, rpc: f.rpc, market: f.market, env: f.env, now: () => f.clock.now, log: () => {}, localTestDeployment: true });
   // The web was redeployed without this tenant; the worker was not. The owner's page reads status from the web.
   assert.deepEqual((await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: "" }, undefined, () => {}).status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED]);
   assert.deepEqual((await f.agent(worker).tick()).map(r => r.outcome), ["held"], "the worker no longer buys under its old list");
   assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
   assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built");
   // The tick published the worker's settings with its heartbeat: a web that lists another tenant as well sees them differ.
-  assert.ok(await f.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get());
+  assert.deepEqual((await f.db.prepare("SELECT service FROM solana_runtime_live_rollout_seen ORDER BY service").all() as Array<{ service: string }>).map(r => r.service),
+    ["web", "worker"], "the worker's digest under its own name, beside the web's");
   assert.deepEqual((await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"22".repeat(20)}` }, undefined, () => {}).status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
   // Both on the same settings again: the next tick buys.
   f.clock.now += 61_000;
@@ -1244,7 +1247,8 @@ test("live rollout: the worker publishes its settings with its heartbeat; once t
   assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
   // A worker with nothing to trade publishes too, with its heartbeat alone: the web judges any worker that is running.
   const idle = await fixture(t, { cash: 50_000_000n, wsol: 0n, mark: "fair", build: { kind: "fair" } });
-  assert.deepEqual(await idle.agent(idle.runtime({}, undefined, () => {}, "worker")).tick(), []);
+  assert.deepEqual(await idle.agent(solanaWorkerRuntime({ db: idle.db, rpc: idle.rpc, market: idle.market, env: idle.env, now: () => idle.clock.now, log: () => {},
+    localTestDeployment: true })).tick(), []);
   assert.ok(await idle.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get(), "published with the heartbeat");
   assert.deepEqual((await idle.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"33".repeat(20)}` }, undefined, () => {}).status(idle.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
 });
