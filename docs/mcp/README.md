@@ -14,7 +14,7 @@ address if it does not find them); the same steps for people are at
 
 **In Claude Code:** `/plugin marketplace add https://github.com/millw14/merrymen.git`, then
 `/plugin install merrymen@merrymen` (run one at a time), for the server plus
-`/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
+`/merrymen:brief`, `/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio` and more. See
 [Claude Code](clients.md#claude-code).
 
 **Server address:** `https://mcp.merrymen.dev/mcp`
