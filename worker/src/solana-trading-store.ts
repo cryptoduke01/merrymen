@@ -286,6 +286,9 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS solana_runtime_worker_heartbeat (
  worker TEXT PRIMARY KEY, last_seen_at_ms BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS solana_runtime_live_rollout_seen (
+ service TEXT PRIMARY KEY CHECK(service IN ('web','worker')), fingerprint TEXT NOT NULL, seen_at_ms BIGINT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS solana_runtime_paper_books (
  tenant TEXT NOT NULL, owner TEXT NOT NULL, book_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
 );

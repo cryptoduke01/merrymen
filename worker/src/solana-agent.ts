@@ -5,7 +5,7 @@ import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_BELOW_MINIMUM,
   type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
-import { getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -72,7 +72,7 @@ export async function boundSolanaRebalanceSell(
  * solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust.
  * feePayerCheck is optional too; without it the agent checks no fee payer of its own.
  */
-type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust" | "feePayerCheck">>;
+type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust" | "feePayerCheck" | "publishLiveRollout">>;
 export interface SolanaAgentOptions {
   db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
@@ -259,6 +259,8 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         if (!force && at - beatAtMs < HEARTBEAT_REFRESH_MS) return;
         beatAtMs = at;
         await options.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(at);
+        // With the heartbeat, the live rollout settings this worker runs, which the web compares with its own.
+        await options.runtime.publishLiveRollout?.();
       };
       await beat(true);
       // Disabling a strategy never disables receipt recovery. Confirmation is
@@ -369,7 +371,9 @@ export async function runSolanaAgent(signal: AbortSignal) {
   // Only for the expired-attempt alerts; a malformed setting refuses every live trade in the runtime anyway.
   let expiredAttemptAllowance = SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
   try { expiredAttemptAllowance = solanaExpiredAttemptAllowance(process.env); } catch { /* Refused at trade time. */ }
-  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal,
+  // The worker's own runtime: it publishes its live rollout settings as the worker's, and holds buys while the web's differ.
+  const agent = createSolanaAgent({ db, runtime: createSolanaAppRuntime({ localTestDeployment: false, service: "worker" }), market: createSolanaMarket(),
+    postgres: !!process.env.DATABASE_URL, signal,
     referenceToleranceBps, expiredAttemptAllowance });
   while (!signal.aborted) {
     try {

@@ -39,9 +39,9 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
   solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
-import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, solanaLiveTenants,
-  type SolanaLiveCaps } from "./solana-live-rollout";
-import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveRolloutFingerprint, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps,
+  solanaLiveTenants, type SolanaLiveCaps } from "./solana-live-rollout";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "../../web/src/lib/solana-live-caps";
 
 /**
@@ -202,7 +202,12 @@ export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that 
  * SOLANA_LIVE_ROLLOUT_MISCONFIGURED while the list or a cap cannot be read; the _NO_PERMISSION variants in status for an account that
  * went live whose permission expired or was replaced on Solana, which cannot sell either.
  */
-export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION };
+export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION };
+/** The worker counts as online, and its published settings as current, while its heartbeat is younger than this (status, the page). */
+const SOLANA_WORKER_ONLINE_MS = 90_000;
+/** A process publishes the live rollout settings it runs at least this often (or at once when they change). */
+export const SOLANA_LIVE_ROLLOUT_PUBLISH_MS = 30_000;
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -332,6 +337,11 @@ export interface SolanaAppRuntimeOptions {
   vaultReleases?: readonly { readonly programId: string; readonly sha256: string }[];
   /** How long an owner transaction waits for its best-effort priority-fee reads. Default SOLANA_OWNER_FEE_READ_MS. */
   ownerFeeReadMs?: number;
+  /**
+   * Which service this process is, for SETTINGS THAT MUST MATCH, CHECKED: "web" (the default, getSolanaAppRuntime) or "worker"
+   * (the Solana worker's runtime, runSolanaAgent). Each publishes its live rollout settings under its own name and judges the other's.
+   */
+  service?: "web" | "worker";
 }
 export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   const env = options.env ?? process.env, now = options.now ?? Date.now;
@@ -476,6 +486,46 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   function liveListed(s: SolanaTradingStore): boolean { return rollout(() => solanaLiveTenants(env)).has(s.scope.tenant); }
   /** The live caps in force (MERRYMEN_SOLANA_LIVE_MAX_*), from this runtime's env. */
   function liveCaps(): SolanaLiveCaps { return rollout(() => solanaLiveCaps(env)); }
+  /**
+   * SETTINGS THAT MUST MATCH, CHECKED (solanaLiveRolloutFingerprint). The web and the Solana worker each read the list and the
+   * caps from their own env, and apply a change only once redeployed: caps lowered, or a tenant removed, on the web alone would
+   * leave the worker buying under the old ones. So this process publishes a digest of the settings it runs, under its service
+   * (at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS unless they changed: the worker's agent with every heartbeat, the web whenever
+   * it serves status, a preview or a trade), and judges the other service's:
+   * - the web judges the worker's while the worker is online (published within SOLANA_WORKER_ONLINE_MS);
+   * - the worker judges the web's once the web published it after this worker started (one from before may predate the very
+   *   change this worker was deployed with). Until the web serves a Solana request after its own redeploy, the worker cannot
+   *   know of it: the runbook holds trading first ("Turning Solana on").
+   * While they differ every live buy is held, here and there: status says so as a buys-only blocker, trade and preview refuse
+   * buys as configuration, and the operator is told with an [alert] at most once a minute. Exits, revoke and withdraw never ask.
+   */
+  const service = options.service ?? "web", otherService = service === "web" ? "worker" : "web", startedAtMs = now();
+  let rolloutPublished: { fingerprint: string; atMs: number } | undefined, rolloutDiffersAlertAtMs: number | undefined;
+  async function publishRollout(db: Db): Promise<void> {
+    const fingerprint = solanaLiveRolloutFingerprint(env), at = now();
+    if (rolloutPublished?.fingerprint === fingerprint && at >= rolloutPublished.atMs && at - rolloutPublished.atMs < SOLANA_LIVE_ROLLOUT_PUBLISH_MS) return;
+    await db.prepare(`INSERT INTO solana_runtime_live_rollout_seen(service,fingerprint,seen_at_ms) VALUES(?,?,?)
+      ON CONFLICT(service) DO UPDATE SET fingerprint=excluded.fingerprint,seen_at_ms=excluded.seen_at_ms`).run(service, fingerprint, at);
+    rolloutPublished = { fingerprint, atMs: at };
+  }
+  /** Publishes this process's settings, then whether the other service runs different ones (and says the [alert] if so). */
+  async function rolloutDiffers(db: Db): Promise<boolean> {
+    await publishRollout(db);
+    const row = await db.prepare("SELECT fingerprint,seen_at_ms FROM solana_runtime_live_rollout_seen WHERE service=?").get(otherService) as
+      { fingerprint: string; seen_at_ms: number | string } | undefined;
+    if (!row) return false;
+    const seenAt = Number(row.seen_at_ms), at = now();
+    const current = otherService === "worker" ? seenAt <= at && at - seenAt < SOLANA_WORKER_ONLINE_MS : seenAt >= startedAtMs;
+    if (!current || row.fingerprint === solanaLiveRolloutFingerprint(env)) return false;
+    if (rolloutDiffersAlertAtMs === undefined || at < rolloutDiffersAlertAtMs || at - rolloutDiffersAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
+      rolloutDiffersAlertAtMs = at;
+      try {
+        log("[alert] solana-live-rollout differs: the web and the Solana worker run different MERRYMEN_SOLANA_LIVE_TENANTS or MERRYMEN_SOLANA_LIVE_MAX_* "
+          + "settings; no live Solana buy is admitted until both are deployed with the same values (exits, revoke and withdraw continue)");
+      } catch { /* Logging never changes an outcome. */ }
+    }
+    return true;
+  }
   /** The account went live: it has a registered permission or a live book. Off the list, such an account is exits-only. */
   async function wentLive(s: SolanaTradingStore): Promise<boolean> { return !!(await s.session()) || !!(await s.liveBook()); }
   /**
@@ -982,6 +1032,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * vault's is the same size); without one, the upper bound. Throws while live
      * trading is not configured: there is nothing to check.
      */
+    /**
+     * Publishes the live rollout settings this process runs (SETTINGS THAT MUST MATCH, CHECKED): the Solana worker's agent
+     * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades.
+     */
+    async publishLiveRollout(): Promise<void> {
+      const db = options.db ?? await getSolanaRuntimeDb();
+      await ensureSolanaTradingSchema(db, !!env.DATABASE_URL);
+      await publishRollout(db);
+    },
     async feePayerCheck(input: { vault?: string } = {}): Promise<FeePayerLevel> {
       config();
       const feePayer = await getAddressFromPublicKey((await payer()).publicKey);
@@ -1034,6 +1093,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let permission: "current" | "missing" | "unknown" = "unknown";
       try { onList = liveListed(s); } catch { rolloutMisconfigured = true; }
       try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
+      const differs = await rolloutDiffers(s.db);
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string | null; level: FeePayerLevel } | null = null;
@@ -1159,6 +1219,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (exitsOnly || binding.requestedMode === "live") {
         if (rolloutMisconfigured) buysOnly(noPermission ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION : SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
         else if (!onList) buysOnly(noPermission ? SOLANA_LIVE_PAUSED_NO_PERMISSION : exitsOnly ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN);
+        // On the list here, while the other service runs different settings (SETTINGS THAT MUST MATCH, CHECKED): buying waits.
+        else if (differs) buysOnly(SOLANA_LIVE_ROLLOUT_DIFFERS);
       }
       // Saved live limits above the caps (saved before they were lowered) cannot be registered; a permission already registered is judged above.
       if (onList && caps && binding.requestedMode === "live" && binding.limits && solanaLiveCapsExceeded(binding.limits, caps).length) warnings.push(solanaLiveSavedAboveCaps(caps));
@@ -1191,7 +1253,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return { chain: CHAINS.solana, owner: scope.owner, requestedMode: binding.requestedMode,
         // Whether this account may go live (never the list itself), and the caps a new live permission must fit.
         liveAccess: { onList, misconfigured: rolloutMisconfigured, caps },
-        automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < 90_000, lastSeenAtMs },
+        automation: { workerOnline: lastSeenAtMs !== null && lastSeenAtMs <= now() && now() - lastSeenAtMs < SOLANA_WORKER_ONLINE_MS, lastSeenAtMs },
         paper: await s.paper().get(scope.owner), limits: binding.limits,
         live: { ready: blockers.length === 0, canExit: blockers.every(item => exitSafe.has(item)), blockers, warnings, feePayer: feePayerView, ownerWallet, recoverable, programId, vault, cashTokenAccount, session: session?.session ?? null,
           balances, tradable: await tradableIn(s, balances), book: await s.liveBook(), pending, history: (await s.history()).map(publicTrade),
@@ -1241,7 +1303,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       if (input.mode === "paper") return paperService(s).preview(scope.owner, parsed);
       // A live buy is previewed only for a tenant the live rollout admits, and only while the caps can be read: trade() refuses it
       // otherwise, so no paid quote is made for a buy that cannot execute. A sale (an exit) always is.
-      if (parsed.inputMint === SOLANA_USDG_MINT) { await requireLiveOpen(s); liveCaps(); }
+      if (parsed.inputMint === SOLANA_USDG_MINT) {
+        await requireLiveOpen(s); liveCaps();
+        if (await rolloutDiffers(s.db)) fail(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration");
+      }
       const cfg = config(); parseSolanaLiveIntent({ ...parsed, mode: "live", owner: scope.owner, vault: await deriveSolanaVaultAddress(cfg.programId, scope.owner) });
       const quote = await market().quote(parsed); validateSolanaQuote(quote, parsed, now());
       return { intent: { ...parsed, mode: "live" }, quote };
@@ -1259,6 +1324,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // The live rollout gates buys only, after a recorded request was returned above: a sale back to USDG (an exit) never reads
       // the list or the caps. Off the list, or with a setting unreadable, a buy is refused before anything is read or signed.
       const buyCaps = parsed.inputMint === SOLANA_USDG_MINT ? (await requireLiveOpen(s), liveCaps()) : null;
+      // Nor while the other service runs different rollout settings (SETTINGS THAT MUST MATCH, CHECKED).
+      if (buyCaps && await rolloutDiffers(s.db)) fail(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration");
       const cfg = config(), prices = computeUnitPrices(), maxFee = maxFeeLamports(), secret = await s.sessionSeed(dek());
       if (!secret) fail("Register an owner-approved live trading permission first.", "permission");
       // Refused as configuration before anything is signed; the store counts with it at admission.

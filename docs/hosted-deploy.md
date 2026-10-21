@@ -756,8 +756,16 @@ it off; the full plan, settings and runbooks are in
   `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`,
   `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` and the fee settings go on every
   service that runs the Solana runtime (web and the Solana worker) with the same
-  values. `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC` goes on an operator's machine only,
-  and `MERRYMEN_SOLANA_RECOVER_RPC` only on an owner's own computer.
+  values. Each service applies a change only once it is redeployed. The live
+  list and caps are also checked: each service publishes a digest of the ones it
+  runs (the worker with every heartbeat, the web whenever it serves Solana
+  status, a preview or a trade), and while the two differ every live buy is held
+  on both, status says so (a buys-only blocker; exits, revoke and withdraw
+  continue) and `[alert] solana-live-rollout differs` pages the operator. The
+  worker can only see a web change once the web has served a Solana request
+  since, so change them with the hold below. `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC`
+  goes on an operator's machine only, and `MERRYMEN_SOLANA_RECOVER_RPC` only on
+  an owner's own computer.
 - **Alert lines.** Once Solana is on, page on every line starting `[alert]` in
   the web and Solana worker services' logs (stderr), as for the orchestrator.
   From both web and worker (the runtime's status and trade paths):
@@ -765,8 +773,9 @@ it off; the full plan, settings and runbooks are in
   `[alert] solana fee-payer-threshold misconfigured`,
   `[alert] solana-reference-price refused: reason=… generation=…`,
   `[alert] solana-reference-tolerance misconfigured`,
-  `[alert] solana-jupiter-key misconfigured` and
-  `[alert] solana-live-rollout misconfigured`. From the Solana worker only:
+  `[alert] solana-jupiter-key misconfigured`,
+  `[alert] solana-live-rollout misconfigured` and
+  `[alert] solana-live-rollout differs`. From the Solana worker only:
   `[alert] Solana transactions stuck pending`,
   `[alert] Solana vault below its book`,
   `[alert] Solana autonomous strategy refused: proven-expired attempts used up…`
@@ -831,11 +840,18 @@ passes (status then says so and points to Withdraw). Withdraw is never limited.
    deploy both. Run the canary checks in the release gates: a small funded
    trade, restart and outage, full exit, withdraw and revoke, expiry.
 4. **Widen.** Add tenants to the list, a few at a time, and raise the caps only
-   as an owner decision. To stop new live trading at once, empty the list (or
-   name fewer tenants) and deploy: those taken off become exits-only. For an
-   incident, hold trading as well (`npm run solana:hold -- set all --reason "…"`); never
-   unset the web's `MERRYMEN_SOLANA` alone, which also removes owners' in-app
-   revoke and withdraw.
+   as an owner decision. Every change to the list or the caps goes on web and
+   worker together; while they differ, live buys are held on both (above).
+   **To take tenants off the list or lower the caps,** the services apply the
+   change only once each is redeployed, so hold first: `npm run solana:hold --
+   set 0x<tenant> --reason "…"` for each tenant taken off (or `set all` for the
+   caps). A hold also pauses that tenant's sales, never its revoke or
+   withdrawals. Then change the setting on web and worker, deploy both, check
+   status shows no `[alert] solana-live-rollout differs`, and release the hold:
+   those taken off are exits-only from then on. For an incident, hold trading
+   (`npm run solana:hold -- set all --reason "…"`); never unset the web's
+   `MERRYMEN_SOLANA` alone, which also removes owners' in-app revoke and
+   withdraw.
 
 ## 5b. The AI gateway (its own Railway project)
 

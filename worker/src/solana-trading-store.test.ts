@@ -25,6 +25,8 @@ import { pythBound } from "./solana-reference-price-fixture";
 import { releaseSolanaOperatorHold, setSolanaOperatorHold } from "./solana-operator-hold";
 import type { SolanaLiveBook } from "./solana-trading-store";
 import { ensureSolanaShortfallSchema } from "./solana-resolve-shortfall";
+import { solanaRollingLimitUse } from "./solana-trading-store";
+import { createSolanaAppRuntime, SOLANA_LIVE_ROLLOUT_DIFFERS } from "./solana-app-runtime";
 
 const key = (n: number) => base58Encode(new Uint8Array(32).fill(n));
 const TENANT = `0x${"11".repeat(20)}` as const, OTHER = `0x${"22".repeat(20)}` as const;
@@ -1455,3 +1457,46 @@ test("a hosted write-off is the owner's alone, in paper mode, and only for a who
   const done = await f.store.paper().writeOff!(d.input);
   assert.deepEqual(done.positions, []);
 });
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: status reads the rolling USDG and SOL sold use as admission counts it: pending and landed trades, buys and sales, inside 24 hours, until failure or expiry releases them`, options, async t => {
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    assert.deepEqual(await solanaRollingLimitUse(f.db, scope, NOW), { notionalRaw: 0n, soldWsolRaw: 0n });
+    // A buy admitted by the store itself (pending): 1 USDG.
+    assert.equal(await f.store.recordSigned(submission("rolling-buy")), true);
+    assert.deepEqual(await solanaRollingLimitUse(f.db, scope, NOW), { notionalRaw: 1_000_000n, soldWsolRaw: 0n });
+    // Sales as admission records them: their proceeds count toward the USDG limit too.
+    const row = (id: string, status: string, createdAtMs: number, amountRaw: string, notionalRaw: string) => f.db.prepare(`INSERT INTO solana_runtime_submissions
+      (tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+      .run(TENANT, OWNER, id, VAULT, `s-${id}`, `sig-${id}`, status, createdAtMs, notionalRaw, JSON.stringify({ intent: { requestId: id, inputMint: SOLANA_WRAPPED_SOL_MINT, amountRaw } }));
+    await row("sale-landed", "finalized", NOW - 1000, "40000000", "6000000");
+    await row("sale-failed", "failed", NOW - 900, "30000000", "4500000");
+    await row("sale-expired", "expired", NOW - 800, "20000000", "3000000");
+    await row("sale-old", "finalized", NOW - 86_400_000, "10000000", "1500000");
+    assert.deepEqual(await solanaRollingLimitUse(f.db, scope, NOW), { notionalRaw: 7_000_000n, soldWsolRaw: 40_000_000n });
+    await assert.rejects(solanaRollingLimitUse(f.db, scope, -1), /Invalid Solana rolling limit query/);
+  });
+  test(`${dialect}: the web and the Solana worker publish their live rollout digests, and a buy preview is held while they differ`, options, async t => {
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    const env = { MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, ...(dialect === "postgres" ? { DATABASE_URL: "postgres://already-connected" } : {}) };
+    const runtime = (more: Record<string, string>, service?: "worker") => createSolanaAppRuntime({ db: f.db, env: { ...env, ...more }, now: () => f.clock.value,
+      log: () => {}, ...(service ? { service } : {}) });
+    const worker = runtime({ MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "24" }, "worker"), web = runtime({});
+    await worker.publishLiveRollout(); f.clock.value += 1; await worker.publishLiveRollout();
+    const rows = async () => (await f.db.prepare("SELECT service,fingerprint,seen_at_ms FROM solana_runtime_live_rollout_seen ORDER BY service").all() as
+      Array<{ service: string; fingerprint: string; seen_at_ms: number | string }>).map(r => [r.service, r.fingerprint.length, Number(r.seen_at_ms)]);
+    assert.deepEqual(await rows(), [["worker", 64, NOW]], "one row per service, written again only after the interval");
+    const buy = { kind: "spl-swap", chain: CHAINS.solana, mode: "live", requestId: "held-buy", inputMint: SOLANA_USDG_MINT, outputMint: SOLANA_WRAPPED_SOL_MINT,
+      amountRaw: "1000000", slippageBps: 50 };
+    await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
+    assert.deepEqual((await rows()).map(r => r[0]), ["web", "worker"]);
+    // Read back as numbers on either database: a worker silent for over 90 s is not compared (the preview goes on, to configuration).
+    f.clock.value += 91_000;
+    await assert.rejects(web.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
+    // The worker started before the web published: it judges the web's row, upserted in place.
+    f.clock.value += 30_000; await worker.publishLiveRollout();
+    await assert.rejects(worker.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_ROLLOUT_DIFFERS);
+    assert.equal((await rows()).length, 2);
+  });
+}

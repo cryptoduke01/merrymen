@@ -45,6 +45,7 @@
  * other tenants), and the runtime turns the refusal into a configuration
  * refusal of new permissions and buys, with an [alert] for the operator.
  */
+import { createHash } from "node:crypto";
 import { displaySolanaAmount, solanaUnits } from "../../web/src/lib/solana-amounts";
 import { SOLANA_LIVE_CAP_DECIMALS, SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_CAP_FIELDS, type SolanaLiveCapField, type SolanaLiveCaps } from "../../web/src/lib/solana-live-caps";
 import { SOLANA_LIVE_MIN_TRADE_USDG_RAW } from "../../packages/core/src/solana";
@@ -113,4 +114,26 @@ export function solanaLiveCaps(env: Env): SolanaLiveCaps {
   if (BigInt(caps.perTradeWsol) > BigInt(caps.dailyWsol)) throw new SolanaLiveRolloutError(`${SOLANA_LIVE_CAP_ENV.perTradeWsol} must not exceed ${SOLANA_LIVE_CAP_ENV.dailyWsol}`);
   if (BigInt(caps.perTradeUsdg) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new SolanaLiveRolloutError(`${SOLANA_LIVE_CAP_ENV.perTradeUsdg} must be at least the 1 USDG live minimum`);
   return caps;
+}
+
+/**
+ * SETTINGS THAT MUST MATCH, CHECKED. The web and the Solana worker each read
+ * these settings from their own env, and each service applies a change only
+ * once it is redeployed. This is a digest of what one process runs: the list as
+ * read (lowercased, sorted, each tenant once) and the caps in force, or
+ * "unreadable" while either cannot be read. Two processes running the same
+ * settings, however an operator spelled them, have the same digest. Each
+ * publishes its own (the app runtime, solana_runtime_live_rollout_seen) and
+ * holds live buys while the other service's differs. It names no tenant.
+ */
+export function solanaLiveRolloutFingerprint(env: Env): string {
+  let settings: string;
+  try {
+    const caps = solanaLiveCaps(env);
+    settings = JSON.stringify({ tenants: [...solanaLiveTenants(env)].sort(), caps: SOLANA_LIVE_CAP_FIELDS.map(field => caps[field]) });
+  } catch (error) {
+    if (!(error instanceof SolanaLiveRolloutError)) throw error;
+    settings = "unreadable";
+  }
+  return createHash("sha256").update(`merrymen-solana-live-rollout/v1 ${settings}`).digest("hex");
 }

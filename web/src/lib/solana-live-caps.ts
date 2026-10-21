@@ -42,6 +42,12 @@ export const SOLANA_LIVE_PAUSED = "Live trading is paused for this account: exit
 export const SOLANA_LIVE_PAUSED_NO_PERMISSION = "Live trading is paused for this account: revoke and withdraw still work. Selling needs a current trading permission, "
   + "and a new one cannot be registered while live trading is paused.";
 export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. Exits, revoke and withdraw still work.";
+/**
+ * Status and the refusal of a buy (and of its preview) while the web and the Solana worker run different live rollout settings,
+ * as during a deploy that changes them (SETTINGS THAT MUST MATCH, CHECKED, in the app runtime): buying only waits.
+ */
+export const SOLANA_LIVE_ROLLOUT_DIFFERS = "The live trading access settings differ between this platform's services, as while an update is deployed: "
+  + "buying is paused until they match. Exits, revoke and withdraw still work.";
 export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. "
   + "Revoke and withdraw still work. Selling needs a current trading permission, and a new one cannot be registered until then.";
 

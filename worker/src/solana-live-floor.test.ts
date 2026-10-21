@@ -19,7 +19,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
+import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
@@ -198,9 +198,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     realizedPnlUsdgRaw: "0", networkFeesLamports: "0", slot: 900, updatedAtMs: NOW - 5000 }));
   if (opts.strategy) { const b = (await bindings.get(TENANT))!; await bindings.strategy(TENANT, owner, b.revision, opts.strategy as never); }
   // `runtime(more, via)`: an app runtime on the same database, chain and clock whose env adds `more`, reading through `via` (default: the chain itself).
-  // `log` receives the runtime's operator lines (default: stderr).
-  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc, log?: (line: string) => void) =>
-    createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}) }), app = runtime();
+  // `log` receives the runtime's operator lines (default: stderr); `service`, which service it is (default: the web).
+  const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc, log?: (line: string) => void, service?: "web" | "worker") =>
+    createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}), ...(service ? { service } : {}) }), app = runtime();
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app, log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
@@ -1152,4 +1152,29 @@ test("a day's SOL sold limit used by sales is a status warning pointing to Withd
   // Failed sales are released: no warning.
   await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='sale-0'").run();
   assert.ok(!(await f.app.status(f.scope)).live.warnings.includes(SOLANA_STATUS_DAILY_SOL_SOLD_USED));
+});
+
+test("live rollout: the worker publishes its settings with its heartbeat; once the web serves different ones (a tenant removed on the web only), its next tick holds the buy, and matching ones let it buy", async t => {
+  // 1 SOL ($150) and 50 USDG; the strategy wants 90% SOL, so it buys.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
+  const worker = f.runtime({}, undefined, () => {}, "worker");
+  // The web was redeployed without this tenant; the worker was not. The owner's page reads status from the web.
+  assert.deepEqual((await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: "" }, undefined, () => {}).status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED]);
+  assert.deepEqual((await f.agent(worker).tick()).map(r => r.outcome), ["held"], "the worker no longer buys under its old list");
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built");
+  // The tick published the worker's settings with its heartbeat: a web that lists another tenant as well sees them differ.
+  assert.ok(await f.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get());
+  assert.deepEqual((await f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"22".repeat(20)}` }, undefined, () => {}).status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+  // Both on the same settings again: the next tick buys.
+  f.clock.now += 61_000;
+  assert.deepEqual((await f.runtime({}, undefined, () => {}).status(f.scope)).live.blockers, []);
+  assert.deepEqual((await f.agent(worker).tick()).map(r => r.outcome), ["submitted"]);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
+  // A worker with nothing to trade publishes too, with its heartbeat alone: the web judges any worker that is running.
+  const idle = await fixture(t, { cash: 50_000_000n, wsol: 0n, mark: "fair", build: { kind: "fair" } });
+  assert.deepEqual(await idle.agent(idle.runtime({}, undefined, () => {}, "worker")).tick(), []);
+  assert.ok(await idle.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get(), "published with the heartbeat");
+  assert.deepEqual((await idle.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"33".repeat(20)}` }, undefined, () => {}).status(idle.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
 });
