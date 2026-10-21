@@ -39,7 +39,8 @@
  * saved, where the permission is prepared and where its signed bytes are
  * submitted, so none above the caps in force is ever sent to Solana. A session
  * registered (or sent) before a cap was lowered is activated as signed and keeps
- * its exits; its buys are refused before anything is signed until the owner
+ * its exits; its buys are refused before any quote (the limits kept in its
+ * session record) and before signing (the limits every provider shows) until the owner
  * registers a new permission within the caps.
  *
  * MALFORMED REFUSES, IT NEVER GUESSES, as for MERRYMEN_FLEET_ROLLOUT: an entry

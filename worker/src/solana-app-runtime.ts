@@ -576,6 +576,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     return solanaLiveCapsExceeded({ perTradeUsdg: state.perTrade, dailyUsdg: state.daily, perTradeWsol: state.perTradeWsol, dailyWsol: state.dailyWsol }, caps).length > 0;
   }
   /**
+   * A buy under a registered permission above the caps, refused from the limits activateLive verified against the vault and kept
+   * in the session record: before any quote, route or provider read. A record without them (registered before they were kept)
+   * leaves it to assessRisk, which reads every provider's limits before anything is signed.
+   */
+  async function requireSessionWithinCaps(s: SolanaTradingStore, caps: SolanaLiveCaps): Promise<void> {
+    const limits = (await s.session())?.limits;
+    if (limits && solanaLiveCapsExceeded(limits, caps).length) fail(solanaLiveSessionAboveCaps(caps), "permission");
+  }
+  /**
    * Why admission (recordSigned) would refuse every live trade, exits included,
    * for the account's daily operations, by its own rolling 24-hour arithmetic:
    * operations that landed, failed or are pending reached maxOpsPerDay, or with
@@ -1334,7 +1343,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // A live buy is previewed only for a tenant the live rollout admits, and only while the caps can be read: trade() refuses it
       // otherwise, so no paid quote is made for a buy that cannot execute. A sale (an exit) always is.
       if (parsed.inputMint === SOLANA_USDG_MINT) {
-        await requireLiveOpen(s); liveCaps();
+        await requireLiveOpen(s); await requireSessionWithinCaps(s, liveCaps());
         if (await rolloutDiffers(s.db)) fail(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration");
       }
       const cfg = config(); parseSolanaLiveIntent({ ...parsed, mode: "live", owner: scope.owner, vault: await deriveSolanaVaultAddress(cfg.programId, scope.owner) });
@@ -1354,6 +1363,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // The live rollout gates buys only, after a recorded request was returned above: a sale back to USDG (an exit) never reads
       // the list or the caps. Off the list, or with a setting unreadable, a buy is refused before anything is read or signed.
       const buyCaps = parsed.inputMint === SOLANA_USDG_MINT ? (await requireLiveOpen(s), liveCaps()) : null;
+      // Nor under a permission registered above the caps, by the limits kept when it was registered: before any quote.
+      if (buyCaps) await requireSessionWithinCaps(s, buyCaps);
       // Nor while the other service runs different rollout settings (SETTINGS THAT MUST MATCH, CHECKED).
       if (buyCaps && await rolloutDiffers(s.db)) fail(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration");
       const cfg = config(), prices = computeUnitPrices(), maxFee = maxFeeLamports(), secret = await s.sessionSeed(dek());
@@ -1389,14 +1400,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // which must agree (one provider cannot show a phantom balance), the slot admission may persist
           // (the lowest any answered at, never one provider's own: solanaQuorumSlot), and the Pyth price that
           // bounds this trade, of which the stricter is used. Either provider's refusal refuses the trade.
-          let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice; seq: bigint; sessionEpoch: bigint }>;
+          let views: Array<{ slot: number; fresh: number; cashUsdg: string; wsolRaw: string; price: SolanaReferencePrice; seq: bigint; sessionEpoch: bigint;
+            perTrade: bigint; daily: bigint; perTradeWsol: bigint; dailyWsol: bigint }>;
           try {
             // The prepared slot is the primary's (or the quote's): a provider a slot or two behind is asked again briefly.
             views = await readSolanaEachProvider(liveRpc, read => solanaCaughtUp(async () => {
               const held = await readSolanaVaultBalancesWith(read, vault, slot);
-              const { seq, sessionEpoch } = await readSolanaVaultStateWith(read, cfg.programId, vault, scope.owner, slot);
+              const { seq, sessionEpoch, perTrade, daily, perTradeWsol, dailyWsol } = await readSolanaVaultStateWith(read, cfg.programId, vault, scope.owner, slot);
               const price = await readSolanaReferencePrice(read, slot, now(), { generation: pythGeneration });
-              return { ...held, seq, sessionEpoch, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
+              return { ...held, seq, sessionEpoch, perTrade, daily, perTradeWsol, dailyWsol, price, fresh: integer(await read("getSlot", [{ commitment: "confirmed" }])) };
             }));
           }
           catch (error) { if (error instanceof SolanaReferencePriceError) throw new SolanaExecutionError("risk"); throw error; }
@@ -1406,6 +1418,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           // consumed the sequence, audit live-M1 trigger b) or the vault moved since: the signed bytes could never
           // run and would sit pending for an operator. Refused before anything is signed; the next attempt reads afresh.
           if (views.some(view => view.seq !== vaultState.seq || view.sessionEpoch !== vaultState.sessionEpoch)) throw new SolanaExecutionError("invalid-state");
+          // The session's limits as every provider shows them, not only the one the snapshot came from: one provider showing
+          // them within the caps cannot let a buy under a permission above them through.
+          if (buyCaps && current.inputMint === SOLANA_USDG_MINT && views.some(view => sessionAboveCaps(view, buyCaps))) fail(solanaLiveSessionAboveCaps(buyCaps), "permission");
           const balances = { slot: solanaQuorumSlot(views), cashUsdg: views[0]!.cashUsdg, wsolRaw: views[0]!.wsolRaw };
           const makeExit = (amountRaw: string, requestId: string) => parseSolanaSwapIntent({ kind: "spl-swap", chain: CHAINS.solana,
             mode: "paper", requestId, inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw, slippageBps: current.slippageBps });
@@ -1540,8 +1555,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         || live.state.daily !== BigInt(setup.limits.dailyUsdg) || live.state.maxOps !== setup.limits.maxOpsPerDay
         || live.state.perTradeWsol !== BigInt(setup.limits.perTradeWsol ?? "0") || live.state.dailyWsol !== BigInt(setup.limits.dailyWsol ?? "0")
         || live.state.expiresAt !== BigInt(Math.floor(setup.limits.expiresAtMs / 1000)) || live.state.expiresAt * 1000n <= BigInt(now())) fail("The current vault permission does not match the signed limits.");
+      // With the limits just checked against the vault, so a buy under a permission above the caps is refused before any quote.
       await s.registerSession({ programId: cfg.programId, vault: setup.vault, session, sessionEpoch: live.state.sessionEpoch.toString(),
-        registrationSignature: input.signature, registeredAtMs: now() }, input.sessionSecretKey, dek());
+        registrationSignature: input.signature, registeredAtMs: now(), limits: { perTradeUsdg: live.state.perTrade.toString(), dailyUsdg: live.state.daily.toString(),
+          perTradeWsol: live.state.perTradeWsol.toString(), dailyWsol: live.state.dailyWsol.toString() } }, input.sessionSecretKey, dek());
       return { registered: true, session, vault: setup.vault };
     },
     /**

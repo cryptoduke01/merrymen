@@ -23,6 +23,12 @@ export interface SolanaTradingBinding extends SolanaAccountScope {
 export interface SolanaRegisteredSession {
   programId: string; vault: string; session: string; sessionEpoch: string;
   registrationSignature: string; registeredAtMs: number;
+  /**
+   * The limits the vault holds for this session, raw, as activateLive read and checked them against the signed ones when it
+   * registered it. Lets a buy under a session above the platform's live caps be refused before any quote. Absent from a record
+   * registered before it was kept: the vault's own limits are then the only check (assessRisk).
+   */
+  limits?: { perTradeUsdg: string; dailyUsdg: string; perTradeWsol: string; dailyWsol: string };
 }
 export interface SolanaLiveBook {
   hwmRaw: string; cashRaw: string; wsolRaw: string;

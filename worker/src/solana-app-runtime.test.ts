@@ -268,6 +268,9 @@ test("owner setup persists exact signed bytes before send and survives a lost re
     const stored = await f.db.prepare("SELECT sealed_seed FROM solana_runtime_sessions").get() as { sealed_seed: string };
     assert.ok(!stored.sealed_seed.includes(f.sessionSeed.toString("base64")));
     assert.equal((await new SolanaTradingStore(f.db, f.scope).session())!.session, f.session);
+    // With the limits it read from the vault and checked against the signed ones, which a buy is held to before any quote.
+    assert.deepEqual((await new SolanaTradingStore(f.db, f.scope).session())!.limits, { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg,
+      perTradeWsol: limits.perTradeWsol, dailyWsol: limits.dailyWsol });
     assert.equal(f.controls.sends, 2, "a finalized transaction is not sent again");
   } finally { f.raw.close(); }
 });

@@ -1091,6 +1091,51 @@ test("live rollout caps: under a permission registered above caps lowered since,
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });
 
+test("live rollout caps: a permission whose registered limits are above caps lowered since refuses a live buy and its preview before any quote, from the session record; sales still quote and sell", async t => {
+  const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: lowered });
+  // The record as activateLive now leaves it: with the limits it checked against the vault (25 and 100 USDG, 0.2 and 1 SOL).
+  const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=?").get(TENANT) as { record_json: string }).record_json);
+  await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=? WHERE tenant=?").run(JSON.stringify({ ...record,
+    limits: { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg, perTradeWsol: limits.perTradeWsol, dailyWsol: limits.dailyWsol } }), TENANT);
+  let quotes = 0;
+  const counted = { readMint: f.market.readMint, quote: async (i: Parameters<typeof f.market.quote>[0]) => { quotes++; return f.market.quote(i); } };
+  const app = createSolanaAppRuntime({ db: f.db, rpc: f.rpc, market: counted, env: f.env, now: () => f.clock.now });
+  const reads = () => f.net.urls.length;
+  const before = reads();
+  await assert.rejects(app.preview(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "5000000", "preview-above-caps") }), refusedAs(solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS), "permission"));
+  await assert.rejects(app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "5000000", "buy-above-caps") }), refusedAs(solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS), "permission"));
+  assert.equal(quotes, 0, "no quote for the preview"); assert.equal(reads(), before, "no Jupiter quote or route for the trade");
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+  // A sale is previewed and sold under the same permission.
+  assert.ok((await app.preview(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "preview-exit") })).quote); assert.equal(quotes, 1);
+  const sold = await app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-above-caps") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+});
+
+test("live rollout caps: one provider showing the session's limits within lowered caps cannot let a buy under a permission above them through; every provider's limits are read before signing", async t => {
+  const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
+  // 0.1 SOL held, so the buy keeps room to sell its position; the session record has no limits (registered before they were kept).
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 100_000_000n, mark: "fair", build: { kind: "fair" }, env: lowered });
+  // The primary serves the vault with limits at the default caps (10 and 25 USDG, 0.1 and 0.25 SOL); the fallback, honestly, with the signed ones.
+  const within = (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const result = await read(method, params) as { value?: unknown } | null;
+    const patch = (account: unknown) => {
+      const data = (account as { data?: [string, string] } | null)?.data;
+      if (!data || Buffer.from(data[0], "base64").length !== SOLANA_VAULT_ACCOUNT_SIZE) return account;
+      const b = Buffer.from(data[0], "base64");
+      for (const [offset, value] of [[98, 10_000_000n], [106, 25_000_000n], [114, 100_000_000n], [122, 250_000_000n]] as const) b.writeBigUInt64LE(value, offset);
+      return { ...(account as object), data: [b.toString("base64"), "base64"] };
+    };
+    if (method === "getAccountInfo" && params[0] === f.vault && result?.value) return { ...result, value: patch(result.value) };
+    if (method === "getMultipleAccounts" && Array.isArray(result?.value)) return { ...result, value: (result!.value as unknown[]).map(patch) };
+    return result;
+  };
+  await assert.rejects(f.runtime({}, split(f, within)).trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "5000000", "buy-under-a-liar") }),
+    refusedAs(solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS), "permission"));
+  assert.deepEqual(await f.submissions(), []); assert.equal(f.sends.length, 0);
+});
+
 test("live rollout: a renewal that landed after the tenant left the list is activated off it, and its sales back to USDG are then admitted and sent", async t => {
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
   // The app still holds the permission the renewal replaced (epoch 0). Solana holds the renewal (epoch 1): same limits, prepared,
