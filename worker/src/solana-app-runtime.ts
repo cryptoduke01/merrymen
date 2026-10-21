@@ -500,7 +500,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * leave the worker buying under the old ones. So this process publishes a digest of the settings it runs, under its service
    * (at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS unless they changed: the worker's agent with every heartbeat, the web whenever
    * it serves status, a preview or a trade), and judges the other service's:
-   * - the web judges the worker's while it is current (published within SOLANA_WORKER_ONLINE_MS). A worker whose heartbeat is
+   * - the web judges the worker's while it is current (published within SOLANA_WORKER_ONLINE_MS, or stamped after the web's
+   *   own now: the worker's clock runs ahead, which must hold buys rather than skip the check). A worker whose heartbeat is
    *   current while its digest is missing or older (one deployed from code that publishes none, or whose publish keeps
    *   failing) runs settings the web cannot see: that counts as differing too, so the web never takes it as agreement;
    * - the worker judges the web's once the web published it after this worker started (one from before may predate the very
@@ -524,7 +525,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     await publishRollout(db);
     const row = await db.prepare("SELECT fingerprint,seen_at_ms FROM solana_runtime_live_rollout_seen WHERE service=?").get(otherService) as
       { fingerprint: string; seen_at_ms: number | string } | undefined;
-    const at = now(), recent = (ms: number) => ms <= at && at - ms < SOLANA_WORKER_ONLINE_MS;
+    // The worker stamps both rows with its own clock. One stamped after this process's now (the worker's clock runs ahead)
+    // counts as current, never as missing: a check that holds buys fails closed on clock skew, not open.
+    const at = now(), recent = (ms: number) => at - ms < SOLANA_WORKER_ONLINE_MS;
     const current = !!row && (otherService === "worker" ? recent(Number(row.seen_at_ms)) : Number(row.seen_at_ms) >= startedAtMs);
     // The web, of a worker whose heartbeat is current but whose digest is not: running settings nobody can compare.
     let unseen = false;

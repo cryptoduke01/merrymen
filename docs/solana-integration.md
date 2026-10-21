@@ -441,7 +441,11 @@ reads both from its own env, so the web and the Solana worker decide alike.
   whenever it serves Solana status, a preview or a trade). The web judges the
   worker's digest while it is under 90 s old, and counts a worker whose
   heartbeat is current but whose digest is missing or older (deployed from code
-  that publishes none, or whose publish keeps failing) as differing; the worker
+  that publishes none, or whose publish keeps failing) as differing. Both rows
+  carry the worker's clock: one stamped ahead of the web's (the worker's clock
+  running ahead) counts as current, so skew holds buys rather than skipping the
+  check; the web's clock running ahead instead shortens the 90 s window by the
+  skew, which NTP keeps to milliseconds. The worker
   judges the web's once the web published it after the worker started. While
   they differ, every live buy is
   held on both (`SOLANA_LIVE_ROLLOUT_DIFFERS`, a buys-only status blocker; trade

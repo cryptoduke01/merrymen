@@ -2857,3 +2857,29 @@ test("live rollout: while the web and the Solana worker run different list or ca
     assert.deepEqual((await restarted.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
   } finally { f.raw.close(); }
 });
+
+test("live rollout: a worker whose clock runs ahead of the web's is still judged: its digest and heartbeat, stamped in the web's future, count as current, so different settings hold the web's buys", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const web = f.runtime({ env: f.env, log: () => {} });
+    const beat = (atMs: number) => f.db.prepare(`INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?)
+      ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms`).run(atMs);
+    const buy = (requestId: string) => ({ mode: "live" as const, intent: { ...f.trade, mode: "live", requestId } });
+    for (const aheadMs of [1, 5_000, 60_000]) {
+      // The worker runs different caps, with its clock aheadMs ahead of the web's; it has just beaten and published.
+      const worker = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "24" }, service: "worker", now: () => f.clock.now + aheadMs, log: () => {} });
+      await beat(f.clock.now + aheadMs); await worker.publishLiveRollout();
+      assert.deepEqual((await web.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS], String(aheadMs));
+      await assert.rejects(web.trade(f.scope, buy(`ahead-${aheadMs}`)), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+      // Its heartbeat alone, stamped ahead, with no digest at all: a running worker the web cannot check, held too.
+      await f.db.prepare("DELETE FROM solana_runtime_live_rollout_seen WHERE service='worker'").run();
+      assert.deepEqual((await web.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS], `${aheadMs}, heartbeat only`);
+      // The same settings, stamped ahead: nothing differs.
+      await f.runtime({ env: f.env, service: "worker", now: () => f.clock.now + aheadMs, log: () => {} }).publishLiveRollout();
+      assert.deepEqual((await web.status(f.scope)).live.blockers, [], `${aheadMs}, same settings`);
+      f.clock.now += 91_000 + aheadMs;
+    }
+    assert.equal(f.controls.sends, 0, "no buy was sent");
+  } finally { f.raw.close(); }
+});
