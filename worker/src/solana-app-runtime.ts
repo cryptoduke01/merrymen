@@ -572,6 +572,17 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     try { listed = liveListed(s); } catch (error) { if (await wentLive(s)) return; throw error; }
     if (!listed && !(await wentLive(s))) fail(SOLANA_LIVE_NOT_OPEN, "permission");
   }
+  /**
+   * The most each live limit may be saved at while the account's registered permission, as activateLive kept it, may allow more
+   * than the caps: the larger of the cap and that permission's limit, of whichever is known (never null together: callers ask
+   * only with one of them).
+   */
+  function exitCeiling(caps: SolanaLiveCaps | null, kept: SolanaLiveCaps | undefined): SolanaLiveCaps {
+    return Object.fromEntries((["perTradeUsdg", "dailyUsdg", "perTradeWsol", "dailyWsol"] as const).map((field: SolanaLiveCapField) => {
+      const known = [caps?.[field], kept?.[field]].filter((value): value is string => value !== undefined).map(BigInt);
+      return [field, known.reduce((a, b) => a > b ? a : b).toString()];
+    })) as SolanaLiveCaps;
+  }
   /** A registered permission's own limits, as the vault holds them, against the caps. */
   function sessionAboveCaps(state: { perTrade: bigint; daily: bigint; perTradeWsol: bigint; dailyWsol: bigint }, caps: SolanaLiveCaps): boolean {
     return solanaLiveCapsExceeded({ perTradeUsdg: state.perTrade, dailyUsdg: state.daily, perTradeWsol: state.perTradeWsol, dailyWsol: state.dailyWsol }, caps).length > 0;
@@ -1330,8 +1341,14 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
      * refused (prepareLive) until it is back on the list. Its limits may then reach,
      * for each, the larger of the cap and the limit of the permission it registered
      * (as activateLive kept it), so its sales are never narrowed below what it
-     * signed, and never beyond both. Only a session recorded before its limits were
-     * kept, while the caps cannot be read, leaves nothing to bound them by.
+     * signed, and never beyond both. So may those of a tenant on the list whose
+     * registered permission allows more than the caps (registered before they were
+     * lowered): admission bounds its sales by the saved limits, so a re-save at the
+     * caps (a mode switch, a new duration) would narrow its exits below what the
+     * owner signed. Its buys stay refused (requireSessionWithinCaps, assessRisk), and
+     * a new permission must fit the caps (prepareLive, submitSetup). Only a session
+     * recorded before its limits were kept, while the caps cannot be read, leaves
+     * nothing to bound them by.
      */
     async checkLiveSettings(scope: SolanaAccountScope, limits: SolanaPaperLimits): Promise<void> {
       const s = await store(scope);
@@ -1339,18 +1356,16 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       try { listed = liveListed(s); } catch (error) { unreadable = error; }
       try { caps = liveCaps(); } catch (error) { unreadable ??= error; }
       if (listed && caps) {
-        const capped = solanaLiveCapRefusal(limits, caps, "save");
+        const kept = (await s.session())?.limits;
+        const capped = kept && solanaLiveCapsExceeded(kept, caps).length ? solanaLiveExitLimitsRefusal(limits, exitCeiling(caps, kept), "above-caps")
+          : solanaLiveCapRefusal(limits, caps, "save");
         if (capped) fail(capped, "permission");
         return;
       }
       if (!(await wentLive(s))) { if (unreadable) throw unreadable; fail(SOLANA_LIVE_NOT_OPEN, "permission"); }
       const kept = (await s.session())?.limits;
       if (!caps && !kept) return;
-      const ceiling = Object.fromEntries((["perTradeUsdg", "dailyUsdg", "perTradeWsol", "dailyWsol"] as const).map((field: SolanaLiveCapField) => {
-        const known = [caps?.[field], kept?.[field]].filter((value): value is string => value !== undefined).map(BigInt);
-        return [field, known.reduce((a, b) => a > b ? a : b).toString()];
-      })) as SolanaLiveCaps;
-      const capped = solanaLiveExitLimitsRefusal(limits, ceiling);
+      const capped = solanaLiveExitLimitsRefusal(limits, exitCeiling(caps, kept));
       if (capped) fail(capped, "permission");
     },
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {

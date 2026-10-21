@@ -17,7 +17,7 @@ import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } fr
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
-  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps } from "../lib/solana-live-caps";
+  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "../lib/solana-live-caps";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -2619,4 +2619,34 @@ test("the deposit address is offered only while the account may buy: exits-only 
   runtime.liveAccess = access(true); Object.assign(state.runtime.live, { blockers: [SOLANA_LIVE_ROLLOUT_DIFFERS] });
   await mount();
   assert.ok(!ui.container.textContent!.includes("Fund the Solana vault")); assert.ok(ui.container.textContent!.includes(paused));
+});
+
+test("on the list, while the server says the registered permission allows more than the caps, the page leaves a live save above them to the server, and still asks for limits within them before a new permission", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: true, blockers: [solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)] });
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+  // The saved limits (50 USDG and 1 SOL a day) are above the 25 USDG and 0.25 SOL caps: the server bounds them by the permission it holds.
+  await ui.click("Save Solana mode and limits");
+  assert.equal(saved.length, 1, ui.container.textContent!);
+  const { expiresAtMs: _sent, ...sent } = saved[0]!.limits as typeof limits, { expiresAtMs: _held, ...held } = state.binding.limits!;
+  assert.deepEqual(sent, held);
+  assert.equal(button("Register bounded trading permission").disabled, true, "a new permission still needs limits within the caps");
+  assert.ok(ui.container.textContent!.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
+  // Without that blocker (a permission within the caps), the page refuses the same save itself, before anything is sent.
+  Object.assign(state.runtime.live, { blockers: [] });
+  await press("Refresh account");
+  const consent = ui.container.querySelector("input[type=checkbox]") as HTMLInputElement;
+  if (!consent.checked) await act(async () => { consent.click(); });
+  await ui.click("Save Solana mode and limits");
+  assert.equal(saved.length, 1, "nothing sent");
+  assert.ok(ui.container.textContent!.includes(solanaLiveCapRefusal(state.binding.limits!, SOLANA_LIVE_CAP_DEFAULTS, "save")!), ui.container.textContent!);
 });

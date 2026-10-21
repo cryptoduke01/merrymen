@@ -17,7 +17,7 @@ import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/cor
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION,
-  solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, type SolanaLiveCaps } from "../lib/solana-live-caps";
+  solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -301,6 +301,10 @@ function ConnectedSolana() {
   const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? misconfigured : !liveAccess.onList ? (wentLive ? paused : SOLANA_LIVE_NOT_OPEN) : null;
   // The caps a new live permission must fit: only while this account may register one.
   const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
+  // Its registered permission allows more than the caps (the server says so, as a buys-only blocker): its live limits may keep
+  // what the owner signed, so a re-save never narrows its exits. Only the server knows that permission's limits, so the page
+  // leaves such a save to it (checkLiveSettings), and still asks for limits within the caps before a new permission.
+  const signedAboveCaps = !!liveCaps && saidByServer(solanaLiveSessionAboveCaps(liveCaps));
   /**
    * Switching mode, limits the form shows only as the other mode started them (none saved, none typed) become the new mode's
    * starting limits. Paper starts at its own defaults (paper is never capped); live at the caps in force (status's liveAccess), or
@@ -327,8 +331,8 @@ function ConnectedSolana() {
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
     if (mode === "live" && BigInt(units(perTrade, 6)) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new Error(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
     const limits = { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
-    // Above a live cap: refused here, in the server's own words, before anything is sent.
-    const capped = mode === "live" && liveCaps ? solanaLiveCapRefusal(limits, liveCaps, "save") : null;
+    // Above a live cap: refused here, in the server's own words, before anything is sent (unless the permission registered allows more).
+    const capped = mode === "live" && liveCaps && !signedAboveCaps ? solanaLiveCapRefusal(limits, liveCaps, "save") : null;
     if (capped) throw new Error(capped);
     return limits;
   };

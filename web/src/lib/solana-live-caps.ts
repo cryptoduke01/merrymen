@@ -80,12 +80,18 @@ export function solanaLiveCapRefusal(limits: SolanaLiveCappedLimits, caps: Solan
       : "Save live limits within them and register again. Nothing was sent.");
 }
 /**
- * Off the live list (exits-only), or while a rollout setting cannot be read, the refusal of live limits above `ceiling`: for
- * each limit the larger of the cap and what the permission the account registered allows (whichever of them is known). Its
- * live limits are how its exits are sold, so they may reach that permission's own, never beyond it or the caps. Null within it.
+ * The refusal of live limits above `ceiling`: for each limit the larger of the cap and what the permission the account
+ * registered allows (whichever of them is known). Its live limits are how its exits are sold, so they may reach that
+ * permission's own, never beyond it or the caps. Null within it. `why`: "paused" off the live list (exits-only), or while a
+ * rollout setting cannot be read; "above-caps" on the list, while the permission it registered allows more than the caps
+ * (registered before they were lowered), whose buys are refused until a new one within them is registered.
  */
-export function solanaLiveExitLimitsRefusal(limits: SolanaLiveCappedLimits, ceiling: SolanaLiveCaps): string | null {
+export function solanaLiveExitLimitsRefusal(limits: SolanaLiveCappedLimits, ceiling: SolanaLiveCaps, why: "paused" | "above-caps" = "paused"): string | null {
   if (!solanaLiveCapsExceeded(limits, ceiling).length) return null;
+  if (why === "above-caps") {
+    return `Your registered live permission allows more than this platform's live caps, so your live limits may be at most the caps or, where it allows more, `
+      + `that permission: ${solanaLiveCapsText(ceiling)}. Lower them and save again. Nothing was saved.`;
+  }
   return `While live trading is paused for this account, its live limits may be at most this platform's live caps or, where it allows more, the permission `
     + `you registered: ${solanaLiveCapsText(ceiling)}. Lower them and save again. Nothing was saved.`;
 }

@@ -22,7 +22,7 @@ import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SOLANA_STATUS_DAILY_USDG_BUYS_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
-import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
+import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveExitLimitsRefusal, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
 import { createSolanaLiveMarket, SolanaLiveMarketError } from "./solana-live-market";
 import type { SolanaLiveRead, SolanaLiveRpc } from "./solana-live-rpc";
@@ -1354,4 +1354,44 @@ test("exits keep room within the limits the vault enforces: saved live limits ab
   const soldUnderTwo = vaultLimits(k, { perTrade: 25_000_000n, daily: 1_000_000_000n, perTradeWsol: 200_000_000n, dailyWsol: 2_000_000_000n });
   const bought = await k.runtime({}, split(k, soldUnderTwo, soldUnderTwo)).trade(k.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-within-sol") });
   assert.ok("status" in bought && bought.status === "pending"); assert.equal(k.sends.length, 1);
+});
+
+test("live rollout caps: on the list, an account whose permission is registered above caps lowered since may save its live limits up to what it signed, so a re-save never narrows its exits; buys stay refused", async t => {
+  // The registered permission allows 25 and 100 USDG, 0.2 and 1 SOL (kept as activateLive keeps it); the caps are lowered to the defaults.
+  const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: lowered });
+  const signed = { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg, perTradeWsol: limits.perTradeWsol, dailyWsol: limits.dailyWsol };
+  const keep = async (kept: Record<string, string>) => {
+    const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=?").get(TENANT) as { record_json: string }).record_json);
+    await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=? WHERE tenant=?").run(JSON.stringify({ ...record, limits: kept }), TENANT);
+  };
+  await keep(signed);
+  const save = async (saved: typeof limits) => {
+    await f.app.checkLiveSettings(f.scope, saved);
+    await f.bindings.settings(TENANT, f.scope.owner, (await f.bindings.get(TENANT))!.revision, "live", saved);
+  };
+  // 30 USDG of earlier trades in the window.
+  await windowRow(f, "earlier", "finalized", 3_600_000, SOLANA_USDG_MINT, "30000000", "30000000");
+  // A re-save at the caps (where the page starts live limits) narrows the exits: 30 of 25 USDG used, no sale is admitted.
+  const capped = { ...limits, perTradeUsdg: "10000000", dailyUsdg: "25000000", perTradeWsol: "100000000", dailyWsol: "250000000" };
+  await save(capped);
+  const narrowed = await f.app.status(f.scope);
+  assert.ok(narrowed.live.blockers.includes(SOLANA_STATUS_DAILY_USDG_USED), narrowed.live.blockers.join(" | ")); assert.equal(narrowed.live.canExit, false);
+  // The limits it signed may be saved again on the list, as off it: its exits are back.
+  await save(limits);
+  const restored = await f.app.status(f.scope);
+  assert.deepEqual(restored.live.blockers, [solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)]); assert.equal(restored.live.canExit, true);
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "50000000", "exit-after-resave") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+  // Never beyond what it signed where that is above the caps, nor beyond the caps where they allow more.
+  for (const over of [{ ...limits, dailyUsdg: "100000001" }, { ...limits, dailyWsol: "1000000001" }]) {
+    await assert.rejects(f.app.checkLiveSettings(f.scope, over), refusedAs(solanaLiveExitLimitsRefusal(over, signed, "above-caps")!, "permission"), JSON.stringify(over));
+  }
+  assert.match(solanaLiveExitLimitsRefusal({ ...limits, dailyUsdg: "100000001" }, signed, "above-caps")!, /^Your registered live permission allows more than this platform's live caps, so your live limits may be at most the caps or, where it allows more, that permission: at most 25 USDG per trade, 100 USDG per 24 hours, 0\.2 SOL sold per trade and 1 SOL sold per 24 hours\. Lower them and save again\. Nothing was saved\.$/);
+  // Its buys stay refused, before any quote.
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "5000000", "buy-after-resave") }), refusedAs(solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS), "permission"));
+  // A permission within the caps (a new one registered): the caps alone bound a save again, in their own words.
+  await keep({ perTradeUsdg: "10000000", dailyUsdg: "25000000", perTradeWsol: "100000000", dailyWsol: "250000000" });
+  await assert.rejects(f.app.checkLiveSettings(f.scope, limits), refusedAs(solanaLiveCapRefusal(limits, SOLANA_LIVE_CAP_DEFAULTS, "save")!, "permission"));
+  await f.app.checkLiveSettings(f.scope, capped);
 });
