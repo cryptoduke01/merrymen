@@ -41,6 +41,7 @@ import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./s
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
 import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, solanaLiveTenants,
   type SolanaLiveCaps } from "./solana-live-rollout";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED } from "../../web/src/lib/solana-live-caps";
 
 /**
  * Codes:
@@ -181,22 +182,11 @@ export const SOLANA_WITHDRAW_BELOW_BOOK = "Your vault holds less of this asset t
  */
 export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that landed on Solana after your revocation is still active there until it expires. Merrymen never uses it; revoke again under Owner controls to end it.";
 /**
- * THE LIVE ROLLOUT (solana-live-rollout.ts), AS THE OWNER HEARS IT. It only
- * ever stops new live permissions and buys; exits, revoke and withdraw never
- * read it.
- * - SOLANA_LIVE_NOT_OPEN: a tenant MERRYMEN_SOLANA_LIVE_TENANTS does not name,
- *   whose account never went live: it cannot save live mode, register a
- *   permission or buy.
- * - SOLANA_LIVE_PAUSED: one that went live (a registered permission or a live
- *   book) and is off the list now: exits-only. Status says it as a blocker that
- *   leaves exits open; its buys and new permissions are refused with it.
- * - SOLANA_LIVE_ROLLOUT_MISCONFIGURED: the list or a cap cannot be read: new
- *   permissions and buys are refused for everyone as configuration, and the
- *   operator gets an [alert] naming the setting; exits continue.
+ * The live rollout's owner-facing words (web/src/lib/solana-live-caps.ts, shared with the page): SOLANA_LIVE_NOT_OPEN for a tenant
+ * the list does not name that never went live, SOLANA_LIVE_PAUSED for one that went live and is off the list now (exits-only), and
+ * SOLANA_LIVE_ROLLOUT_MISCONFIGURED while the list or a cap cannot be read.
  */
-export const SOLANA_LIVE_NOT_OPEN = "Live trading is not open for this account yet. Paper trading is available.";
-export const SOLANA_LIVE_PAUSED = "Live trading is paused for this account: exits, revoke and withdraw still work.";
-export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. Exits, revoke and withdraw still work.";
+export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED };
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);

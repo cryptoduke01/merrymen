@@ -16,6 +16,8 @@ import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionE
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps,
+  type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -33,6 +35,11 @@ type RuntimeStatus = {
     ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null };
   limits: SolanaPaperLimits | null;
   automation?: { workerOnline: boolean; lastSeenAtMs: number | null };
+  /**
+   * The live rollout (MERRYMEN_SOLANA_LIVE_TENANTS and the live caps): whether this account may go live, and the caps a new
+   * permission must fit (null while a cap setting cannot be read). Never the list itself. Absent from an older server.
+   */
+  liveAccess?: { onList: boolean; misconfigured: boolean; caps: SolanaLiveCaps | null };
 };
 type Status = { binding: SolanaBinding | null; runtime: RuntimeStatus | null };
 type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
@@ -179,8 +186,9 @@ function ConnectedSolana() {
   // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
   const [depositAccount, setDepositAccount] = useState<string | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
-  const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
-  const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
+  // The defaults are the platform's default live caps (web/src/lib/solana-live-caps.ts), so a first live save fits them.
+  const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("25");
+  const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.25");
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
   const [preview, setPreview] = useState<Preview | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -278,6 +286,14 @@ function ConnectedSolana() {
   };
   const binding = status?.binding;
   const sameWallet = !!binding && signer.address === binding.owner;
+  // THE LIVE ROLLOUT, as status reports it. The server decides every case itself (the runtime refuses a live save, a
+  // permission or a buy it does not admit); the page only says why and offers no live switch it would refuse.
+  const liveAccess = status?.runtime?.liveAccess;
+  // An account that went live (live mode, a registered permission or a live book) keeps live mode for its exits.
+  const wentLive = binding?.requestedMode === "live" || !!status?.runtime?.live.session || !!status?.runtime?.live.book;
+  const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED : !liveAccess.onList ? (wentLive ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN) : null;
+  // The caps a new live permission must fit: only while this account may register one.
+  const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
   const policy = (): SolanaPaperLimits => {
     const maxOpsPerDay = Number(ops), maxDrawdownBps = Number(units(drawdown, 2)), hours = Number(duration);
     if (!Number.isInteger(maxOpsPerDay) || maxOpsPerDay < 1 || maxOpsPerDay > 96
@@ -287,7 +303,11 @@ function ConnectedSolana() {
     const sell = mode === "live" ? { perTradeWsol: units(perTradeSol, 9), dailyWsol: units(dailySol, 9) } : {};
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
     if (mode === "live" && BigInt(units(perTrade, 6)) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new Error(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
-    return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
+    const limits = { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
+    // Above a live cap: refused here, in the server's own words, before anything is sent.
+    const capped = mode === "live" && liveCaps ? solanaLiveCapRefusal(limits, liveCaps, "save") : null;
+    if (capped) throw new Error(capped);
+    return limits;
   };
   /** The form shows exactly the saved mode and limits: nothing typed is waiting to be saved. */
   const formMatchesSaved = (): boolean => {
@@ -302,7 +322,9 @@ function ConnectedSolana() {
   /** Why a new permission cannot be registered with what the page shows, or null. */
   const registerBlock = (): string | null => {
     const saved = binding?.limits;
+    if (liveClosed) return liveClosed;
     if (!saved) return "Save live mode and its limits before registering a trading permission.";
+    if (liveCaps && solanaLiveCapsExceeded(saved, liveCaps).length) return solanaLiveSavedAboveCaps(liveCaps);
     if (saved.expiresAtMs <= Date.now()) return `Your saved limits expired at ${permissionExpiry(saved.expiresAtMs)}. Save new limits before registering.`;
     if (!saved.perTradeWsol || !saved.dailyWsol) return "Save how much SOL a live trade and a live day may sell before registering.";
     if (!formMatchesSaved()) return "The form has unsaved changes. A permission is always signed with your saved limits: save your changes, or refresh to discard them, before registering.";
@@ -655,8 +677,10 @@ function ConnectedSolana() {
       }); }}><h2>Solana trading mode</h2>
         <fieldset disabled={busy}><legend>Choose how this account trades</legend>
           <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => { setMode("paper"); setConsent(false); invalidate(); }} /> Paper · simulated funds</label>
-          <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>
+          {/* No live switch while this account may not go live; one that went live keeps it for its exits. */}
+          {(!liveClosed || wentLive) && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>}
         </fieldset>
+        {liveClosed && <p role="status">{liveClosed}</p>}
         <div className="solana-fields">
           <label>USDG per trade<input inputMode="decimal" value={perTrade} onChange={(e) => setPerTrade(e.target.value)} /></label>
           <label>USDG per 24 hours<input inputMode="decimal" value={daily} onChange={(e) => setDaily(e.target.value)} /></label>
@@ -668,6 +692,7 @@ function ConnectedSolana() {
             <label>SOL sold per 24 hours<input inputMode="decimal" value={dailySol} onChange={(e) => setDailySol(e.target.value)} /></label>
           </>}
         </div>
+        {mode === "live" && liveCaps && <p>Live limits on this platform are {solanaLiveCapsText(liveCaps)}.</p>}
         {mode === "live" && <p>Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller. Set at least 1 USDG per trade, and SOL sold per trade worth at least 1 USDG: registering checks it against the independent SOL price.</p>}
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
         <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>
