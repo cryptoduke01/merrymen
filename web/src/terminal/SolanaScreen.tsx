@@ -16,11 +16,13 @@ import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionE
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
-import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps,
-  type SolanaLiveCaps } from "../lib/solana-live-caps";
+import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION,
+  solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
+/** The form's starting limits in paper mode: 10 and 50 USDG; 0.1 and 0.5 SOL sold, should live be chosen once limits are saved. */
+const PAPER_DEFAULTS = { perTrade: "10", daily: "50", perTradeSol: "0.1", dailySol: "0.5" } as const;
 type RuntimeStatus = {
   owner: string; requestedMode: "paper" | "live"; paper: SolanaPaperSnapshot | null;
   live: { ready: boolean; canExit?: boolean; cashTokenAccount?: string | null; blockers: string[]; programId: string | null; vault: string | null; session: string | null; pending: Receipt[];
@@ -186,9 +188,9 @@ function ConnectedSolana() {
   // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
   const [depositAccount, setDepositAccount] = useState<string | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
-  // The defaults are the platform's default live caps (web/src/lib/solana-live-caps.ts), so a first live save fits them.
-  const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("25");
-  const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.25");
+  // Paper's defaults; choosing live with nothing saved starts from the live caps instead (startingLimits).
+  const [perTrade, setPerTrade] = useState<string>(PAPER_DEFAULTS.perTrade), [daily, setDaily] = useState<string>(PAPER_DEFAULTS.daily);
+  const [perTradeSol, setPerTradeSol] = useState<string>(PAPER_DEFAULTS.perTradeSol), [dailySol, setDailySol] = useState<string>(PAPER_DEFAULTS.dailySol);
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
   const [preview, setPreview] = useState<Preview | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -299,6 +301,22 @@ function ConnectedSolana() {
   const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? misconfigured : !liveAccess.onList ? (wentLive ? paused : SOLANA_LIVE_NOT_OPEN) : null;
   // The caps a new live permission must fit: only while this account may register one.
   const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
+  /**
+   * Switching mode, limits the form shows only as the other mode started them (none saved, none typed) become the new mode's
+   * starting limits. Paper starts at its own defaults (paper is never capped); live at the caps in force (status's liveAccess), or
+   * the default caps from a server that reports none, so a first live save fits them. Saved or typed limits are never replaced;
+   * the SOL sold limits, saved only with live mode, start at the caps beside saved paper limits too.
+   */
+  const chooseMode = (next: "paper" | "live") => {
+    if (next !== mode) {
+      const caps = liveAccess?.caps ?? SOLANA_LIVE_CAP_DEFAULTS;
+      const live = { perTrade: display(caps.perTradeUsdg), daily: display(caps.dailyUsdg), perTradeSol: display(caps.perTradeWsol, 9), dailySol: display(caps.dailyWsol, 9) };
+      const [from, to] = next === "live" ? [PAPER_DEFAULTS, live] : [live, PAPER_DEFAULTS];
+      if (!binding?.limits && perTrade === from.perTrade && daily === from.daily) { setPerTrade(to.perTrade); setDaily(to.daily); }
+      if (!binding?.limits?.perTradeWsol && perTradeSol === from.perTradeSol && dailySol === from.dailySol) { setPerTradeSol(to.perTradeSol); setDailySol(to.dailySol); }
+    }
+    setMode(next); setConsent(false); invalidate();
+  };
   const policy = (): SolanaPaperLimits => {
     const maxOpsPerDay = Number(ops), maxDrawdownBps = Number(units(drawdown, 2)), hours = Number(duration);
     if (!Number.isInteger(maxOpsPerDay) || maxOpsPerDay < 1 || maxOpsPerDay > 96
@@ -681,9 +699,9 @@ function ConnectedSolana() {
         await api("settings", { mode, limits: policy(), revision: binding.revision, liveConsent: consent }); invalidate(); await refresh();
       }); }}><h2>Solana trading mode</h2>
         <fieldset disabled={busy}><legend>Choose how this account trades</legend>
-          <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => { setMode("paper"); setConsent(false); invalidate(); }} /> Paper · simulated funds</label>
+          <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => chooseMode("paper")} /> Paper · simulated funds</label>
           {/* No live switch while this account may not go live; one that went live keeps it for its exits, and a saved live mode stays shown. */}
-          {(!liveClosed || wentLive || binding.requestedMode === "live") && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>}
+          {(!liveClosed || wentLive || binding.requestedMode === "live") && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => chooseMode("live")} /> Live · real funds</label>}
         </fieldset>
         {liveClosed && <p role="status">{liveClosed}</p>}
         <div className="solana-fields">

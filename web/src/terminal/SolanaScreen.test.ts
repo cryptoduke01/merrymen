@@ -2490,12 +2490,31 @@ test("off the live list a paper account is told why and offered no live switch; 
   assert.equal((saved[0]!.limits as Record<string, unknown>).dailyUsdg, "25000000");
 });
 
-test("with no limits saved, the live form starts at the default live caps", async () => {
+test("with no limits saved, the paper form starts at paper's own defaults and choosing live starts at the live caps in force", async () => {
   (state.binding as { limits: unknown }).limits = null;
-  (state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> }).liveAccess = access(true);
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
   await render();
-  // The paper form shares them (paper limits are never capped).
-  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "25"]);
+  const paperSwitch = () => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.includes("Paper · simulated funds"))!.querySelector("input")!;
+  // Paper limits are never capped: 10 and 50 USDG, as before the live caps.
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "50"]);
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
+  // Back to paper: its own defaults again.
+  await act(async () => { paperSwitch().click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "50"]);
+  // Other caps in force: live starts at those. A typed limit is kept.
+  runtime.liveAccess = { onList: true, misconfigured: false, caps: { perTradeUsdg: "5000000", dailyUsdg: "20000000", perTradeWsol: "50000000", dailyWsol: "200000000" } };
+  await press("Refresh account");
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["5", "20", "0.05", "0.2"]);
+  await act(async () => { paperSwitch().click(); });
+  await type("USDG per 24 hours", "40");
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "40"], "typed limits are never replaced");
+  // A server that reports no caps: live starts at the default caps (a fresh page).
+  delete runtime.liveAccess;
+  await ui.remount(React.createElement(SolanaScreen));
   await act(async () => { liveSwitch()!.click(); });
   assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
 });
@@ -2577,3 +2596,4 @@ test("an account that went live and later chose paper keeps its live switch off 
   await press("Refresh account");
   assert.equal(!!liveSwitch(), false);
 });
+
