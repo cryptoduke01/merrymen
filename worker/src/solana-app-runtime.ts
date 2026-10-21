@@ -40,7 +40,7 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
   solanaRevokedBesideResume } from "./solana-trading-store";
 import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./solana-external-withdrawal";
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
-import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveExitLimitsRefusal, solanaLiveRolloutFingerprint, solanaLiveSavedAboveCaps,
+import { SOLANA_LIVE_ROLLOUT_PUBLISH_MS, SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveExitLimitsRefusal, solanaLiveRolloutFingerprint, solanaLiveSavedAboveCaps,
   solanaLiveSessionAboveCaps, solanaLiveTenants, type SolanaLiveCapField, type SolanaLiveCaps } from "./solana-live-rollout";
 import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "../../web/src/lib/solana-live-caps";
@@ -235,8 +235,8 @@ export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISS
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION };
 /** The worker counts as online, and its published settings as current, while its heartbeat is younger than this (status, the page). */
 const SOLANA_WORKER_ONLINE_MS = 90_000;
-/** A process publishes the live rollout settings it runs at least this often (or at once when they change). */
-export const SOLANA_LIVE_ROLLOUT_PUBLISH_MS = 30_000;
+/** A process publishes the live rollout settings it runs at least this often (solana-live-rollout.ts). */
+export { SOLANA_LIVE_ROLLOUT_PUBLISH_MS };
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -519,28 +519,41 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * SETTINGS THAT MUST MATCH, CHECKED (solanaLiveRolloutFingerprint). The web and the Solana worker each read the list and the
    * caps from their own env, and apply a change only once redeployed: caps lowered, or a tenant removed, on the web alone would
    * leave the worker buying under the old ones. So this process publishes a digest of the settings it runs, under its service
-   * (the worker's agent with every heartbeat, so its digest is never older than its heartbeat; the web whenever it serves
-   * status, a preview or a trade, at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS unless they changed), and judges the other service's:
+   * (the worker's agent with every heartbeat, so its digest is never older than its heartbeat; the web as it starts and every
+   * SOLANA_LIVE_ROLLOUT_PUBLISH_MS after (web/src/instrumentation.ts), and whenever it serves status, a preview or a trade: at
+   * most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS while the stored digest is its own, at once when it is not, as when an old
+   * container still draining wrote its own since), and judges the other service's:
    * - the web judges the worker's while it is current (published within SOLANA_WORKER_ONLINE_MS, or stamped after the web's
    *   own now: the worker's clock runs ahead, which must hold buys rather than skip the check). A worker whose heartbeat is
    *   current while its digest is missing or older (one deployed from code that publishes none, or whose publish keeps
    *   failing) runs settings the web cannot see: that counts as differing too, so the web never takes it as agreement;
-   * - the worker judges the web's latest digest whatever its age, and only one equal to its own lets its buys through: the web
-   *   has no heartbeat, so an old digest cannot be told from a web still running what it published then. A missing one (a
-   *   fresh deployment, before the web served any Solana request) holds them too, as the web holds a worker it cannot check.
-   *   The web publishes only when it serves a Solana request, so after any change the worker's buys wait for the first one on
-   *   the redeployed web (the runbook opens the Solana page then: "Turning Solana on"). A worker restarted with the settings
-   *   the web runs is never held; one restarted with new settings (a tenant re-added, caps raised) is held until the web runs
-   *   them too, so it never buys under settings the web does not run, however long ago the web last published.
+   * - the worker judges the web's latest digest whatever its age, and only one equal to its own lets its buys through. A
+   *   missing one (a fresh deployment, before the web started) holds them too, as the web holds a worker it cannot check. A
+   *   worker restarted with the settings the web runs is never held; one restarted with new settings (a tenant re-added, caps
+   *   raised) is held until the web runs them too and has published them, which it does as it starts.
+   *   What this cannot see: the worker trusts the latest digest written as the web's. While the web's publishes fail (each
+   *   failure says an [alert]: solana-live-rollout unpublished), or while an old web container still draining during a deploy
+   *   has written its own digest after the new one's (until the new one's next publish, within SOLANA_LIVE_ROLLOUT_PUBLISH_MS
+   *   or at its next Solana request), that digest is out of date. If it equals the worker's settings, the worker buys under
+   *   settings the running web may no longer run. Deployed in the runbook's order, the worker first ("Turning Solana on"), an
+   *   old web container's digest is never the new worker's, so that window holds buys rather than letting them through.
    * While they differ every live buy is held, here and there: status says so as a buys-only blocker, trade and preview refuse
    * buys as configuration, and the operator is told with an [alert] at most once a minute. Exits, revoke and withdraw never ask.
    */
   const service = options.service ?? "web", otherService = service === "web" ? "worker" : "web";
   let rolloutPublished: { fingerprint: string; atMs: number } | undefined, rolloutDiffersAlertAtMs: number | undefined;
-  /** `everyTime`: written whatever was published last (the worker's heartbeat), not at most every SOLANA_LIVE_ROLLOUT_PUBLISH_MS. */
+  /**
+   * Writes this process's digest under its service. Within SOLANA_LIVE_ROLLOUT_PUBLISH_MS of its own last write it writes again
+   * only if the stored digest is no longer its own: another process of the same service wrote since (an old web container still
+   * serving during a deploy), and the row must not keep that one's settings until the interval ends. `everyTime`: written
+   * whatever was published last (the worker's heartbeat, and the web's start and periodic publish).
+   */
   async function publishRollout(db: Db, everyTime = false): Promise<void> {
     const fingerprint = solanaLiveRolloutFingerprint(env), at = now();
-    if (!everyTime && rolloutPublished?.fingerprint === fingerprint && at >= rolloutPublished.atMs && at - rolloutPublished.atMs < SOLANA_LIVE_ROLLOUT_PUBLISH_MS) return;
+    if (!everyTime && rolloutPublished?.fingerprint === fingerprint && at >= rolloutPublished.atMs && at - rolloutPublished.atMs < SOLANA_LIVE_ROLLOUT_PUBLISH_MS) {
+      const stored = await db.prepare("SELECT fingerprint FROM solana_runtime_live_rollout_seen WHERE service=?").get(service) as { fingerprint: string } | undefined;
+      if (stored?.fingerprint === fingerprint) return;
+    }
     await db.prepare(`INSERT INTO solana_runtime_live_rollout_seen(service,fingerprint,seen_at_ms) VALUES(?,?,?)
       ON CONFLICT(service) DO UPDATE SET fingerprint=excluded.fingerprint,seen_at_ms=excluded.seen_at_ms`).run(service, fingerprint, at);
     rolloutPublished = { fingerprint, atMs: at };
@@ -572,12 +585,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           + "MERRYMEN_SOLANA_LIVE_MAX_* settings for over 90 s (code that publishes none, or a failing publish), so the web cannot check them; no live "
           + "Solana buy is admitted until it does (exits, revoke and withdraw continue)"
           : held === "web-unpublished" ? "[alert] solana-live-rollout differs: the web has not published its MERRYMEN_SOLANA_LIVE_TENANTS and "
-          + "MERRYMEN_SOLANA_LIVE_MAX_* settings yet (it does when it serves Solana status, a preview or a trade), so the Solana worker cannot check them; "
-          + "the worker admits no live Solana buy until it does: once the web runs the same settings, open its Solana page (exits, revoke and withdraw continue)"
+          + "MERRYMEN_SOLANA_LIVE_MAX_* settings yet (it does as it starts, every 30 s after, and when it serves a Solana request), so the Solana worker "
+          + "cannot check them; the worker admits no live Solana buy until it does: deploy the web with MERRYMEN_SOLANA=1 and the same settings, "
+          + "and if it is running, see its [alert] solana-live-rollout unpublished (exits, revoke and withdraw continue)"
           : service === "worker" ? "[alert] solana-live-rollout differs: the web last published different MERRYMEN_SOLANA_LIVE_TENANTS or "
-          + "MERRYMEN_SOLANA_LIVE_MAX_* settings from the Solana worker's (one was redeployed without the other, or the web has not served a Solana request "
-          + "since it was); the worker admits no live Solana buy until both run the same values and the web has published them: open its Solana page "
-          + "(exits, revoke and withdraw continue)"
+          + "MERRYMEN_SOLANA_LIVE_MAX_* settings from the Solana worker's (one was redeployed without the other, or the web cannot publish: see its "
+          + "[alert] solana-live-rollout unpublished); the worker admits no live Solana buy until both run the same values and the web has published "
+          + "them, which it does as it starts and every 30 s after (exits, revoke and withdraw continue)"
           : "[alert] solana-live-rollout differs: the web and the Solana worker run different MERRYMEN_SOLANA_LIVE_TENANTS or MERRYMEN_SOLANA_LIVE_MAX_* "
           + "settings; no live Solana buy is admitted until both are deployed with the same values (exits, revoke and withdraw continue)");
       } catch { /* Logging never changes an outcome. */ }
@@ -1145,7 +1159,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   return {
     /**
      * Publishes the live rollout settings this process runs (SETTINGS THAT MUST MATCH, CHECKED): the Solana worker's agent
-     * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades.
+     * calls it with every heartbeat, so the web judges the settings of a worker that is running, whether or not it trades;
+     * the web calls it as it starts and every SOLANA_LIVE_ROLLOUT_PUBLISH_MS after (web/src/lib/solana-rollout-publisher.ts),
+     * so the worker judges the settings of a web that is running, whether or not it serves a Solana request.
      * Written every time, never throttled: a digest older than the heartbeat beside it (one beat, a slow status read, then a
      * stall) would be taken for a worker that publishes none, and hold every live buy with an [alert] about nothing.
      */

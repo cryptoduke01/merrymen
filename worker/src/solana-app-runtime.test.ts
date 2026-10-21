@@ -33,6 +33,7 @@ import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REV
 import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveExitLimitsRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
+import { startSolanaRolloutPublisher } from "../../web/src/lib/solana-rollout-publisher";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 /** A Token-2022 USDG mint carrying the TransferHook extension (type 14): the issuer holds its authority, `hook` names the program or none. */
@@ -2922,7 +2923,7 @@ test("live rollout: on a fresh deployment, before the web has published any dige
     const sale = { ...f.trade, mode: "live", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "100000000" };
     assert.ok((await worker.preview(f.scope, { mode: "live", intent: sale })).quote, "a sale is still previewed");
     assert.equal(unpublished(), 1, "once a minute per process, however often it is read");
-    assert.match(lines[0]!, /open its Solana page/);
+    assert.match(lines[0]!, /it does as it starts, every 30 s after, and when it serves a Solana request.*see its \[alert\] solana-live-rollout unpublished/);
     f.clock.now += 60_000; await worker.status(f.scope);
     assert.equal(unpublished(), 2, "said again after a minute");
     // The web serves its first Solana request, on the same settings: the worker's very next check lets buys through.
@@ -2931,6 +2932,87 @@ test("live rollout: on a fresh deployment, before the web has published any dige
     assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
     f.clock.now += 60_000; await worker.status(f.scope);
     assert.equal(unpublished(), 2, "nothing more to say");
+    assert.equal(f.controls.sends, 0);
+  } finally { f.raw.close(); }
+});
+
+/** The web server's publisher (web/src/instrumentation.ts) over `web`, with a timer the test runs by hand: `tick()` is 30 s passing. */
+function webStarts(web: ReturnType<typeof createSolanaAppRuntime>) {
+  let run: (() => void) | undefined;
+  const publisher = startSolanaRolloutPublisher({ enabled: () => true, publish: () => web.publishLiveRollout(), log: line => assert.fail(line),
+    every: (fn) => { run = fn; return { stop: () => { run = undefined; } }; } })!;
+  return { started: publisher.started, stop: publisher.stop, tick: async () => { run!(); await new Promise<void>(resolve => setImmediate(resolve)); } };
+}
+
+test("live rollout: a web redeployed with new settings publishes them as it starts, before it serves any Solana request, so a worker redeployed after it under the web's previous settings buys nothing", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const removed = { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT }, lines: string[] = [];
+    // The web served a request on the list naming this tenant: its digest is published.
+    await f.runtime({ env: f.env, log: () => {} }).status(f.scope);
+    // The tenant is taken off, the worker first, then the web, which starts and serves no Solana request.
+    f.clock.now += 1;
+    await f.runtime({ env: removed, service: "worker", log: () => {} }).publishLiveRollout();
+    f.clock.now += 1;
+    const web = webStarts(f.runtime({ env: removed, log: () => {} }));
+    await web.started;
+    // The worker is redeployed again with the tenant listed (a revert done on the worker alone): the digest the web left
+    // before it was redeployed equals the worker's, but the web runs the list without the tenant, so the worker's buys wait.
+    f.clock.now += 1;
+    const worker = f.runtime({ env: f.env, service: "worker", log: line => lines.push(line) });
+    await worker.publishLiveRollout();
+    const held = await worker.status(f.scope);
+    assert.deepEqual(held.live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]); assert.equal(held.live.canExit, true);
+    await assert.rejects(worker.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "revert-buy" } }), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    assert.equal(lines.filter(line => line.startsWith("[alert] solana-live-rollout differs: the web last published different")).length, 1);
+    // The web is reverted too: it publishes as it starts, and the worker buys again with no request served.
+    web.stop(); f.clock.now += 1;
+    const reverted = webStarts(f.runtime({ env: f.env, log: () => {} }));
+    await reverted.started;
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    reverted.stop();
+    assert.equal(f.controls.sends, 0, "no buy was sent while the web ran other settings");
+  } finally { f.raw.close(); }
+});
+
+test("live rollout: a digest an old web container still draining writes after the new web's is replaced at the new web's next Solana request, at once, and with none at its next periodic publish; the worker's buys wait meanwhile", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const removed = { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT };
+    const webRow = async () => (await f.db.prepare("SELECT fingerprint FROM solana_runtime_live_rollout_seen WHERE service='web'").get() as { fingerprint: string }).fingerprint;
+    // The old web runs the list without this tenant and served a request; the worker is deployed first with the tenant added.
+    const old = f.runtime({ env: removed, log: () => {} });
+    await old.status(f.scope);
+    const worker = f.runtime({ env: f.env, service: "worker", log: () => {} });
+    await worker.publishLiveRollout();
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    // The new web starts with the tenant added and publishes: the worker buys.
+    f.clock.now += 40_000;
+    const fresh = f.runtime({ env: f.env, log: () => {} }), web = webStarts(fresh);
+    await web.started;
+    const published = await webRow();
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    // The old container, still draining, serves one more request (its own last write over 30 s ago): its digest is written over
+    // the new one's, and the worker's buys wait.
+    f.clock.now += 1_000;
+    await old.status(f.scope);
+    assert.notEqual(await webRow(), published);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    // The new web serves a Solana request within 30 s of its own write: the stored digest is not its own, so it is written at once.
+    f.clock.now += 1_000;
+    assert.deepEqual((await fresh.status(f.scope)).live.blockers, []);
+    assert.equal(await webRow(), published);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    // Once more from the old container, then it stops; the new web serves no request: its next periodic publish replaces it.
+    f.clock.now += 1_000;
+    await old.status(f.scope);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    f.clock.now += 30_000; await web.tick();
+    assert.equal(await webRow(), published);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, []);
+    web.stop();
     assert.equal(f.controls.sends, 0);
   } finally { f.raw.close(); }
 });

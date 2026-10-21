@@ -120,6 +120,11 @@ export function solanaLiveCaps(env: Env): SolanaLiveCaps {
 }
 
 /**
+ * A process publishes the live rollout settings it runs at least this often: the web on a timer from its start (and at
+ * once, at a Solana request, when the stored digest is not its own), the worker with every heartbeat.
+ */
+export const SOLANA_LIVE_ROLLOUT_PUBLISH_MS = 30_000;
+/**
  * SETTINGS THAT MUST MATCH, CHECKED. The web and the Solana worker each read
  * these settings from their own env, and each service applies a change only
  * once it is redeployed. This is a digest of what one process runs: the list as
