@@ -394,7 +394,9 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
 
-  if (seen.breaker.length && now - seen.breaker[0]! <= currentSec) {
+  // Breaker, provider and cap items describe what holds back trading under a
+  // live permission; once it has expired, the expired item is what does.
+  if (live && seen.breaker.length && now - seen.breaker[0]! <= currentSec) {
     const start = runStart(seen.breaker, gapSec, floor, truncated);
     items.push({
       key: `breaker:${slug}:on`, severity: "act_now", kind: "breaker", agent: slug,
@@ -406,7 +408,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
 
   // Each provider failing now is its own open condition, newest first.
   const providers = (["market", "brain", "model"] as const)
-    .filter((k) => seen[k].length && now - seen[k][0]! <= currentSec)
+    .filter((k) => live && seen[k].length && now - seen[k][0]! <= currentSec)
     .sort((x, y) => seen[y][0]! - seen[x][0]!);
   for (const provider of providers) {
     const start = runStart(seen[provider], gapSec, floor, truncated);
@@ -418,7 +420,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
 
-  const caps = ids.length ? (await db.prepare(
+  const caps = live && ids.length ? (await db.prepare(
     `SELECT reject_rule AS rule, MIN(created_at) AS first, MAX(created_at) AS last FROM trades
       WHERE agent_id IN (${inList}) AND status = 'rejected' AND reject_rule IN ('daily-cap', 'ops-cap') AND created_at >= ?
       GROUP BY reject_rule`,

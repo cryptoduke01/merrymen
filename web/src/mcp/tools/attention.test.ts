@@ -132,9 +132,14 @@ test("permission expiry rises through fyi, today and act_now, each a new key, an
   assert.match(old.key, /-old$/);
 });
 
-test("after the permission expires, the row's last blocker is not a chore: the expired item is", async () => {
-  const { d, ask } = await setup({ agentA: { expiresAt: NOW - HOUR } });
-  agentRow(d, ACCOUNT_A, { status: "expired", blocker: "no-gas", beat: NOW - 2 * HOUR });
+test("after the permission expires, the row's last blocker and the last minutes' breaker, provider and cap signals are not news: the expired item is", async () => {
+  const { d, ask } = await setup({ agentA: { expiresAt: NOW - 10 * 60 } });
+  agentRow(d, ACCOUNT_A, { status: "expired", blocker: "no-gas", beat: NOW - 11 * 60 });
+  for (let at = NOW - 40 * 60; at <= NOW - 11 * 60; at += 240) {
+    event(d, ACCOUNT_A, BREAKER, at);
+    event(d, ACCOUNT_A, "strategist driver failed: 400", at + 1);
+  }
+  refused(d, ACCOUNT_A, "daily-cap", NOW - 12 * 60);
   assert.deepEqual((await ask()).items.map((i) => i.kind), ["permission-expired"]);
 });
 
@@ -487,7 +492,7 @@ test("another owner's agent never appears, and asking for it by id is not found"
   event(d, ACCOUNT_B, BREAKER, NOW - 60);
   assert.deepEqual((await ask()).items, []);
   const forB = await ask({}, pb);
-  assert.ok(forB.items.length >= 2 && forB.items.every((i) => i.agent === SLUG_B));
+  assert.ok(forB.items.length >= 1 && forB.items.every((i) => i.agent === SLUG_B), "B sees its own (its permission has expired in the fixture)");
   const r = await runTool(attention, { agent: SLUG_B }, (await setup()).pa, "trace-test", { now: () => NOW });
   assert.equal(errorOf(r).code, "not_found");
 });
