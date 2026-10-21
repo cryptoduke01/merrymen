@@ -739,9 +739,10 @@ it off; the full plan, settings and runbooks are in
 - **`MERRYMEN_SOLANA` stays unset on the web service.** Unset, the network
   switch, the `/solana` screen and Privy's Solana wallets are not rendered, and
   every `/api/solana` route answers 404 before sign-in, body parsing or any
-  database read. Set it (to `1`) only after the release gates in
-  `solana-integration.md` are signed off. No `start:solana` service exists, and
-  none should until then.
+  database read. Set it (to `1`) only in the order of "Turning Solana on"
+  below: first for paper, with `MERRYMEN_SOLANA_LIVE_TENANTS` empty, and live
+  only after the release gates in `solana-integration.md` are signed off. No
+  `start:solana` service exists, and none should before step 2.
 - **`NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT` is a Dockerfile build ARG,
   not a runtime variable.** Next inlines it when the web app is built, so a
   change needs a rebuild and redeploy of the web service, not a restart. The
@@ -750,7 +751,8 @@ it off; the full plan, settings and runbooks are in
   wallet export is enabled for the Privy app in its dashboard and the deployed
   vault's release entry ships in the published `merrymen` CLI. It is public by
   design, like the other `NEXT_PUBLIC_` values.
-- **Settings that must match.** `MERRYMEN_SOLANA_PYTH_GENERATION`,
+- **Settings that must match.** `MERRYMEN_SOLANA_LIVE_TENANTS`, the four
+  `MERRYMEN_SOLANA_LIVE_MAX_*` caps, `MERRYMEN_SOLANA_PYTH_GENERATION`,
   `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS`,
   `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` and the fee settings go on every
   service that runs the Solana runtime (web and the Solana worker) with the same
@@ -762,8 +764,9 @@ it off; the full plan, settings and runbooks are in
   `[alert] Solana fee payer is low|cannot fund buys|cannot fund exits…`,
   `[alert] solana fee-payer-threshold misconfigured`,
   `[alert] solana-reference-price refused: reason=… generation=…`,
-  `[alert] solana-reference-tolerance misconfigured` and
-  `[alert] solana-jupiter-key misconfigured`. From the Solana worker only:
+  `[alert] solana-reference-tolerance misconfigured`,
+  `[alert] solana-jupiter-key misconfigured` and
+  `[alert] solana-live-rollout misconfigured`. From the Solana worker only:
   `[alert] Solana transactions stuck pending`,
   `[alert] Solana vault below its book`,
   `[alert] Solana autonomous strategy refused: proven-expired attempts used up…`
@@ -794,6 +797,42 @@ it off; the full plan, settings and runbooks are in
   limited to 8 KiB (413). A grant whose `chainId` is not Robinhood Chain (4663)
   or its testnet (46630), or that names no chain, is refused with 400
   `unsupported_chain`; the dashboard's signers always send one of the two.
+
+#### Turning Solana on
+
+Like Robinhood's rollout, a few tenants at a time, and each step only after the
+one before it looks right. `MERRYMEN_SOLANA_LIVE_TENANTS` names the tenants that
+may go live (unset or empty: nobody), and the `MERRYMEN_SOLANA_LIVE_MAX_*` caps
+bound the live limits anyone may sign (default 10 and 25 USDG, 0.1 and 0.25 SOL;
+details in `solana-integration.md`, "Live rollout"). Neither ever stops an
+owner's exits, revoke or withdrawals.
+
+1. **Paper first.** On the web service set `MERRYMEN_SOLANA=1` with
+   `MERRYMEN_SOLANA_LIVE_TENANTS` unset or empty. It needs
+   `MERRYMEN_SOLANA_RPC_MAINNET`, `MERRYMEN_JUPITER_API_KEY`, `DATABASE_URL`,
+   `MERRYMEN_PUBLIC_ORIGIN` and Solana embedded wallets on the production Privy
+   app (enabled in place, never a new app id). Every signed-in owner can bind a
+   wallet and paper trade; nobody can save live mode, register a permission or
+   buy live, and the page offers no live switch. Watch the `[alert]` lines.
+2. **The program deployment and fee payer.** Only after the release gates in
+   `solana-integration.md` (external audit, production `declare_id` and its
+   keypair check, devnet rehearsal, the `--final` deployment and its pinned
+   release, the Pyth re-check): set `MERRYMEN_SOLANA_VAULT_PROGRAM`,
+   `MERRYMEN_SOLANA_VAULT_SHA256`, `MERRYMEN_SOLANA_RPC_MAINNET_FALLBACK` (a
+   second provider), `MERRYMEN_STORE_DEK` and a funded
+   `MERRYMEN_SOLANA_FEE_PAYER_SEED` on web and on a new `start:solana` service
+   (its own Railway service id, `MERRYMEN_SOLANA=1`), with the list still empty.
+   Status should show the vault program verified and the fee payer funded.
+3. **The canary tenant.** Set `MERRYMEN_SOLANA_LIVE_TENANTS=0x<canary>` on web
+   and worker, with the caps at the smallest amounts the canary needs, and
+   deploy both. Run the canary checks in the release gates: a small funded
+   trade, restart and outage, full exit, withdraw and revoke, expiry.
+4. **Widen.** Add tenants to the list, a few at a time, and raise the caps only
+   as an owner decision. To stop new live trading at once, empty the list (or
+   name fewer tenants) and deploy: those taken off become exits-only. For an
+   incident, hold trading as well (`npm run solana:hold -- set all --reason "…"`); never
+   unset the web's `MERRYMEN_SOLANA` alone, which also removes owners' in-app
+   revoke and withdraw.
 
 ## 5b. The AI gateway (its own Railway project)
 

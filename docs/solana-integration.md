@@ -333,6 +333,52 @@ output for the committed bytes and six variants
 do not inherit the USDG exception: the paper mint screen refuses new buys with
 unsafe mint authorities or extensions.
 
+### Live rollout: who may go live, and the platform's caps
+
+`MERRYMEN_SOLANA=1` turns Solana on for every bound tenant at once, and the
+program alone lets an owner sign any limits up to 96 operations a day and 168
+hours. So live trading is also rolled out tenant by tenant, as Robinhood's is
+with `MERRYMEN_FLEET_ROLLOUT`, and its limits are capped by the platform as
+Robinhood's vault caps spending at 25 USDG a day
+([`solana-live-rollout.ts`](../worker/src/solana-live-rollout.ts),
+[`solana-live-caps.ts`](../web/src/lib/solana-live-caps.ts)). The app runtime
+reads both from its own env, so the web and the Solana worker decide alike.
+
+- **`MERRYMEN_SOLANA_LIVE_TENANTS`** names the tenants that may go live: 0x
+  tenant ids, comma-separated, spaces ignored, case-insensitive. Unset or empty,
+  nobody may; paper stays open to every bound tenant. A tenant it does not name
+  cannot save live mode, prepare, submit or activate a permission, preview a
+  live buy or place one (manual or autonomous); each is refused on the server
+  before any chain read (`SOLANA_LIVE_NOT_OPEN`), and the page offers no live
+  switch and says why.
+- **Exits-only.** A tenant taken off the list after going live (it has a
+  registered permission or a live book) can still sell back to USDG within the
+  permission it signed, revoke, withdraw USDG, wrapped SOL and native SOL,
+  record withdrawals made outside Merrymen, use paper and read status. Status
+  says "Live trading is paused for this account: exits, revoke and withdraw
+  still work." as a blocker that leaves exits open, so the worker sells but never
+  buys. Such an account may save live mode again, without the caps, because live
+  mode is how its exits are sold; a permission that landed after it left the list
+  is not activated (the page keeps its session key, and Revoke ends it).
+- **Caps.** `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG` and `…_MAX_DAILY_USDG`
+  (default 10 and 25 USDG), `…_MAX_PER_TRADE_WSOL` and `…_MAX_DAILY_WSOL`
+  (default 0.1 and 0.25 SOL). Live limits above a cap are refused where they are
+  saved and where a permission is prepared, naming the cap, so no signed session
+  exceeds them. A permission registered above caps lowered since may not buy:
+  each buy is refused before it is signed, by the limits the vault holds for
+  that session, and status says so; its exits keep the limits the owner signed,
+  and a new permission within the caps lifts it. Paper limits are not capped.
+- **Malformed settings** (an empty or non-id entry, a cap that is not an exact
+  positive amount or does not fit the program's u64, a per-trade cap above its
+  daily cap, a USDG per-trade cap under the 1 USDG live minimum) refuse new
+  permissions and buys for everyone as configuration, with
+  `[alert] solana-live-rollout misconfigured: …` naming the setting (and an
+  entry by position, never its value) at most once a minute per process. Exits,
+  revoke and withdraw continue.
+
+Status carries `liveAccess` (`onList`, `misconfigured` and the caps in force),
+never the list itself.
+
 ## Independent SOL price (Pyth)
 
 Every live trade, manual or automatic, clears an **independent price floor**.
@@ -932,6 +978,7 @@ interval shown while it persists.
 | `[alert] solana-reference-price refused: reason=<…> generation=<…> …` | web and worker | A Pyth read was refused (stale, missing, foreign, layout, unverified, …); no live trade is admitted, and no live permission is prepared, until a fresh, fully verified price is read (max age 120 s). Recovery: `[solana-reference-price] read again: …` on stdout | Check Pyth posting and both providers. `reason=config generation=invalid` means `MERRYMEN_SOLANA_PYTH_GENERATION` is wrong: fix the setting, it is not an outage. First refusal and new reasons at once, then at most every 60 s. RPC transport failures go to provider failover and are not alerted here. |
 | `[alert] solana-reference-tolerance misconfigured` | web and worker | `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS` unreadable; every live trade, exits included, is refused | Fix the setting (50 to 1000). At most once a minute. |
 | `[alert] solana-jupiter-key misconfigured` | web and worker | `MERRYMEN_JUPITER_API_KEY` is set but unusable; every quote and live route, exits included, is refused | Fix the key. Unset or empty is "not configured" (a status blocker, no alert). At most once a minute. |
+| `[alert] solana-live-rollout misconfigured: <setting and entry position>` | web and worker | `MERRYMEN_SOLANA_LIVE_TENANTS` or a `MERRYMEN_SOLANA_LIVE_MAX_*` cap cannot be read; no new live permission or live buy is admitted, for any tenant | Fix the setting the line names (the value is never printed). Exits, revoke and withdraw continue. At most once a minute. |
 | `[alert] Solana transactions stuck pending` (JSON counts and oldest age) | worker | A live trade or signed owner transaction has been pending over 3 minutes; each holds its account (no new trade, no owner transaction but a revoke) | Check both providers; `npm run solana:resolve -- pending`, then `show` / `owner show` and, with evidence, `book`. Every 10 min. |
 | `[alert] Solana vault below its book` (`kind: vault-below-book`, account ref) | worker | Tokens left a vault outside Merrymen | [A vault below its book](#a-vault-below-its-book). Every 10 min per account. |
 | `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations` (`kind: expired-attempts-exhausted`) | worker | Automated trades and exits of that account pause until the attempts leave the 24 h window | Check provider health and congestion. Raising `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` is an owner decision. Every 10 min per account. |
@@ -1045,6 +1092,9 @@ redacted errors and no redirects.
 | `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS` | web, worker | 300; 50 to 1000 | blocker for trades and exits, `[alert]` |
 | `MERRYMEN_SOLANA_PYTH_GENERATION` | web, worker | `current`; or `upgraded` | blocker for trades, exits and registering a permission, `[alert]` |
 | `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` | web, worker | 0; 0 to 96 | blocker for trades and exits (the worker's alert counts use 0) |
+| `MERRYMEN_SOLANA_LIVE_TENANTS` | web, worker | unset: nobody may go live; comma-separated 0x tenant ids | new live permissions and buys refused for everyone (exits continue), `[alert]` |
+| `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG`, `…_MAX_DAILY_USDG` | web, worker | 10 and 25 USDG; exact decimals, per trade ≤ daily, per trade ≥ 1 | as above |
+| `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL`, `…_MAX_DAILY_WSOL` | web, worker | 0.1 and 0.25 SOL; exact decimals, per trade ≤ daily | as above |
 | `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC` | operator machine | unset; HTTPS, its own hostname | `--third-rpc` refused |
 | `MERRYMEN_SOLANA_RECOVER_RPC` | owner's computer | unset; HTTPS mainnet | `solana-recover` refused |
 
@@ -1247,6 +1297,19 @@ Whirlpool and Token-2022 are upgradeable; the fixtures pin the bytes read on
 Each of these was chosen during implementation as the conservative default, so
 the work could continue; none is Milla's sign-off unless it says so. "Change"
 says where to change it. Superseded choices are listed under the current one.
+
+**Live rollout (the gate before turning Solana on)**
+
+| Decision | Default now | Alternatives | Change |
+|---|---|---|---|
+| Who may go live | Nobody until named in `MERRYMEN_SOLANA_LIVE_TENANTS` | Every bound tenant; Robinhood-style levels (observe, exits-only, trade) | `MERRYMEN_SOLANA_LIVE_TENANTS` |
+| Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again (without the caps) so exits can be sold | Refuse saving live mode too | `checkLiveSettings` in `solana-app-runtime.ts` |
+| A permission that lands after the tenant left the list | Not activated; the page keeps its session key, Revoke ends it | Activate it for exits only | `activateLive` |
+| Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
+| A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |
+| A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
+| Live buy previews off the list | Refused before any quote | Allowed | `preview` |
+| The page's default live limits | The default caps (25 USDG and 0.25 SOL a day; were 50 and 0.5) | — | `SolanaScreen.tsx` |
 
 **Release and infrastructure (Milla's decisions; nothing is done by default)**
 
@@ -1505,10 +1568,11 @@ Remaining, in order:
       after the release entry ships in the published CLI, set
       `NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT=1`.
 - [ ] **External audit** of custody, ABI, execution, authentication and accounting.
-- [ ] **Canary**: Milla's go, owner-authorized funding and the smallest caps,
-      one agent; then restart and outage, full exit, withdraw and revoke, and
-      expiry tests; then `MERRYMEN_SOLANA=1` on the web service and a
-      `start:solana` service.
+- [ ] **Canary**: Milla's go, owner-authorized funding and the smallest caps
+      (`MERRYMEN_SOLANA_LIVE_MAX_*`), one tenant named in
+      `MERRYMEN_SOLANA_LIVE_TENANTS`; then restart and outage, full exit,
+      withdraw and revoke, and expiry tests; then widen the list. The order of
+      settings is in [`hosted-deploy.md`](hosted-deploy.md) ("Turning Solana on").
 - [ ] Measured quote-to-finality latency, fill rate, slippage, fees, rent and
       recovery reliability against equivalent RH workloads before any claim it is
       better.
