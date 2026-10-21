@@ -289,8 +289,8 @@ function ConnectedSolana() {
   // THE LIVE ROLLOUT, as status reports it. The server decides every case itself (the runtime refuses a live save, a
   // permission or a buy it does not admit); the page only says why and offers no live switch it would refuse.
   const liveAccess = status?.runtime?.liveAccess;
-  // An account that went live (live mode, a registered permission or a live book) keeps live mode for its exits.
-  const wentLive = binding?.requestedMode === "live" || !!status?.runtime?.live.session || !!status?.runtime?.live.book;
+  // An account that went live (a registered permission or a live book) keeps live mode for its exits, as the server lets it.
+  const wentLive = !!status?.runtime?.live.session || !!status?.runtime?.live.book;
   const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED : !liveAccess.onList ? (wentLive ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN) : null;
   // The caps a new live permission must fit: only while this account may register one.
   const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
@@ -677,8 +677,8 @@ function ConnectedSolana() {
       }); }}><h2>Solana trading mode</h2>
         <fieldset disabled={busy}><legend>Choose how this account trades</legend>
           <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => { setMode("paper"); setConsent(false); invalidate(); }} /> Paper · simulated funds</label>
-          {/* No live switch while this account may not go live; one that went live keeps it for its exits. */}
-          {(!liveClosed || wentLive) && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>}
+          {/* No live switch while this account may not go live; one that went live keeps it for its exits, and a saved live mode stays shown. */}
+          {(!liveClosed || wentLive || binding.requestedMode === "live") && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>}
         </fieldset>
         {liveClosed && <p role="status">{liveClosed}</p>}
         <div className="solana-fields">

@@ -2497,6 +2497,15 @@ test("with no limits saved, the live form starts at the default live caps", asyn
   assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
 });
 
+test("a saved live mode with no permission yet, off the list, stays shown and says live trading is not open; nothing can be registered", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  (state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> }).liveAccess = access(false);
+  await render();
+  assert.equal(!!liveSwitch(), true, "the saved mode is shown; the server refuses saving it again");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN)); assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
+  assert.equal(button("Register bounded trading permission").disabled, true);
+});
+
 test("an account that went live and is off the list keeps its live switch for exits, says live trading is paused, offers no new permission and still offers a sale", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
   const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };

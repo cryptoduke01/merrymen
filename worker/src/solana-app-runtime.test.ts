@@ -2441,8 +2441,12 @@ test("live rollout: a tenant MERRYMEN_SOLANA_LIVE_TENANTS does not name cannot s
     // Paper is open to every tenant.
     await off.setupPaper(f.scope, { initialCashRaw: "100000000", limits });
     assert.equal((await off.trade(f.scope, { mode: "paper", intent: f.trade })).mode, "paper");
-    // Live mode saved while it was on the list: no new permission, and no live buy or buy preview, each refused before any chain read.
-    await f.live(); f.calls.length = 0;
+    // Live mode saved while it was on the list, with no permission yet: status says it is not open (nothing to exit) ...
+    await f.live();
+    const liveMode = await off.status(f.scope);
+    assert.ok(liveMode.live.blockers.includes(SOLANA_LIVE_NOT_OPEN) && !liveMode.live.blockers.includes(SOLANA_LIVE_PAUSED), liveMode.live.blockers.join(" | "));
+    // ... and no new permission, live buy or buy preview, each refused before any chain read.
+    f.calls.length = 0;
     await assert.rejects(off.prepareLive(f.scope, { limits, sessionPublicKey: f.session }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
     await assert.rejects(off.preview(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));
     await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "off-list-buy" } }), rollout(SOLANA_LIVE_NOT_OPEN, "permission"));

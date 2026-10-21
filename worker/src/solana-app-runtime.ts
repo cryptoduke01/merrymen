@@ -1101,12 +1101,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           }
         }
       } catch (error) { blockers.push(statusBlocker(error)); }
-      // Off the list, or while the rollout settings cannot be read, an account that went live (or chose live mode) is exits-only:
-      // its buys and new permissions are refused, and exits, revoke and withdraw continue. One that never went live has nothing to
-      // exit; liveAccess below says why it cannot go live.
-      if (binding.requestedMode === "live" || session || await s.liveBook()) {
+      // Off the list, or while the rollout settings cannot be read, an account that went live (a registered permission or a live
+      // book) is exits-only: its buys and new permissions are refused, and exits, revoke and withdraw continue. One in live mode that
+      // never went live is told it is not open (as prepareLive says); a paper one has nothing to say here: liveAccess says it.
+      const exitsOnly = !!session || !!(await s.liveBook());
+      if (exitsOnly || binding.requestedMode === "live") {
         if (rolloutMisconfigured) buysOnly(SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
-        else if (!onList) buysOnly(SOLANA_LIVE_PAUSED);
+        else if (!onList) buysOnly(exitsOnly ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN);
       }
       // Saved live limits above the caps (saved before they were lowered) cannot be registered; a permission already registered is judged above.
       if (onList && caps && binding.requestedMode === "live" && binding.limits && solanaLiveCapsExceeded(binding.limits, caps).length) warnings.push(solanaLiveSavedAboveCaps(caps));
