@@ -52,6 +52,7 @@ import { classifyAlertEvent, DELIVERY_ERROR_TEXT, PROVIDER_TEXT, spellings } fro
 import { blockerAdvice } from "../live-blocker";
 import { blockerView, freshWithin, readAgentRow } from "./agent-status";
 import { classifyEvent } from "./inactivity";
+import { SETTINGS_ARM_REFUSAL_PREFIX } from "../../../../worker/src/settings";
 import type { SettingsView } from "./settings-view";
 
 export type Severity = "act_now" | "today" | "fyi";
@@ -168,11 +169,14 @@ export function conditionOfKey(key: string): string {
 export const EVENT_KINDS: ReadonlySet<AttentionKind> = new Set(["breaker", "provider-failure"]);
 
 /**
- * The prefix of the worker's arm-failure event (index.ts, "this agent CANNOT
- * START and is not trading: …"), used only to narrow an indexed read; the
- * inactivity diagnosis's classifyEvent still decides what the row is.
+ * The two events a worker writes when it cannot arm: the executor failing
+ * (index.ts, "this agent CANNOT START and is not trading: …", which the
+ * inactivity diagnosis's classifyEvent knows) and unusable settings
+ * (settings.ts settingsArmRefusal). The prefixes only narrow an indexed read;
+ * isArmFailure decides what a row is.
  */
-const ARM_FAILURE_PREFIX = "this agent CANNOT START";
+const ARM_FAILURE_PREFIXES = ["this agent CANNOT START", SETTINGS_ARM_REFUSAL_PREFIX] as const;
+const isArmFailure = (message: string) => classifyEvent(message) === "arm_failure" || message.startsWith(SETTINGS_ARM_REFUSAL_PREFIX);
 
 /** Permission items: none signed, expired, or inside an expiry tier. */
 export function permissionItems(slug: string, account: string | null, expiresAt: number | null, now: number, links: AttentionLinks): AttentionItem[] {
@@ -323,10 +327,11 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   let armFailedAt: number | null = null;
   if (live && pending && status === "error" && ids.length) {
     const first = await db.prepare(
-      `SELECT message, created_at FROM events WHERE agent_id IN (${inList}) AND level = 'err' AND created_at >= ? AND message LIKE ?
+      `SELECT message, created_at FROM events WHERE agent_id IN (${inList}) AND level = 'err' AND created_at >= ?
+        AND (${ARM_FAILURE_PREFIXES.map(() => "message LIKE ?").join(" OR ")})
         ORDER BY created_at ASC LIMIT 1`,
-    ).get(...ids, signedAt, `${ARM_FAILURE_PREFIX}%`) as { message: string; created_at: number } | undefined;
-    if (first && classifyEvent(String(first.message)) === "arm_failure") armFailedAt = Number(first.created_at);
+    ).get(...ids, signedAt, ...ARM_FAILURE_PREFIXES.map((p) => `${p}%`)) as { message: string; created_at: number } | undefined;
+    if (first && isArmFailure(String(first.message))) armFailedAt = Number(first.created_at);
   }
   const armError = live && status === "error" && (!pending || armFailedAt !== null);
 
@@ -369,7 +374,9 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   // A blocker is about trading under a live permission: after expiry the row
   // keeps its last one (retireGrant only sets the status), and the expired
   // item is the one to act on.
-  const b = pending || !live ? null : blockerView(row?.live_blocker ?? null);
+  // And only a running worker's: an 'error' or 'killed' status leaves the row's
+  // last blocker behind (setAgentStatus writes the status alone).
+  const b = pending || !live || !running ? null : blockerView(row?.live_blocker ?? null);
   const advice = b ? blockerAdvice(b.rule) : null;
   // A deliberate state (live trading off, a key arming on the next pass) is not a fault and needs nobody.
   if (b && (advice?.fault ?? true)) {

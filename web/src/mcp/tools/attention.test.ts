@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { getAddress } from "viem";
 import { ATTENTION_EVENTS_MAX, conditionOfKey, runStart } from "@/lib/services/attention";
+import { settingsArmRefusal } from "../../../../worker/src/settings";
 import { proposalRow } from "@/lib/services/proposals";
 import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
@@ -251,6 +252,19 @@ test("a permission that failed to arm is an arm error at once, not a worker that
     assert.equal(r.items[0]!.started_at, new Date((grantedAt + 60) * 1000).toISOString(), label);
     reset();
   }
+  // The settings refusal is the worker's other arm failure, in its own words.
+  const refusal = settingsArmRefusal({ why: "settings.json is not valid JSON", since: 0, holding: false }, true);
+  assert.ok(refusal);
+  const { d, ask } = await setup({ agentA: { grantedAt: NOW - HOUR } });
+  agentRow(d, ACCOUNT_A, { status: "error", beat: null });
+  event(d, ACCOUNT_A, refusal, NOW - HOUR + 30, "err");
+  assert.deepEqual((await ask()).items.map((i) => i.key), [`arm-error:${SLUG_A}:on`]);
+});
+
+test("an arm error after a restart does not bring back the row's last blocker", async () => {
+  const { d, ask } = await setup();
+  agentRow(d, ACCOUNT_A, { status: "error", blocker: "no-gas" });
+  assert.deepEqual((await ask()).items.map((i) => i.kind), ["arm-error"]);
 });
 
 test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it); a retired account's are history", async () => {
