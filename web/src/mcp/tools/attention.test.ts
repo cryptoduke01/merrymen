@@ -233,6 +233,18 @@ test("a permission renewed on the same account after a kill or an expiry is pend
   assert.deepEqual((await ask()).items, [], "five minutes after renewing is still start-up, and the old kill is not reported");
 });
 
+test("a permission that failed to arm is an arm error at once, not a worker that never reported", async () => {
+  for (const [label, grantedAt, beat] of [["first grant", NOW - 300, null], ["renewal", NOW - 2 * HOUR, NOW - 3 * HOUR]] as const) {
+    const { d, ask } = await setup({ agentA: { grantedAt } });
+    agentRow(d, ACCOUNT_A, { status: "error", beat });
+    event(d, ACCOUNT_A, "this agent CANNOT START and is not trading: no bundler", grantedAt + 60, "err");
+    const r = await ask();
+    assert.deepEqual(r.items.map((i) => i.key), [`arm-error:${SLUG_A}:on`], label);
+    assert.equal(r.items[0]!.started_at, new Date((grantedAt + 60) * 1000).toISOString(), label);
+    reset();
+  }
+});
+
 test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it); a retired account's are history", async () => {
   const current = "0x52908400098527886e0f7030069857d2e4169ee7" as const; // EIP-55's own mixed-case example
   const { d, ask } = await setup({ agentA: { account: current, accounts: [current, ACCOUNT_A] } });

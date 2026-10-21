@@ -33,6 +33,8 @@
  *   kill switch, breaker, provider failure .... the events the risk_halt and
  *                                                provider_failure alerts read
  *                                                (notify.ts classifyAlertEvent)
+ *   an arm failure ............................. the event the inactivity
+ *                                                diagnosis reads (classifyEvent)
  *   spending and trade-count caps .............. rejected trades, daily-cap / ops-cap
  *
  * NO RISK LIMIT IS OFFERED AS A FIX. A tripped breaker or a reached cap is the
@@ -49,6 +51,7 @@ import type { Db } from "../../../../worker/src/db";
 import { classifyAlertEvent, DELIVERY_ERROR_TEXT, PROVIDER_TEXT, spellings } from "../../../../worker/src/mcp/notify";
 import { blockerAdvice } from "../live-blocker";
 import { blockerView, freshWithin, readAgentRow } from "./agent-status";
+import { classifyEvent } from "./inactivity";
 import type { SettingsView } from "./settings-view";
 
 export type Severity = "act_now" | "today" | "fyi";
@@ -294,18 +297,27 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   ).all(...ids, floor)) as Array<{ message: string; created_at: number }> : [];
   const truncated = events.length >= ATTENTION_EVENTS_MAX;
   const seen: Record<"kill" | "breaker" | "market" | "brain" | "model", number[]> = { kill: [], breaker: [], market: [], brain: [], model: [] };
+  // Arm failures since the current permission was signed (the read starts there).
+  const armFailures: number[] = [];
   for (const ev of events) {
-    const kind = classifyAlertEvent(String(ev.message ?? ""));
+    const message = String(ev.message ?? "");
+    const kind = classifyAlertEvent(message);
     if (kind) seen[kind].push(Number(ev.created_at));
+    else if (classifyEvent(message) === "arm_failure") armFailures.push(Number(ev.created_at));
   }
+  // 'error' is the current permission's when the worker is past it, or when it
+  // failed to arm this permission (an arm failure after signing); otherwise it
+  // is a renewal's predecessor and the permission is still pending.
+  const armError = status === "error" && (!pending || armFailures.length > 0);
 
   if (!pending && status === "killed") items.push(killedItem(slug, links, seen.kill[0] ?? null));
-  if (!pending && status === "error") {
+  if (armError) {
     items.push({
       key: `arm-error:${slug}:on`, severity: "today", kind: "arm-error", agent: slug,
       title: "The agent could not arm its trading key",
       detail: "The worker reports that it could not arm the trading key, so nothing is signed. This is Merrymen's to fix, not the owner's.",
-      owner_can_fix: false, what_to_do: null, link: null, started_at: null, ends_at: null,
+      owner_can_fix: false, what_to_do: null, link: null,
+      started_at: pending ? armFailures[armFailures.length - 1]! : null, ends_at: null,
     });
   }
   const running = status === "active" || status === "armed";
@@ -313,7 +325,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   // grace: the default 'armed' row with no heartbeat, a signed permission
   // whose ledger row was never written, or a renewal the worker never reached.
   const grace = Math.max(FIRST_BEAT_GRACE_SEC, 2 * freshWithinSec);
-  if (pending && now - signedAt! > grace) {
+  if (pending && !armError && now - signedAt! > grace) {
     items.push({
       key: `worker-stale:${slug}:since-${signedAt}`, severity: "today", kind: "worker-stale", agent: slug,
       title: beat === null ? "The agent's worker has never reported" : "The agent's worker has not picked up the new permission",
