@@ -120,13 +120,18 @@ export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximu
  * admission refuse a buy that would leave too little), so the platform's live caps (MERRYMEN_SOLANA_LIVE_MAX_*), which bound
  * those limits, stop buys before exits. Sales alone, or a rise in the SOL price, can still use a day's room; then status says
  * so. Withdraw is never limited by either.
- * - SOLANA_STATUS_DAILY_USDG_USED, a blocker: under 1 USDG (the live minimum) is left of the USDG per 24 hours limit, so
- *   admission refuses every live trade of at least 1 USDG, buys and exits alike.
+ * - Under 1 USDG (the live minimum) left of the USDG per 24 hours limit, admission refuses every live trade of at least 1 USDG,
+ *   buys and partial sales alike; only a sale of the whole recorded position, worth no more than what is left, still fits (the
+ *   whole-position exception to the minimum). Status values that position at the highest price any provider serves (read only
+ *   then): SOLANA_STATUS_DAILY_USDG_BUYS_USED, buys-only, while it fits (or nothing is held); SOLANA_STATUS_DAILY_USDG_USED, a
+ *   blocker of exits too, while it does not or cannot be priced (trade() could not price it either).
  * - SOLANA_STATUS_DAILY_SOL_SOLD_USED, a warning: the SOL sold per 24 hours limit is used, so admission refuses every sale;
  *   buys are not limited by it, so it does not stop them.
  */
 export const SOLANA_STATUS_DAILY_USDG_USED = "This account's live trades in the last 24 hours used its USDG per 24 hours limit. Sales back to USDG count against it as "
   + "buys do, so no live trade, exits included, is admitted until earlier trades leave the 24-hour window. Withdraw works at any time.";
+export const SOLANA_STATUS_DAILY_USDG_BUYS_USED = "This account's live trades in the last 24 hours left under 1 USDG of its USDG per 24 hours limit, so buying is paused "
+  + "until earlier trades leave the 24-hour window. A sale of your whole SOL position, if you hold one, still fits what is left; withdraw works at any time.";
 export const SOLANA_STATUS_DAILY_SOL_SOLD_USED = "This account's sales in the last 24 hours used its SOL sold per 24 hours limit: no sale back to USDG is admitted until "
   + "earlier sales leave the 24-hour window. Withdraw works at any time.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
@@ -1243,8 +1248,19 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
         const used = await dailyOperationsUsed(s, binding.limits.maxOpsPerDay);
         if (used) blockers.push(used);
         // Sales count against the rolling USDG and SOL sold limits as admission counts them (SALES COUNT AGAINST...).
-        const spent = await solanaRollingLimitUse(s.db, s.scope, now());
-        if (BigInt(binding.limits.dailyUsdg) - spent.notionalRaw < SOLANA_LIVE_MIN_TRADE_USDG_RAW) blockers.push(SOLANA_STATUS_DAILY_USDG_USED);
+        const spent = await solanaRollingLimitUse(s.db, s.scope, now()), room = BigInt(binding.limits.dailyUsdg) - spent.notionalRaw;
+        if (room < SOLANA_LIVE_MIN_TRADE_USDG_RAW) {
+          // No buy or partial sale fits; a sale of the whole recorded position still does while it is worth no more than the room.
+          const held = BigInt((await s.liveBook())?.wsolRaw ?? "0");
+          let wholeExitFits = held === 0n;
+          if (held > 0n && room > 0n && liveReads) {
+            try {
+              const prices = await referencePrices(rpc(), requireSolanaPythGeneration(env, now()));
+              wholeExitFits = prices.every(price => solanaReferenceWsolValue(held, price) <= room);
+            } catch { /* Unpriced: not shown as possible. */ }
+          }
+          if (wholeExitFits) buysOnly(SOLANA_STATUS_DAILY_USDG_BUYS_USED); else blockers.push(SOLANA_STATUS_DAILY_USDG_USED);
+        }
         if (binding.limits.dailyWsol !== undefined && spent.soldWsolRaw >= BigInt(binding.limits.dailyWsol)) warnings.push(SOLANA_STATUS_DAILY_SOL_SOLD_USED);
       }
       const pending = (await s.pending()).map(publicTrade);

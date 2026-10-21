@@ -20,6 +20,7 @@ import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { wrapSqlite } from "./db";
 import { createSolanaAgent } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
+  SOLANA_STATUS_DAILY_USDG_BUYS_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 import { createSolanaExecutor, type SolanaSignedSubmission } from "./solana-executor";
@@ -1141,6 +1142,34 @@ test("sales count against the rolling USDG limit as buys do: after a day of buys
   assert.deepEqual((await f.app.status(f.scope)).live.blockers, []);
   const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-with-room") });
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+});
+
+test("under 1 USDG left of the day's USDG limit stops only buys while a sale of the whole position still fits it: status says so, the page may still sell, the whole position is sold, and the worker waits instead of a partial sale", async t => {
+  // 99.50 of the 100 USDG used in the window; the book holds 0.002 SOL ($0.30) and no USDG. The strategy wants 25% SOL, so it would sell part.
+  const f = await fixture(t, { cash: 0n, wsol: 2_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 2500, tradeUsdgRaw: "1000000" } });
+  for (let i = 0; i < 4; i++) await windowRow(f, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, i ? "25000000" : "24500000", i ? "25000000" : "24500000");
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, [SOLANA_STATUS_DAILY_USDG_BUYS_USED]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
+  assert.equal(f.pythReads.length > 0, true, "the position was priced");
+  // The worker plans a partial sale, which admission would refuse after a paid route: it waits instead.
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
+  assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built"); assert.equal(f.sends.length, 0);
+  // The owner sells the whole position: admitted and sent.
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "2000000", "whole-exit") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+  // Nothing held: only buys are stopped, and no price is read for it.
+  const empty = await fixture(t, { cash: 50_000_000n, wsol: 0n, mark: "fair", build: { kind: "fair" } });
+  for (let i = 0; i < 4; i++) await windowRow(empty, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, i ? "25000000" : "24500000", i ? "25000000" : "24500000");
+  assert.deepEqual((await empty.app.status(empty.scope)).live.blockers, [SOLANA_STATUS_DAILY_USDG_BUYS_USED]);
+  // A position worth more than the room left, or one that cannot be priced, is the blocker of exits too: no sale would be admitted.
+  const big = await fixture(t, { cash: 50_000_000n, wsol: 10_000_000n, mark: "fair", build: { kind: "fair" } });
+  for (let i = 0; i < 4; i++) await windowRow(big, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, i ? "25000000" : "24500000", i ? "25000000" : "24500000");
+  const blocked = await big.app.status(big.scope);
+  assert.deepEqual(blocked.live.blockers, [SOLANA_STATUS_DAILY_USDG_USED], "0.01 SOL is $1.50, more than the $0.50 left"); assert.equal(blocked.live.canExit, false);
+  await assert.rejects(big.app.trade(big.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "10000000", "whole-too-big") }), /rolling daily limit would be exceeded/);
+  const unpriced = await fixture(t, { cash: 50_000_000n, wsol: 2_000_000n, mark: "fair", build: { kind: "fair" }, pythAgeMs: 180_000 });
+  for (let i = 0; i < 4; i++) await windowRow(unpriced, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, i ? "25000000" : "24500000", i ? "25000000" : "24500000");
+  assert.ok((await unpriced.app.status(unpriced.scope)).live.blockers.includes(SOLANA_STATUS_DAILY_USDG_USED), "a stale price: not shown as sellable");
 });
 
 test("a day's SOL sold limit used by sales is a status warning pointing to Withdraw, as admission refuses the next sale; buys, which it does not limit, stay open", async t => {

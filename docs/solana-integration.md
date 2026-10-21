@@ -397,10 +397,17 @@ reads both from its own env, so the web and the Solana worker decide alike.
   day's limits can sell at the price it was bought at: about 24 USDG of SOL, and
   at most 0.25 SOL. A sale is still at most 10 USDG and 0.1 SOL. Operations are
   not reserved: the owner's own operations per day can still be used up by
-  buys. Sales alone, or a rise in the SOL price, can still use up a day's room:
-  status then says so (`SOLANA_STATUS_DAILY_USDG_USED`,
-  `SOLANA_STATUS_DAILY_SOL_SOLD_USED`), pointing to Withdraw, which no limit or
-  cap ever bounds.
+  buys. Sales alone, or a rise in the SOL price, can still use up a day's room,
+  and status then says so, pointing to Withdraw, which no limit or cap ever
+  bounds. Under 1 USDG left of the USDG limit stops buys and partial sales; a
+  sale of the whole position, worth no more than what is left (the exception to
+  the live minimum), still fits. Status prices the position then, at the
+  highest price either provider serves: while it fits, or nothing is held, it
+  says so as a buys-only blocker (`SOLANA_STATUS_DAILY_USDG_BUYS_USED`; the page
+  still offers the sale, and the worker waits rather than try a partial one),
+  and only otherwise, or when it cannot be priced, as a blocker of exits too
+  (`SOLANA_STATUS_DAILY_USDG_USED`). A used SOL sold limit is a warning
+  (`SOLANA_STATUS_DAILY_SOL_SOLD_USED`).
 - **Malformed settings** (an empty or non-id entry, a cap that is not an exact
   positive amount or does not fit the program's u64, a per-trade cap above its
   daily cap, a USDG per-trade cap under the 1 USDG live minimum) refuse new

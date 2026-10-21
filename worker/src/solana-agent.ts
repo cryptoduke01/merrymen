@@ -5,7 +5,7 @@ import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_BELOW_MINIMUM,
   type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
-import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_USDG_BUYS_USED } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
@@ -350,6 +350,10 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
           if (!intent) { said.delete(`below-minimum:${solanaAccountRef(scope)}`); inBand(); continue; }
           if (row.requested_mode === "live" && !status.live.ready && intent.inputMint === SOLANA_USDG_MINT) { results.push({ owner: row.owner, outcome: "held" }); continue; }
+          // Under 1 USDG of the day's USDG limit left (SOLANA_STATUS_DAILY_USDG_BUYS_USED): only a sale of the whole position fits, so a
+          // partial one would be refused at admission after a paid route. It waits its interval instead, as the window moves.
+          if (row.requested_mode === "live" && intent.inputMint === SOLANA_WRAPPED_SOL_MINT && intent.amountRaw !== wsolRaw
+            && status.live.blockers.includes(SOLANA_STATUS_DAILY_USDG_BUYS_USED)) { inBand(); continue; }
           if (options.signal?.aborted) break;
           // Already admitted under this ID (another worker got there first): a replay submits nothing.
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
