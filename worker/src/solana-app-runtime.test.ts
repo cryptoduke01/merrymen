@@ -2759,6 +2759,32 @@ test("live rollout: a list entry in any case names the tenant, whose id is lower
   } finally { f.raw.close(); }
 });
 
+test("live rollout, the runbook's order: deployed to the worker first, a tenant taken off the list buys nowhere: the restarted worker refuses it at once, and the web, still on the old list, holds every live buy until it is deployed too", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const removed = { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: OTHER_TENANT };
+    const buy = (requestId: string) => ({ mode: "live" as const, intent: { ...f.trade, mode: "live", requestId } });
+    // Both ran the old list, and the web served a request: its digest is published.
+    const web = f.runtime({ env: f.env, log: () => {} });
+    await web.status(f.scope);
+    // The worker is redeployed first, with this tenant taken off: it runs the new list at once, never judging the web's older digest.
+    f.clock.now += 1;
+    const worker = f.runtime({ env: removed, service: "worker", log: () => {} });
+    await worker.publishLiveRollout();
+    await assert.rejects(worker.trade(f.scope, buy("worker-buy")), rollout(SOLANA_LIVE_PAUSED, "permission"));
+    // The web, still on the old list, sees the worker's new digest and holds every live buy, this tenant's included.
+    await assert.rejects(web.trade(f.scope, buy("web-buy")), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    assert.deepEqual((await web.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    // Then the web is deployed too: the same settings on both, and the tenant is exits-only on each.
+    f.clock.now += 1;
+    const redeployed = f.runtime({ env: removed, log: () => {} });
+    assert.deepEqual((await redeployed.status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED]);
+    assert.deepEqual((await worker.status(f.scope)).live.blockers, [SOLANA_LIVE_PAUSED]);
+    assert.equal(f.controls.sends, 0, "no buy was sent at any point");
+  } finally { f.raw.close(); }
+});
+
 test("live rollout: the web treats a running Solana worker whose settings digest is missing or stale as differing, holding live buys with the [alert]; a stopped worker is not judged", async () => {
   const f = await fixture();
   try {
