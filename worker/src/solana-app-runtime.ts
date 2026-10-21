@@ -549,6 +549,26 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     }
     return true;
   }
+  /**
+   * Whether the other service runs different settings, for status: a check that cannot be made (the digest table busy or
+   * failing to write or read) counts as differing, which holds buys only, and never fails the status read itself, which the
+   * page's sale, revoke and withdraw controls and the worker's automated exits need. Said as an [alert] at most once a minute
+   * per process. trade() and preview() ask rolloutDiffers for buys alone, which its failure refuses.
+   */
+  let rolloutCheckAlertAtMs: number | undefined;
+  async function rolloutDiffersOrHeld(db: Db): Promise<boolean> {
+    try { return await rolloutDiffers(db); } catch {
+      const at = now();
+      if (rolloutCheckAlertAtMs === undefined || at < rolloutCheckAlertAtMs || at - rolloutCheckAlertAtMs >= SOLANA_REFERENCE_ALERT_REPEAT_MS) {
+        rolloutCheckAlertAtMs = at;
+        try {
+          log("[alert] solana-live-rollout unchecked: this service could not write its MERRYMEN_SOLANA_LIVE_TENANTS and MERRYMEN_SOLANA_LIVE_MAX_* "
+            + "digest or read the other service's (solana_runtime_live_rollout_seen); no live Solana buy is admitted until it can (exits, revoke and withdraw continue)");
+        } catch { /* Logging never changes an outcome. */ }
+      }
+      return true;
+    }
+  }
   /** The account went live: it has a registered permission or a live book. Off the list, such an account is exits-only. */
   async function wentLive(s: SolanaTradingStore): Promise<boolean> { return !!(await s.session()) || !!(await s.liveBook()); }
   /**
@@ -1135,8 +1155,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       let onList = false, caps: SolanaLiveCaps | null = null, rolloutMisconfigured = false;
       try { onList = liveListed(s); } catch { rolloutMisconfigured = true; }
       try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
-      // Whether the other service runs different list or caps (SETTINGS THAT MUST MATCH, CHECKED): buying waits, below.
-      const differs = await rolloutDiffers(s.db);
+      // Whether the other service runs different list or caps (SETTINGS THAT MUST MATCH, CHECKED): buying waits, below. A check
+      // that fails counts as differing (buys only); it never fails the status read, which exits, revoke and withdraw need.
+      const differs = await rolloutDiffersOrHeld(s.db);
       // Whether the vault holds a current permission matching the one the app keeps ("unknown" while it could not be read):
       // without one nothing can be sold, so the exits-only blocker below must not say exits still work.
       let permission: "current" | "missing" | "unknown" = "unknown";

@@ -7,7 +7,7 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,7 +17,7 @@ import { CHAINS, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM } from "../../packages/cor
 import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR, SOLANA_VAULT_ACCOUNT_SIZE, SOLANA_VAULT_DISCRIMINATOR,
   SOLANA_VAULT_LOCAL_TEST_PROGRAM, SOLANA_WRAPPED_SOL_MINT, deriveSolanaAta, deriveSolanaVaultAddress } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
-import { wrapSqlite } from "./db";
+import { makePgDb, wrapSqlite, type Db } from "./db";
 import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
 import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SOLANA_STATUS_DAILY_USDG_BUYS_USED,
@@ -61,8 +61,19 @@ function mintJson(mint: string) {
       supply: "1000000000000", freezeAuthority: null, mintAuthority: null } } } } };
 }
 
+/** A schema of its own on MERRYMEN_TEST_PG_URL, searched first and dropped after the test. */
+async function pgSchema(t: TestContext): Promise<Db> {
+  const url = new URL(process.env.MERRYMEN_TEST_PG_URL!), schema = `solana_floor_${randomUUID().replaceAll("-", "")}`;
+  const admin = await makePgDb(url.toString()); await admin.exec(`CREATE SCHEMA ${schema}`);
+  url.searchParams.set("options", `-c search_path=${schema}`);
+  t.after(async () => { await admin.exec(`DROP SCHEMA ${schema} CASCADE`); });
+  return makePgDb(url.toString());
+}
+/** Skips a PostgreSQL case unless MERRYMEN_TEST_PG_URL names an isolated test database. */
+const dialectOptions = (dialect: "sqlite" | "postgres") =>
+  dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
 async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark: "fair" | "dust" | "zero" | "down"; build: Build; strategy?: Record<string, unknown>; pythAgeMs?: number;
-  env?: Record<string, string>; priorityFees?: number[]; dbFile?: string }) {
+  env?: Record<string, string>; priorityFees?: number[]; dbFile?: string; dialect?: "sqlite" | "postgres" }) {
   const net = { lastBuild: null as null | { amount: bigint; out: bigint; min: bigint; input: string }, urls: [] as string[] };
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
     const url = String(input); net.urls.push(url.split("?")[0]!);
@@ -99,6 +110,9 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   let raw = new DatabaseSync(opts.dbFile ?? ":memory:"), db = wrapSqlite(raw);
   const clock = { now: NOW };
   t.after(() => raw.close());
+  // `dialect: "postgres"`: the same accounts and chain on PostgreSQL (MERRYMEN_TEST_PG_URL); reopen is SQLite's only.
+  const postgres = opts.dialect === "postgres";
+  if (postgres) db = await pgSchema(t);
   const sessionSeed = Buffer.alloc(32, 22), sessionKeys = await createKeyPairFromPrivateKeyBytes(sessionSeed);
   const owner = await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(new Uint8Array(32).fill(21))).publicKey);
   const session = await getAddressFromPublicKey(sessionKeys.publicKey);
@@ -185,11 +199,13 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
     MERRYMEN_JUPITER_API_KEY: "fixture-not-a-key", MERRYMEN_SOLANA_RPC_MAINNET: RPC,
     // On the live list, with caps at the fixture's limits (25 and 100 USDG, 0.2 and 1 SOL).
     MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "25", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "100",
-    MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "0.2", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "1", ...opts.env };
-  const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => clock.now);
+    MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "0.2", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "1",
+    // The runtime builds its PostgreSQL schema as hosted does; the database itself is the one passed in.
+    ...(postgres ? { DATABASE_URL: "postgres://already-connected" } : {}), ...opts.env };
+  const bindings = new SqlSolanaBindingStore(async () => db, postgres ? "postgres" : "sqlite", () => clock.now);
   await bindings.bind(TENANT, "did:privy:owner", owner);
   await bindings.settings(TENANT, owner, 0, "live", limits);
-  await ensureSolanaTradingSchema(db);
+  await ensureSolanaTradingSchema(db, postgres);
   const record = { programId: PROGRAM, vault, session, sessionEpoch: "1", registrationSignature: key(43), registeredAtMs: NOW - 10_000 };
   await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, owner, JSON.stringify(record),
     sealSecret(`solana-session/v1 ${TENANT} ${owner} ${PROGRAM} ${vault} ${session} 1\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)));
@@ -207,7 +223,8 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
   // The agent runs the worker's runtime by default, as runSolanaAgent does: it publishes its settings as the worker's, beside the web's.
-  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = runtime_("worker"), log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
+  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = runtime_("worker"), log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now,
+    postgres, ...(log ? { log } : {}) });
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
   /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
   const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
@@ -1395,3 +1412,40 @@ test("live rollout caps: on the list, an account whose permission is registered 
   await assert.rejects(f.app.checkLiveSettings(f.scope, limits), refusedAs(solanaLiveCapRefusal(limits, SOLANA_LIVE_CAP_DEFAULTS, "save")!, "permission"));
   await f.app.checkLiveSettings(f.scope, capped);
 });
+
+/** `db`, refusing every statement on the live rollout digests (SQLite busy past its timeout, a PostgreSQL write error); the schema still runs. */
+function refusingDigest(db: Db): Db {
+  const fail = async (): Promise<never> => { throw new Error("digest statement refused"); };
+  const wrap = (inner: Db): Db => ({
+    prepare: sql => sql.includes("solana_runtime_live_rollout_seen") ? { run: fail, get: fail, all: fail } : inner.prepare(sql),
+    exec: sql => inner.exec(sql),
+    tx: fn => inner.tx(tx => fn(wrap(tx))),
+  });
+  return wrap(db);
+}
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  test(`${dialect}: a rollout digest that cannot be written or read holds only buys: status still resolves, live and paper alike, with exits open, a sale is signed and sent, and the operator is told once a minute`, dialectOptions(dialect), async t => {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, dialect });
+    assert.equal((await f.app.status(f.scope)).live.ready, true, "ready while the digests can be read");
+    const lines: string[] = [], unchecked = () => lines.filter(line => line.startsWith("[alert] solana-live-rollout unchecked: ")).length;
+    const app = createSolanaAppRuntime({ db: refusingDigest(f.db), rpc: f.rpc, market: f.market, env: f.env, now: () => f.clock.now, log: line => lines.push(line) });
+    const status = await app.status(f.scope);
+    assert.deepEqual(status.live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]); assert.equal(status.live.canExit, true); assert.equal(status.live.ready, false);
+    // A buy is refused (the check it needs cannot be made) before any route; a sale back to USDG never asks, and is signed and sent.
+    await assert.rejects(app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "buy-unchecked") }), /digest statement refused/);
+    assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built for the buy");
+    const sold = await app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-unchecked") });
+    assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+    assert.equal(unchecked(), 1, "said once");
+    assert.ok(!lines.some(line => line.includes(TENANT) || line.includes("digest statement refused")), "no tenant, no database text");
+    // A paper account's status, which reads no chain, resolves too.
+    const paperOwner = key(56), paperTenant = `0x${"44".repeat(20)}`;
+    await f.bindings.bind(paperTenant as `0x${string}`, "did:privy:paper", paperOwner);
+    const paper = await app.status({ tenant: paperTenant, owner: paperOwner });
+    assert.equal(paper.requestedMode, "paper"); assert.ok(!paper.live.blockers.includes(SOLANA_LIVE_ROLLOUT_DIFFERS));
+    assert.equal(unchecked(), 1, "once a minute per process");
+    f.clock.now += 60_000; await app.status(f.scope);
+    assert.equal(unchecked(), 2, "said again after a minute");
+  });
+}

@@ -775,8 +775,9 @@ it off; the full plan, settings and runbooks are in
   `[alert] solana-reference-price refused: reason=… generation=…`,
   `[alert] solana-reference-tolerance misconfigured`,
   `[alert] solana-jupiter-key misconfigured`,
-  `[alert] solana-live-rollout misconfigured` and
-  `[alert] solana-live-rollout differs`. From the Solana worker only:
+  `[alert] solana-live-rollout misconfigured`,
+  `[alert] solana-live-rollout differs` and
+  `[alert] solana-live-rollout unchecked`. From the Solana worker only:
   `[alert] Solana transactions stuck pending`,
   `[alert] Solana vault below its book`,
   `[alert] Solana autonomous strategy refused: proven-expired attempts used up…`
