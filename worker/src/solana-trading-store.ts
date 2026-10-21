@@ -482,12 +482,11 @@ export const SOLANA_LIVE_EXIT_RESERVE = "This buy was refused: it would leave to
  * outAmount and the reference-implied amount are estimates, and settlement books whatever the swap delivered at or above the
  * minimum. So EXITS KEEP ROOM... counts what a buy brings at the larger of the two plus this margin, rounded up: a fill up to
  * this far above both still leaves the whole position sellable inside the window. 300 bps, the default reference tolerance
- * (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS), whatever tolerance is configured: a price that moves further in the buyer's favour
- * between the quote and the landing is rare at these sizes. A fill beyond it is booked as it landed (the book never caps what the
- * vault holds); the position may then be more than one day's limits can sell, and status holds further buys, which this check
- * refuses anyway, and says the excess exits over the next window (the app runtime's SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The
- * same margin is used before anything is signed (assessRisk), at admission (recordSigned) and by the strategy's buy sizing
- * (solanaExitReserveBuyRoom).
+ * (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS), whatever tolerance is configured. A fill beyond it is booked as it landed (the book
+ * never caps what the vault holds); the position may then be more than one day's limits can sell, and status holds further buys,
+ * which this check refuses anyway, and says the excess exits over the next window (the app runtime's
+ * SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The same margin is used before anything is signed (assessRisk), at admission
+ * (recordSigned) and by the strategy's buy sizing (solanaExitReserveBuyRoom).
  */
 export const SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS = 300;
 /** The most SOL a buy is counted as bringing (THE FILL MARGIN): the larger of its quoted and reference-implied output, plus the margin, rounded up. */
