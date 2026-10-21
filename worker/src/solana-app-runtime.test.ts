@@ -2702,3 +2702,22 @@ test("live rollout caps: a live buy preview is refused before any quote while a 
     assert.equal(quotes, 1);
   } finally { f.raw.close(); }
 });
+
+test("live rollout: a list entry in any case names the tenant, whose id is lowercase by construction: a scope spelled otherwise is refused before the list is read", async () => {
+  const f = await fixture();
+  try {
+    // A tenant id with hex letters, bound beside the fixture's own.
+    const lettered = `0x${"ab".repeat(20)}`, owner = key(5), scope = { tenant: lettered, owner };
+    await f.bindings.bind(lettered as `0x${string}`, "did:privy:lettered", owner);
+    for (const listed of [`0x${"AB".repeat(20)}`, `0x${"aB".repeat(20)}`, lettered]) {
+      const lines: string[] = [];
+      const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: listed }, log: line => lines.push(line) });
+      await app.checkLiveSettings(scope, limits);
+      assert.equal((await app.status(scope)).liveAccess.onList, true, listed);
+      // The same tenant spelled in capitals never reaches the list: the store refuses it, so no case can differ from the list's.
+      await assert.rejects(app.checkLiveSettings({ tenant: `0x${"AB".repeat(20)}`, owner }, limits), /Invalid authenticated Solana tenant/);
+      await assert.rejects(app.status({ tenant: `0x${"AB".repeat(20)}`, owner }), /Invalid authenticated Solana tenant/);
+      assert.deepEqual(lines, []);
+    }
+  } finally { f.raw.close(); }
+});

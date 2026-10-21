@@ -454,8 +454,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       return fail(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration");
     }
   }
-  /** Whether MERRYMEN_SOLANA_LIVE_TENANTS names this tenant (case-insensitively). Read on every ask, from this runtime's env. */
-  function liveListed(tenant: string): boolean { return rollout(() => solanaLiveTenants(env)).has(tenant.toLowerCase()); }
+  /**
+   * Whether MERRYMEN_SOLANA_LIVE_TENANTS names this store's tenant. Read on every ask, from this runtime's env. Asked of a store,
+   * never a bare scope: SolanaTradingStore refuses any tenant but 0x and 40 lowercase hex digits, and the list is lowercased when
+   * read (solanaLiveTenants), so the two compare exactly whatever case an operator wrote.
+   */
+  function liveListed(s: SolanaTradingStore): boolean { return rollout(() => solanaLiveTenants(env)).has(s.scope.tenant); }
   /** The live caps in force (MERRYMEN_SOLANA_LIVE_MAX_*), from this runtime's env. */
   function liveCaps(): SolanaLiveCaps { return rollout(() => solanaLiveCaps(env)); }
   /** The account went live: it has a registered permission or a live book. Off the list, such an account is exits-only. */
@@ -467,7 +471,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * withdrawal or a status read.
    */
   async function requireLiveOpen(s: SolanaTradingStore): Promise<void> {
-    if (!liveListed(s.scope.tenant)) fail(await wentLive(s) ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN, "permission");
+    if (!liveListed(s)) fail(await wentLive(s) ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN, "permission");
   }
   /**
    * Activating a permission that already landed: as requireLiveOpen, except that
@@ -482,7 +486,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    */
   async function requireLiveOpenOrWentLive(s: SolanaTradingStore): Promise<void> {
     let listed: boolean;
-    try { listed = liveListed(s.scope.tenant); } catch (error) { if (await wentLive(s)) return; throw error; }
+    try { listed = liveListed(s); } catch (error) { if (await wentLive(s)) return; throw error; }
     if (!listed && !(await wentLive(s))) fail(SOLANA_LIVE_NOT_OPEN, "permission");
   }
   /** A registered permission's own limits, as the vault holds them, against the caps. */
@@ -1013,7 +1017,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // Whether the vault holds a current permission matching the one the app keeps ("unknown" while it could not be read):
       // without one nothing can be sold, so the exits-only blocker below must not say exits still work.
       let permission: "current" | "missing" | "unknown" = "unknown";
-      try { onList = liveListed(scope.tenant); } catch { rolloutMisconfigured = true; }
+      try { onList = liveListed(s); } catch { rolloutMisconfigured = true; }
       try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
@@ -1208,7 +1212,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     async checkLiveSettings(scope: SolanaAccountScope, limits: SolanaPaperLimits): Promise<void> {
       const s = await store(scope);
       let listed: boolean, caps: SolanaLiveCaps;
-      try { listed = liveListed(scope.tenant); caps = liveCaps(); } catch (error) { if (await wentLive(s)) return; throw error; }
+      try { listed = liveListed(s); caps = liveCaps(); } catch (error) { if (await wentLive(s)) return; throw error; }
       if (!listed) { if (await wentLive(s)) return; fail(SOLANA_LIVE_NOT_OPEN, "permission"); }
       const capped = solanaLiveCapRefusal(limits, caps, "save");
       if (capped) fail(capped, "permission");
