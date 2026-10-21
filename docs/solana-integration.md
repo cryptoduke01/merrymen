@@ -1350,7 +1350,7 @@ says where to change it. Superseded choices are listed under the current one.
 | A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
 | Web and worker run different list or caps | Every live buy held on both while they differ (one digest of all the settings, so a deploy that adds a tenant briefly holds everyone's buys), `[alert]` once a minute; exits continue. A web change reaches the worker only once the web serves a Solana request, so the runbook holds first | Compare per tenant; publish the web's digest at boot | `rolloutDiffers` in `solana-app-runtime.ts` |
 | Live buy previews off the list, or while a cap cannot be read | Refused before any quote, as the trade would be | Allowed. Not done: refusing the preview of a buy under a permission registered above caps lowered since (it needs a vault read, or the session's limits kept in its stored record; the trade refuses it before signing) | `preview` |
-| The page's default live limits | The default caps (25 USDG and 0.25 SOL a day; were 50 and 0.5) | — | `SolanaScreen.tsx` |
+| The page's default limits | The default caps: 10 and 25 USDG, 0.1 and 0.25 SOL (were 50 USDG and 0.5 SOL a day). The same form state backs the paper form, so a new paper account also starts at 25 USDG per 24 hours (was 50); paper limits are never capped, so it may save more | A separate paper default of 50 USDG a day | `SolanaScreen.tsx` |
 
 **Release and infrastructure (Milla's decisions; nothing is done by default)**
 

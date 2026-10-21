@@ -2494,6 +2494,8 @@ test("with no limits saved, the live form starts at the default live caps", asyn
   (state.binding as { limits: unknown }).limits = null;
   (state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> }).liveAccess = access(true);
   await render();
+  // The paper form shares them (paper limits are never capped).
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "25"]);
   await act(async () => { liveSwitch()!.click(); });
   assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
 });
