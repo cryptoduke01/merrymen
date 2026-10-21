@@ -16,9 +16,13 @@ import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionE
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION,
+  solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
 
 const WSOL = "So11111111111111111111111111111111111111112";
+/** The form's starting limits in paper mode: 10 and 50 USDG; 0.1 and 0.5 SOL sold, should live be chosen once limits are saved. */
+const PAPER_DEFAULTS = { perTrade: "10", daily: "50", perTradeSol: "0.1", dailySol: "0.5" } as const;
 type RuntimeStatus = {
   owner: string; requestedMode: "paper" | "live"; paper: SolanaPaperSnapshot | null;
   live: { ready: boolean; canExit?: boolean; cashTokenAccount?: string | null; blockers: string[]; programId: string | null; vault: string | null; session: string | null; pending: Receipt[];
@@ -33,6 +37,11 @@ type RuntimeStatus = {
     ownerWallet?: OwnerWallet | null; recoverable?: RecoverableSol | null };
   limits: SolanaPaperLimits | null;
   automation?: { workerOnline: boolean; lastSeenAtMs: number | null };
+  /**
+   * The live rollout (MERRYMEN_SOLANA_LIVE_TENANTS and the live caps): whether this account may go live, and the caps a new
+   * permission must fit (null while a cap setting cannot be read). Never the list itself. Absent from an older server.
+   */
+  liveAccess?: { onList: boolean; misconfigured: boolean; caps: SolanaLiveCaps | null };
 };
 type Status = { binding: SolanaBinding | null; runtime: RuntimeStatus | null };
 type FeePayerLevel = "ok" | "low" | "buys-blocked" | "exits-blocked";
@@ -179,8 +188,9 @@ function ConnectedSolana() {
   // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
   const [depositAccount, setDepositAccount] = useState<string | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
-  const [perTrade, setPerTrade] = useState("10"), [daily, setDaily] = useState("50");
-  const [perTradeSol, setPerTradeSol] = useState("0.1"), [dailySol, setDailySol] = useState("0.5");
+  // Paper's defaults; choosing live with nothing saved or typed starts from the live caps instead (chooseMode).
+  const [perTrade, setPerTrade] = useState<string>(PAPER_DEFAULTS.perTrade), [daily, setDaily] = useState<string>(PAPER_DEFAULTS.daily);
+  const [perTradeSol, setPerTradeSol] = useState<string>(PAPER_DEFAULTS.perTradeSol), [dailySol, setDailySol] = useState<string>(PAPER_DEFAULTS.dailySol);
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
   const [initialCash, setInitialCash] = useState("1000"), [side, setSide] = useState<"buy" | "sell">("buy"), [amount, setAmount] = useState("1");
   const [preview, setPreview] = useState<Preview | null>(null), [receipt, setReceipt] = useState<Receipt | null>(null);
@@ -278,6 +288,39 @@ function ConnectedSolana() {
   };
   const binding = status?.binding;
   const sameWallet = !!binding && signer.address === binding.owner;
+  // THE LIVE ROLLOUT, as status reports it. The server decides every case itself (the runtime refuses a live save, a
+  // permission or a buy it does not admit); the page only says why and offers no live switch it would refuse.
+  const liveAccess = status?.runtime?.liveAccess;
+  // An account that went live (a registered permission or a live book) keeps live mode for its exits, as the server lets it.
+  const wentLive = !!status?.runtime?.live.session || !!status?.runtime?.live.book;
+  // Its permission expired or replaced on Solana, such an account cannot sell either: the server then says so (the _NO_PERMISSION
+  // variants, never "exits still work"), and the page says the same.
+  const saidByServer = (text: string) => !!status?.runtime?.live.blockers.includes(text);
+  const paused = saidByServer(SOLANA_LIVE_PAUSED_NO_PERMISSION) ? SOLANA_LIVE_PAUSED_NO_PERMISSION : SOLANA_LIVE_PAUSED;
+  const misconfigured = saidByServer(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION) ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION : SOLANA_LIVE_ROLLOUT_MISCONFIGURED;
+  const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? misconfigured : !liveAccess.onList ? (wentLive ? paused : SOLANA_LIVE_NOT_OPEN) : null;
+  // The caps a new live permission must fit: only while this account may register one.
+  const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
+  // Its registered permission allows more than the caps (the server says so, as a buys-only blocker): its live limits may keep
+  // what the owner signed, so a re-save never narrows its exits. Only the server knows that permission's limits, so the page
+  // leaves such a save to it (checkLiveSettings), and still asks for limits within the caps before a new permission.
+  const signedAboveCaps = !!liveCaps && saidByServer(solanaLiveSessionAboveCaps(liveCaps));
+  /**
+   * Switching mode, limits the form shows only as the other mode started them (none saved, none typed) become the new mode's
+   * starting limits. Paper starts at its own defaults (paper is never capped); live at the caps in force (status's liveAccess), or
+   * the default caps from a server that reports none, so a first live save fits them. Saved or typed limits are never replaced;
+   * the SOL sold limits, saved only with live mode, start at the caps beside saved paper limits too.
+   */
+  const chooseMode = (next: "paper" | "live") => {
+    if (next !== mode) {
+      const caps = liveAccess?.caps ?? SOLANA_LIVE_CAP_DEFAULTS;
+      const live = { perTrade: display(caps.perTradeUsdg), daily: display(caps.dailyUsdg), perTradeSol: display(caps.perTradeWsol, 9), dailySol: display(caps.dailyWsol, 9) };
+      const [from, to] = next === "live" ? [PAPER_DEFAULTS, live] : [live, PAPER_DEFAULTS];
+      if (!binding?.limits && perTrade === from.perTrade && daily === from.daily) { setPerTrade(to.perTrade); setDaily(to.daily); }
+      if (!binding?.limits?.perTradeWsol && perTradeSol === from.perTradeSol && dailySol === from.dailySol) { setPerTradeSol(to.perTradeSol); setDailySol(to.dailySol); }
+    }
+    setMode(next); setConsent(false); invalidate();
+  };
   const policy = (): SolanaPaperLimits => {
     const maxOpsPerDay = Number(ops), maxDrawdownBps = Number(units(drawdown, 2)), hours = Number(duration);
     if (!Number.isInteger(maxOpsPerDay) || maxOpsPerDay < 1 || maxOpsPerDay > 96
@@ -287,7 +330,11 @@ function ConnectedSolana() {
     const sell = mode === "live" ? { perTradeWsol: units(perTradeSol, 9), dailyWsol: units(dailySol, 9) } : {};
     if (sell.perTradeWsol && BigInt(sell.perTradeWsol) > BigInt(sell.dailyWsol)) throw new Error("The SOL sold per trade cannot exceed the SOL sold per 24 hours.");
     if (mode === "live" && BigInt(units(perTrade, 6)) < SOLANA_LIVE_MIN_TRADE_USDG_RAW) throw new Error(SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM);
-    return { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
+    const limits = { perTradeUsdg: units(perTrade, 6), dailyUsdg: units(daily, 6), maxOpsPerDay, maxDrawdownBps, expiresAtMs: Date.now() + Math.floor(hours * 3_600_000), ...sell };
+    // Above a live cap: refused here, in the server's own words, before anything is sent (unless the permission registered allows more).
+    const capped = mode === "live" && liveCaps && !signedAboveCaps ? solanaLiveCapRefusal(limits, liveCaps, "save") : null;
+    if (capped) throw new Error(capped);
+    return limits;
   };
   /** The form shows exactly the saved mode and limits: nothing typed is waiting to be saved. */
   const formMatchesSaved = (): boolean => {
@@ -302,7 +349,9 @@ function ConnectedSolana() {
   /** Why a new permission cannot be registered with what the page shows, or null. */
   const registerBlock = (): string | null => {
     const saved = binding?.limits;
+    if (liveClosed) return liveClosed;
     if (!saved) return "Save live mode and its limits before registering a trading permission.";
+    if (liveCaps && solanaLiveCapsExceeded(saved, liveCaps).length) return solanaLiveSavedAboveCaps(liveCaps);
     if (saved.expiresAtMs <= Date.now()) return `Your saved limits expired at ${permissionExpiry(saved.expiresAtMs)}. Save new limits before registering.`;
     if (!saved.perTradeWsol || !saved.dailyWsol) return "Save how much SOL a live trade and a live day may sell before registering.";
     if (!formMatchesSaved()) return "The form has unsaved changes. A permission is always signed with your saved limits: save your changes, or refresh to discard them, before registering.";
@@ -654,9 +703,11 @@ function ConnectedSolana() {
         await api("settings", { mode, limits: policy(), revision: binding.revision, liveConsent: consent }); invalidate(); await refresh();
       }); }}><h2>Solana trading mode</h2>
         <fieldset disabled={busy}><legend>Choose how this account trades</legend>
-          <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => { setMode("paper"); setConsent(false); invalidate(); }} /> Paper · simulated funds</label>
-          <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => { setMode("live"); setConsent(false); invalidate(); }} /> Live · real funds</label>
+          <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => chooseMode("paper")} /> Paper · simulated funds</label>
+          {/* No live switch while this account may not go live; one that went live keeps it for its exits, and a saved live mode stays shown. */}
+          {(!liveClosed || wentLive || binding.requestedMode === "live") && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => chooseMode("live")} /> Live · real funds</label>}
         </fieldset>
+        {liveClosed && <p role="status">{liveClosed}</p>}
         <div className="solana-fields">
           <label>USDG per trade<input inputMode="decimal" value={perTrade} onChange={(e) => setPerTrade(e.target.value)} /></label>
           <label>USDG per 24 hours<input inputMode="decimal" value={daily} onChange={(e) => setDaily(e.target.value)} /></label>
@@ -668,6 +719,8 @@ function ConnectedSolana() {
             <label>SOL sold per 24 hours<input inputMode="decimal" value={dailySol} onChange={(e) => setDailySol(e.target.value)} /></label>
           </>}
         </div>
+        {mode === "live" && liveCaps && <p>Live limits on this platform are {solanaLiveCapsText(liveCaps)}.</p>}
+        {mode === "live" && <p>Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits. So a buy is refused once it would leave too little of them to sell your whole SOL position within the same 24 hours: a day&apos;s buys stop at about half the USDG limit. Withdrawing is never limited.</p>}
         {mode === "live" && <p>Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller. Set at least 1 USDG per trade, and SOL sold per trade worth at least 1 USDG: registering checks it against the independent SOL price.</p>}
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
         <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>
@@ -702,7 +755,11 @@ function ConnectedSolana() {
         {live?.feePayer && Object.hasOwn(FEE_PAYER_LEVELS, live.feePayer.level) && <p>Shared network fee payer: {FEE_PAYER_LEVELS[live.feePayer.level]}{displaySolanaAmountOrNull(live.feePayer.lamports, 9) !== null && ` (${displaySolanaAmountOrNull(live.feePayer.lamports, 9)} SOL)`}. Merrymen pays your trades&apos; network fees from it; your owner wallet pays only for owner transactions.</p>}
         {status?.runtime?.live.vault && <p>Vault: <span className="solana-address">{status.runtime.live.vault}</span>{status.runtime.live.programId && <> · Program: <span className="solana-address">{status.runtime.live.programId}</span></>}</p>}
         {live?.programId && !programTrusted && <p role="status">{SOLANA_UNRELEASED_PROGRAM}</p>}
-        {status?.runtime?.live.cashTokenAccount && status.runtime.live.cashTokenAccount === depositAccount && (status.runtime.live.ready || status.runtime.live.canExit) && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
+        {/* The deposit address only while this account may buy: a deposit is for buying, and while buying is paused (off the live
+            list, a breaker, the settings differing) it could not be traded. Withdraw is offered either way. */}
+        {status?.runtime?.live.cashTokenAccount && status.runtime.live.cashTokenAccount === depositAccount && status.runtime.live.canExit && (!status.runtime.live.ready || liveClosed)
+          && <p>Buying is paused for this account, so no deposit address is shown: USDG sent now could not be traded. Exits, revoke and withdraw still work.</p>}
+        {status?.runtime?.live.cashTokenAccount && status.runtime.live.cashTokenAccount === depositAccount && status.runtime.live.ready && !liveClosed && <div><h3>Fund the Solana vault</h3><p>Send USDG on Solana to this verified USDG token account:</p><p className="solana-address">{status.runtime.live.cashTokenAccount}</p><p>Deposit USDG only. Direct wrapped SOL deposits have no recorded cost basis and cannot be traded by this session.</p></div>}
         {status?.runtime?.live.balances && <><p className="solana-value">{display(status.runtime.live.balances.cashUsdg)} USDG</p><p>{display(status.runtime.live.balances.wsolRaw, 9)} wrapped SOL · observed at slot {status.runtime.live.balances.slot}</p></>}
         {liveBook && <p>Recorded realized P&amp;L: {display(liveBook.realizedPnlUsdgRaw)} USDG. Network fees: {display(liveBook.networkFeesLamports, 9)} SOL.</p>}
         {liveBook?.quarantinedWsolRaw && liveBook.quarantinedWsolRaw !== "0" && <p role="status">{display(liveBook.quarantinedWsolRaw, 9)} wrapped SOL arrived outside your recorded trades. It is held aside: never traded, never counted in performance, and you can withdraw it.</p>}

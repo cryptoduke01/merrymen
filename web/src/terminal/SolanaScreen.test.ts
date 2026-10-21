@@ -16,6 +16,8 @@ import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-comm
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
+import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "../lib/solana-live-caps";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -2445,4 +2447,206 @@ test("a pending owner record the server cannot settle says so plainly, never 'a 
       await ui.close(); ui = testDom();
     }
   });
+});
+
+/** A whole or decimal USDG amount in raw micro-USDG. */
+const units = (usdg: string) => String(Math.round(Number(usdg) * 1_000_000));
+/** The live mode radio, or undefined when the page offers none. */
+const liveSwitch = () => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.includes("Live · real funds"))?.querySelector("input");
+/** The live rollout as status reports it. */
+const access = (onList: boolean, misconfigured = false) => ({ onList, misconfigured, caps: misconfigured ? null : { ...SOLANA_LIVE_CAP_DEFAULTS } });
+
+test("off the live list a paper account is told why and offered no live switch; on it the page names the caps and refuses a live limit above one before sending anything", async () => {
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.equal(!!liveSwitch(), false, "no live switch");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  // A list or cap setting the server cannot read: said, and no switch either.
+  runtime.liveAccess = access(false, true); await press("Refresh account");
+  assert.equal(!!liveSwitch(), false); assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
+  // On the list: the switch, and the caps beside the live limits.
+  runtime.liveAccess = access(true); await press("Refresh account");
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  await act(async () => { liveSwitch()!.click(); });
+  assert.match(ui.container.textContent!, /Live limits on this platform are at most 10 USDG per trade, 25 USDG per 24 hours, 0\.1 SOL sold per trade and 0\.25 SOL sold per 24 hours\./);
+  await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+  // The saved paper limits allow 50 USDG a day: above the 25 USDG live cap.
+  for (const daily of ["50", "25.5"]) {
+    if (daily !== "50") await type("USDG per 24 hours", daily);
+    await ui.click("Save Solana mode and limits");
+    const over = { perTradeUsdg: "10000000", dailyUsdg: units(daily), perTradeWsol: "100000000", dailyWsol: "250000000" };
+    assert.ok(ui.container.textContent!.includes(solanaLiveCapRefusal(over, SOLANA_LIVE_CAP_DEFAULTS, "save")!), ui.container.textContent!);
+  }
+  assert.equal(saved.length, 0, "nothing sent");
+  await type("USDG per 24 hours", "25");
+  await ui.click("Save Solana mode and limits");
+  assert.equal((saved[0]!.limits as Record<string, unknown>).dailyUsdg, "25000000");
+});
+
+test("with no limits saved, the paper form starts at paper's own defaults and choosing live starts at the live caps in force", async () => {
+  (state.binding as { limits: unknown }).limits = null;
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
+  await render();
+  const paperSwitch = () => [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.includes("Paper · simulated funds"))!.querySelector("input")!;
+  // Paper limits are never capped: 10 and 50 USDG, as before the live caps.
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "50"]);
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
+  // Back to paper: its own defaults again.
+  await act(async () => { paperSwitch().click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "50"]);
+  // Other caps in force: live starts at those. A typed limit is kept.
+  runtime.liveAccess = { onList: true, misconfigured: false, caps: { perTradeUsdg: "5000000", dailyUsdg: "20000000", perTradeWsol: "50000000", dailyWsol: "200000000" } };
+  await press("Refresh account");
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["5", "20", "0.05", "0.2"]);
+  await act(async () => { paperSwitch().click(); });
+  await type("USDG per 24 hours", "40");
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours"].map(field), ["10", "40"], "typed limits are never replaced");
+  // A server that reports no caps: live starts at the default caps (a fresh page).
+  delete runtime.liveAccess;
+  await ui.remount(React.createElement(SolanaScreen));
+  await act(async () => { liveSwitch()!.click(); });
+  assert.deepEqual(["USDG per trade", "USDG per 24 hours", "SOL sold per trade", "SOL sold per 24 hours"].map(field), ["10", "25", "0.1", "0.25"]);
+});
+
+test("a saved live mode with no permission yet, off the list, stays shown and says live trading is not open; nothing can be registered", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  (state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> }).liveAccess = access(false);
+  await render();
+  assert.equal(!!liveSwitch(), true, "the saved mode is shown; the server refuses saving it again");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN)); assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
+  assert.equal(button("Register bounded trading permission").disabled, true);
+});
+
+test("an account that went live and is off the list keeps its live switch for exits, says live trading is paused, offers no new permission and still offers a sale", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: true, blockers: [SOLANA_LIVE_PAUSED] });
+  await render();
+  assert.equal(!!liveSwitch(), true, "live mode stays offered: it is how its exits are sold");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
+  assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps to fit: it cannot register while off the list");
+  assert.equal(button("Preview trade").disabled, true, "no buy");
+  const direction = ui.container.querySelector<HTMLSelectElement>("select")!;
+  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  assert.equal(button("Preview trade").disabled, false, "a sale back to USDG");
+  // Back on the list with saved limits above the caps: registration waits for limits within them.
+  runtime.liveAccess = access(true); Object.assign(state.runtime.live, { session: null, blockers: [] });
+  await press("Refresh account");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  assert.ok(ui.container.textContent!.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
+  assert.equal(signCount, 0); assert.equal(calls.some((call) => call.path === "setup"), false);
+});
+
+test("off the list, an account that went live whose permission expired or was replaced is told selling needs a permission, never that exits still work", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: false, blockers: ["The on-chain trading permission has expired.", SOLANA_LIVE_PAUSED_NO_PERMISSION] });
+  await render();
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED_NO_PERMISSION));
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_PAUSED), "never \"exits, revoke and withdraw still work\"");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  // The same while a rollout setting cannot be read.
+  runtime.liveAccess = access(false, true);
+  state.runtime.live.blockers = ["Register an owner-approved live trading permission.", SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION];
+  await press("Refresh account");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION));
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
+});
+
+test("an account that went live and later chose paper keeps its live switch off the list, so it can return to live mode to sell its exits", async () => {
+  // Paper is selected, but the account holds a live permission (or a live book): admission sells only in live mode.
+  state = initial("paper"); state.runtime.live.programId = PROGRAM;
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: false, blockers: [SOLANA_LIVE_PAUSED, "Live mode is not selected."] });
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: { ...state.binding, requestedMode: "live", limits: body!.limits } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.equal(!!liveSwitch(), true, "live mode stays offered: it is how its exits are sold");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
+  assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps: it cannot register while off the list");
+  await act(async () => { liveSwitch()!.click(); });
+  // Live limits bound sales too: the program charges a sale's proceeds to the same USDG limits.
+  assert.match(ui.container.textContent!, /Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits/);
+  await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+  await press("Save Solana mode and limits");
+  assert.equal(saved.length, 1, ui.container.textContent!);
+  assert.equal(saved[0]!.mode, "live"); assert.equal(saved[0]!.liveConsent, true);
+  // The same paper account that never went live is offered no live switch.
+  Object.assign(state.runtime.live, { session: null, blockers: ["Live mode is not selected."] });
+  state.binding.requestedMode = "paper";
+  await press("Refresh account");
+  assert.equal(!!liveSwitch(), false);
+});
+
+test("the deposit address is offered only while the account may buy: exits-only off the list, or while the services' settings differ, it is not, and the page says why", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
+  const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER);
+  Object.assign(state.runtime.live, { session: OWNER, ready: true, canExit: true, blockers: [], vault, cashTokenAccount: await deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM) });
+  const mount = async () => {
+    await ui.remount(React.createElement(SolanaScreen));
+    // Address derivation is asynchronous (WebCrypto); let it settle.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  };
+  const paused = "Buying is paused for this account, so no deposit address is shown";
+  await mount();
+  assert.match(ui.container.textContent!, /Fund the Solana vault/); assert.ok(!ui.container.textContent!.includes(paused));
+  // Taken off the list after going live: exits-only, so no deposit address, and the page says why.
+  runtime.liveAccess = access(false); Object.assign(state.runtime.live, { ready: false, canExit: true, blockers: [SOLANA_LIVE_PAUSED] });
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault")); assert.ok(ui.container.textContent!.includes(paused));
+  // On the list while the web and the worker run different settings: buying waits, and so does the deposit address.
+  runtime.liveAccess = access(true); Object.assign(state.runtime.live, { blockers: [SOLANA_LIVE_ROLLOUT_DIFFERS] });
+  await mount();
+  assert.ok(!ui.container.textContent!.includes("Fund the Solana vault")); assert.ok(ui.container.textContent!.includes(paused));
+});
+
+test("on the list, while the server says the registered permission allows more than the caps, the page leaves a live save above them to the server, and still asks for limits within them before a new permission", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(true);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: true, blockers: [solanaLiveSessionAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)] });
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+  // The saved limits (50 USDG and 1 SOL a day) are above the 25 USDG and 0.25 SOL caps: the server bounds them by the permission it holds.
+  await ui.click("Save Solana mode and limits");
+  assert.equal(saved.length, 1, ui.container.textContent!);
+  const { expiresAtMs: _sent, ...sent } = saved[0]!.limits as typeof limits, { expiresAtMs: _held, ...held } = state.binding.limits!;
+  assert.deepEqual(sent, held);
+  assert.equal(button("Register bounded trading permission").disabled, true, "a new permission still needs limits within the caps");
+  assert.ok(ui.container.textContent!.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
+  // Without that blocker (a permission within the caps), the page refuses the same save itself, before anything is sent.
+  Object.assign(state.runtime.live, { blockers: [] });
+  await press("Refresh account");
+  const consent = ui.container.querySelector("input[type=checkbox]") as HTMLInputElement;
+  if (!consent.checked) await act(async () => { consent.click(); });
+  await ui.click("Save Solana mode and limits");
+  assert.equal(saved.length, 1, "nothing sent");
+  assert.ok(ui.container.textContent!.includes(solanaLiveCapRefusal(state.binding.limits!, SOLANA_LIVE_CAP_DEFAULTS, "save")!), ui.container.textContent!);
 });

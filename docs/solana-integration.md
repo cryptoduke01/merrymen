@@ -333,6 +333,168 @@ output for the committed bytes and six variants
 do not inherit the USDG exception: the paper mint screen refuses new buys with
 unsafe mint authorities or extensions.
 
+### Live rollout: who may go live, and the platform's caps
+
+`MERRYMEN_SOLANA=1` turns Solana on for every bound tenant at once, and the
+program alone lets an owner sign any limits up to 96 operations a day and 168
+hours. So live trading is also rolled out tenant by tenant, as Robinhood's is
+with `MERRYMEN_FLEET_ROLLOUT`, and its limits are capped by the platform as
+Robinhood's vault caps spending at 25 USDG a day
+([`solana-live-rollout.ts`](../worker/src/solana-live-rollout.ts),
+[`solana-live-caps.ts`](../web/src/lib/solana-live-caps.ts)). The app runtime
+reads both from its own env, so the web and the Solana worker decide alike.
+
+- **`MERRYMEN_SOLANA_LIVE_TENANTS`** names the tenants that may go live: 0x
+  tenant ids, comma-separated, spaces ignored, case-insensitive. Unset or empty,
+  nobody may; paper stays open to every bound tenant. A tenant it does not name
+  cannot save live mode, prepare, submit or activate a first permission,
+  preview a live buy or place one (manual or autonomous); each is refused on the
+  server before any chain read (`SOLANA_LIVE_NOT_OPEN`), and the page offers no
+  live switch and says why.
+- **Exits-only.** A tenant taken off the list after going live (it has a
+  registered permission or a live book) can still sell back to USDG within the
+  permission it signed, revoke, withdraw USDG, wrapped SOL and native SOL,
+  record withdrawals made outside Merrymen, use paper and read status. Status
+  says "Live trading is paused for this account: exits, revoke and withdraw
+  still work." as a blocker that leaves exits open, so the worker sells but never
+  buys. Exits need a current permission, though: once the one it holds has
+  expired or been replaced on Solana, nothing can be sold and no new one can be
+  registered off the list, and status says instead "Live trading is paused for
+  this account: revoke and withdraw still work. Selling needs a current trading
+  permission, and a new one cannot be registered while live trading is paused."
+  (likewise for a misconfigured setting). Such an account may save live mode
+  again, because live mode is how its exits are sold: each limit at most the
+  larger of its cap and the limit of the permission it registered (kept when
+  activateLive registered it), so its sales are never narrowed below what it
+  signed and never go beyond both. A renewal it prepared and submitted while
+  listed that lands after it left the list is still activated: on Solana it
+  already replaced the permission before it, so without it nothing could be
+  sold. It grants no buys. A first permission that lands after the tenant left
+  the list is not activated (the page keeps its session key, and Revoke ends it).
+- **Caps.** `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG` and `…_MAX_DAILY_USDG`
+  (default 10 and 25 USDG), `…_MAX_PER_TRADE_WSOL` and `…_MAX_DAILY_WSOL`
+  (default 0.1 and 0.25 SOL). Live limits above a cap are refused where they are
+  saved, where a permission is prepared and again where its signed bytes are
+  submitted, naming the cap, so no permission above the caps in force when it is
+  sent reaches Solana. One registered (or already sent) before a deploy lowered
+  the caps is activated as signed, and may not buy: each buy, and its preview,
+  is refused before any quote by the limits activateLive checked against the
+  vault and kept in the session record, and again before signing by the limits
+  every provider shows for that session (one provider showing them within the
+  caps is not enough); status says so. Its exits keep the limits the owner
+  signed: admission bounds sales by the saved limits, so such an account may
+  save its live limits again (a mode switch, a new duration) up to the larger
+  of each cap and the permission's limit, on the list as off it, and a re-save
+  never narrows its exits below what it signed (the page leaves that save to
+  the server, which alone holds the permission's limits). A new permission
+  within the caps lifts it, and still needs saved limits within them. Paper
+  limits are not capped.
+- **Buys keep room for exits.** The vault program charges a sale's USDG
+  proceeds to the session's per-trade and daily USDG limits, as it charges a
+  buy's spend, and the SOL it sells to the SOL sold limits (`swap` in
+  `contracts/solana/programs/merrymen-vault/src/lib.rs`); admission counts the
+  same way (a sale at the higher of its quote and its reference value when it
+  is admitted, raised to its actual proceeds when it lands above them, in the
+  transaction that books it). So a buy is refused (`SOLANA_LIVE_EXIT_RESERVE`)
+  once it would leave too little of the rolling 24-hour limits to sell the
+  account's whole recorded SOL position inside them: the USDG the window
+  already used, the buy, and the
+  position after it valued at the independent price plus the reference
+  tolerance must fit the USDG per 24 hours limit, and that position must fit
+  what sales left of the SOL sold per 24 hours limit
+  ([`solanaBuyKeepsExitRoom`](../worker/src/solana-trading-store.ts)). What the
+  buy brings is counted at the larger of its quoted and its reference-implied
+  output plus a **fill margin** of 300 bps
+  (`SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS`, the default reference tolerance,
+  whatever tolerance is configured): a buy is an ExactIn swap, the program
+  enforces only its minimum output, and settlement books whatever landed, so
+  neither estimate bounds the fill. The same margin is used before signing, at
+  admission and by the strategy's buy sizing. Each
+  limit is the lower of the saved one and the registered permission's (as
+  every provider shows the vault holding it, and as activateLive kept it): the
+  vault charges the exit to its own limits, so limits saved above the
+  permission since (the caps raised, say) never let a buy use room the exit
+  will not get. It is checked before anything is signed, at the highest price either provider
+  serves, and again at admission; it never refuses a sale and never widens a
+  limit. The autonomous strategy sizes its buys below it, and a refusal waits
+  the strategy interval. At the defaults (10 and 25 USDG, 0.1 and 0.25 SOL) a
+  day's buys stop at about 12 USDG, and a position never grows past what one
+  day's limits can sell at the price it was bought at (about 24 USDG of SOL, and
+  at most 0.25 SOL) unless a fill lands further above its quote than the
+  margin. A sale is still at most 10 USDG and 0.1 SOL. Operations are
+  not reserved: the owner's own operations per day can still be used up by
+  buys. Sales alone, or a rise in the SOL price, can still use up a day's room,
+  and status then says so, pointing to Withdraw, which no limit or cap ever
+  bounds. A booked position more than the window's limits can sell (a fill
+  beyond the margin, booked as it landed; a rise in the SOL price; or daily
+  limits lowered since, saved again lower or registered lower) holds buys,
+  which the reserve would refuse anyway, with the buys-only blocker
+  `SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM` and a warning naming no one cause:
+  `SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW` (sell what the limits allow now, the
+  rest as earlier trades leave the window) or, where the position is more than
+  a whole window's limits can sell, `SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS`
+  (selling all of it takes more than one window). The SOL sold room is always judged;
+  the USDG room is priced (at the highest price either provider serves) only
+  while a buy made inside the window still counts, so status reads Pyth for it
+  only after a buy, and a position that outgrew it by the SOL price alone is
+  left to each buy's own check. It never stops a sale. Under 1 USDG left of the USDG limit stops buys and partial sales; a
+  sale of the whole position, worth no more than what is left (the exception to
+  the live minimum), still fits. Status prices the position then, at the
+  highest price either provider serves: while it fits, or nothing is held, it
+  says so as a buys-only blocker (`SOLANA_STATUS_DAILY_USDG_BUYS_USED`; the page
+  still offers the sale, and the worker waits rather than try a partial one),
+  and only otherwise, or when it cannot be priced, as a blocker of exits too
+  (`SOLANA_STATUS_DAILY_USDG_USED`). A used SOL sold limit is a warning
+  (`SOLANA_STATUS_DAILY_SOL_SOLD_USED`).
+- **Malformed settings** (an empty or non-id entry, a cap that is not an exact
+  positive amount or does not fit the program's u64, a per-trade cap above its
+  daily cap, a USDG per-trade cap under the 1 USDG live minimum) refuse new
+  permissions and buys for everyone as configuration, with
+  `[alert] solana-live-rollout misconfigured: …` naming the setting (and an
+  entry by position, never its value) at most once a minute per process. Exits,
+  revoke and withdraw continue.
+
+- **Web and worker must match, and are checked.** Each service reads these
+  settings from its own env and applies a change only once redeployed. Each
+  publishes a digest of the list and caps it runs
+  (`solana_runtime_live_rollout_seen`; the worker with every heartbeat, so its
+  digest is never older than its heartbeat; the web as its server starts
+  (Next's `register()` in `web/src/instrumentation.ts`), every 30 s after, and
+  whenever it serves Solana status, a preview or a trade: at most every 30 s
+  while the stored digest is its own, at once when it is not). The web judges the
+  worker's digest while it is under 90 s old, and counts a worker whose
+  heartbeat is current but whose digest is missing or older (deployed from code
+  that publishes none, or whose publish keeps failing) as differing. Both rows
+  carry the worker's clock: one stamped ahead of the web's (the worker's clock
+  running ahead) counts as current, so skew holds buys rather than skipping the
+  check; the web's clock running ahead instead shortens the 90 s window by the
+  skew, which NTP keeps to milliseconds. The worker judges the web's latest
+  digest whatever its age and counts a missing one (a fresh deployment, before
+  the web has started) as differing: only a digest equal to its own lets the
+  worker's buys through. While they differ, every live buy is
+  held on both (`SOLANA_LIVE_ROLLOUT_DIFFERS`, a buys-only status blocker; trade
+  and preview refuse buys as configuration) with
+  `[alert] solana-live-rollout differs`. Every change is deployed to the worker
+  first, then the web: the worker holds its buys at once, the web holds its own
+  until it runs the change too, and the redeployed web publishes its digest as
+  it starts, which lets both buy again. No hold or page visit is needed, and
+  sales, revoke, withdrawals and paper carry on (hosted-deploy.md, "Turning
+  Solana on").
+  What the check cannot see: the worker trusts the latest digest written as the
+  web's. While the web cannot publish (each failure says
+  `[alert] solana-live-rollout unpublished`, once a minute, and it retries every
+  30 s), or for up to 30 s after an old web container still draining during a
+  deploy wrote its own digest over the new one's (the new one's next publish,
+  periodic or at a Solana request, replaces it), that digest is out of date.
+  Where it equals the worker's settings, the worker buys under settings the
+  running web may no longer run. In the runbook's order the old web's digest is
+  never the new worker's settings, so that overlap holds buys rather than
+  letting them through; deployed web first, the old worker may buy under its old
+  settings during it.
+
+Status carries `liveAccess` (`onList`, `misconfigured` and the caps in force),
+never the list itself.
+
 ## Independent SOL price (Pyth)
 
 Every live trade, manual or automatic, clears an **independent price floor**.
@@ -932,6 +1094,10 @@ interval shown while it persists.
 | `[alert] solana-reference-price refused: reason=<…> generation=<…> …` | web and worker | A Pyth read was refused (stale, missing, foreign, layout, unverified, …); no live trade is admitted, and no live permission is prepared, until a fresh, fully verified price is read (max age 120 s). Recovery: `[solana-reference-price] read again: …` on stdout | Check Pyth posting and both providers. `reason=config generation=invalid` means `MERRYMEN_SOLANA_PYTH_GENERATION` is wrong: fix the setting, it is not an outage. First refusal and new reasons at once, then at most every 60 s. RPC transport failures go to provider failover and are not alerted here. |
 | `[alert] solana-reference-tolerance misconfigured` | web and worker | `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS` unreadable; every live trade, exits included, is refused | Fix the setting (50 to 1000). At most once a minute. |
 | `[alert] solana-jupiter-key misconfigured` | web and worker | `MERRYMEN_JUPITER_API_KEY` is set but unusable; every quote and live route, exits included, is refused | Fix the key. Unset or empty is "not configured" (a status blocker, no alert). At most once a minute. |
+| `[alert] solana-live-rollout differs: …` | web and worker | The web and the Solana worker run different `MERRYMEN_SOLANA_LIVE_TENANTS` or `MERRYMEN_SOLANA_LIVE_MAX_*` settings (one was redeployed without the other), and every live buy is held on both, status saying so. From the web, also: the worker is running but has not published its settings for over 90 s (the web's buys are held). From the worker, also: the web's latest digest, whatever its age, differs (`the web last published different …`: the web runs other settings, or cannot publish its own, which its `[alert] solana-live-rollout unpublished` says), or there is none yet, as on a fresh deployment before the web has started (`the web has not published …`); the worker's buys are held | Deploy both with the same values, the worker first (hosted-deploy.md, "Turning Solana on", step 4): the web publishes its settings as it starts and every 30 s after, and the worker's buys resume at its next check. If both already run the same values, look for the web's `[alert] solana-live-rollout unpublished`. Exits, revoke and withdraw continue. At most once a minute per process. |
+| `[alert] solana-live-rollout unchecked: …` | web and worker | Status could not write this service's live rollout digest or read the other's (`solana_runtime_live_rollout_seen`: SQLite busy past its timeout, a PostgreSQL write error or statement timeout); it counts as differing, so live buys are held (status says so as a buys-only blocker), while status itself still answers | Check the database the line's service uses (locks, disk, connection). Exits, revoke and withdraw continue. At most once a minute per process. |
+| `[alert] solana-live-rollout unpublished: …` | web and worker | From the worker: it wrote its heartbeat but could not publish its live rollout digest beside it; the web counts the worker as running settings it cannot check and holds every live buy (`[alert] solana-live-rollout differs` from the web). From the web: its publish as it started, or every 30 s after, failed; the worker judges the last digest written as the web's, which may be out of date: where that differs from the worker's settings its buys are held, and where it equals them (this web's settings before it was redeployed, say) the worker may buy under settings this web no longer runs | Check the database the line's service uses (`DATABASE_URL`, locks, disk, connection). Receipt recovery, the strategies' exits, revoke and withdraw continue. From the worker at most once every ten minutes while it persists, and at once again after it clears; from the web at most once a minute while it persists (it retries every 30 s, and at every Solana request). |
+| `[alert] solana-live-rollout misconfigured: <setting and entry position>` | web and worker | `MERRYMEN_SOLANA_LIVE_TENANTS` or a `MERRYMEN_SOLANA_LIVE_MAX_*` cap cannot be read; no new live permission or live buy is admitted, for any tenant | Fix the setting the line names (the value is never printed). Exits, revoke and withdraw continue. At most once a minute. |
 | `[alert] Solana transactions stuck pending` (JSON counts and oldest age) | worker | A live trade or signed owner transaction has been pending over 3 minutes; each holds its account (no new trade, no owner transaction but a revoke) | Check both providers; `npm run solana:resolve -- pending`, then `show` / `owner show` and, with evidence, `book`. Every 10 min. |
 | `[alert] Solana vault below its book` (`kind: vault-below-book`, account ref) | worker | Tokens left a vault outside Merrymen | [A vault below its book](#a-vault-below-its-book). Every 10 min per account. |
 | `[alert] Solana autonomous strategy refused: proven-expired attempts used up an account's daily operations` (`kind: expired-attempts-exhausted`) | worker | Automated trades and exits of that account pause until the attempts leave the 24 h window | Check provider health and congestion. Raising `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` is an owner decision. Every 10 min per account. |
@@ -1045,6 +1211,9 @@ redacted errors and no redirects.
 | `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS` | web, worker | 300; 50 to 1000 | blocker for trades and exits, `[alert]` |
 | `MERRYMEN_SOLANA_PYTH_GENERATION` | web, worker | `current`; or `upgraded` | blocker for trades, exits and registering a permission, `[alert]` |
 | `MERRYMEN_SOLANA_EXPIRED_ATTEMPT_ALLOWANCE` | web, worker | 0; 0 to 96 | blocker for trades and exits (the worker's alert counts use 0) |
+| `MERRYMEN_SOLANA_LIVE_TENANTS` | web, worker | unset: nobody may go live; comma-separated 0x tenant ids | new live permissions and buys refused for everyone (exits continue), `[alert]` |
+| `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG`, `…_MAX_DAILY_USDG` | web, worker | 10 and 25 USDG; exact decimals, per trade ≤ daily, per trade ≥ 1 | as above |
+| `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL`, `…_MAX_DAILY_WSOL` | web, worker | 0.1 and 0.25 SOL; exact decimals, per trade ≤ daily | as above |
 | `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC` | operator machine | unset; HTTPS, its own hostname | `--third-rpc` refused |
 | `MERRYMEN_SOLANA_RECOVER_RPC` | owner's computer | unset; HTTPS mainnet | `solana-recover` refused |
 
@@ -1247,6 +1416,22 @@ Whirlpool and Token-2022 are upgradeable; the fixtures pin the bytes read on
 Each of these was chosen during implementation as the conservative default, so
 the work could continue; none is Milla's sign-off unless it says so. "Change"
 says where to change it. Superseded choices are listed under the current one.
+
+**Live rollout (the gate before turning Solana on)**
+
+| Decision | Default now | Alternatives | Change |
+|---|---|---|---|
+| Who may go live | Nobody until named in `MERRYMEN_SOLANA_LIVE_TENANTS` | Every bound tenant; Robinhood-style levels (observe, exits-only, trade) | `MERRYMEN_SOLANA_LIVE_TENANTS` |
+| Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again so exits can be sold, each limit at most the larger of its cap and the registered permission's (a departure from the brief, which refuses live mode off the list: **needs Milla's sign-off before the canary**) | Refuse saving live mode too (the literal brief); or cap it at the caps alone (rejected: it could narrow sales below the permission the owner signed) | `checkLiveSettings` in `solana-app-runtime.ts` |
+| A permission that lands after the tenant left the list | A renewal of an account that already went live is activated for exits only (it replaced the old permission on Solana, so refusing it would leave nothing to sell under; buys stay refused). A first permission is not activated; the page keeps its session key, Revoke ends it. A departure from the brief, which refuses activation off the list: **needs Milla's sign-off before the canary** | Never activate off the list (rejected: a renewal landing after delisting would leave the account unable to sell until listed again) | `activateLive` (`requireLiveOpenOrWentLive`) |
+| Off the list, once its permission expired or was replaced | Withdraw-only: revoke and withdrawals (USDG, wrapped SOL and native SOL, to the owner's own accounts) always work, but nothing can be sold back to USDG in the app, since no new permission is registered off the list; status says so (`SOLANA_LIVE_PAUSED_NO_PERMISSION`). **Needs Milla's decision before the canary** | A sell-only renewal: such an account may prepare and submit a renewal within the caps whose owner-signed transaction also carries `set_breaker(paused = true)`. The program keeps the breaker across `create_session` and refuses every buy while it is paused (`execute_swap` in `lib.rs`), so the renewal could only sell, on chain as off chain (trade() still refuses buys). It changes the transaction the owner signs, so the page's permission review (`readPermissionTransaction` in `SolanaPermission.tsx`) must accept and show that instruction | `prepareLive`, `submitSetup` in `solana-app-runtime.ts` |
+| Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap, which limits spending only) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
+| Exits and the caps | Buys keep room for exits: a buy is refused when, after it, the whole position could not be sold inside the rolling 24-hour limits at the independent price plus the tolerance (`SOLANA_LIVE_EXIT_RESERVE`), counting what it brings 300 bps above the larger of its quote and its reference (the fill margin: the program does not bound an ExactIn buy's output). The signed limits stay within the caps, so a day's buys stop at about half the USDG cap and a position stays within what one day can sell. A fill beyond the margin is booked as it landed; status then holds buys and says the excess is sold as earlier trades leave the window, or over more than one window. Sales are never refused by it | Let the signed limits carry exit headroom beyond the caps (a separate `MERRYMEN_SOLANA_LIVE_MAX_EXIT_*`; rejected: it widens what a session key may do on chain); let the caps bound exits (rejected: an owner must always be able to exit); also reserve operations for the exit's sales (not done: the operation limit is the owner's own setting, not a platform cap) | `solanaBuyKeepsExitRoom` in `solana-trading-store.ts`, `assessRisk` in `solana-app-runtime.ts` |
+| A session registered above caps lowered since | Buys refused before any quote (the limits kept in the session record) and again before signing (the limits every provider shows); exits keep the signed limits, and its live limits may be saved again up to them (each the larger of the cap and the permission's), on the list as off it, so a re-save never narrows its exits | Cap sales too (rejected: an owner must always be able to exit); hold a re-save on the list to the caps (rejected: admission bounds sales by the saved limits, so it narrowed exits below what the owner signed) | `assessRisk`, `checkLiveSettings` in `solana-app-runtime.ts` |
+| A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
+| Web and worker run different list or caps | Every live buy held on both while they differ (one digest of all the settings, so a deploy that adds a tenant briefly holds everyone's buys), `[alert]` once a minute; exits continue. The worker compares the web's latest digest whatever its age and holds its buys while that is missing or differs; one restarted with the web's settings is never held. The web publishes its digest as its server starts (`register()` in `web/src/instrumentation.ts`), every 30 s after, and at a Solana request at once when the stored one is not its own, so the runbook deploys the worker first, then the web, with no hold or page visit. Not covered: while the web cannot publish (`[alert] solana-live-rollout unpublished`), or for up to 30 s after an old web container still draining wrote its own digest over the new one's, the stored digest is out of date, and where it equals the worker's settings the worker buys under settings the running web may no longer run (in the runbook's order the old web's digest never equals the new worker's, so that overlap holds buys) | Compare per tenant. Hold the worker's buys while the web's digest is older than a few publish intervals (not done: every live buy would stop whenever the web is down or cannot write, and it would not close the draining overlap). Order the digests by process start, so an old container cannot write over a newer one's (not done: a schema change that trusts container clocks; the periodic publish bounds the overlap to 30 s) | `rolloutDiffers` in `solana-app-runtime.ts`, `web/src/lib/solana-rollout-publisher.ts` |
+| Live buy previews off the list, while a cap cannot be read, or under a permission registered above caps lowered since | Refused before any quote, as the trade would be (the last by the limits kept in the session record when it was registered; a record from before they were kept is refused by the trade before signing) | Allowed | `preview`, `requireSessionWithinCaps` |
+| The page's default limits | Paper starts at 10 and 50 USDG (as before the caps; paper is never capped). Choosing live with no limits saved or typed starts at the caps in force (status's `liveAccess`, or the default caps from a server that reports none), so a first live save fits them; the SOL sold limits start at the caps beside saved paper limits too | One set of defaults at the default caps for both (rejected: it changed paper's starting limits) | `chooseMode` in `SolanaScreen.tsx` |
 
 **Release and infrastructure (Milla's decisions; nothing is done by default)**
 
@@ -1505,10 +1690,11 @@ Remaining, in order:
       after the release entry ships in the published CLI, set
       `NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT=1`.
 - [ ] **External audit** of custody, ABI, execution, authentication and accounting.
-- [ ] **Canary**: Milla's go, owner-authorized funding and the smallest caps,
-      one agent; then restart and outage, full exit, withdraw and revoke, and
-      expiry tests; then `MERRYMEN_SOLANA=1` on the web service and a
-      `start:solana` service.
+- [ ] **Canary**: Milla's go, owner-authorized funding and the smallest caps
+      (`MERRYMEN_SOLANA_LIVE_MAX_*`), one tenant named in
+      `MERRYMEN_SOLANA_LIVE_TENANTS`; then restart and outage, full exit,
+      withdraw and revoke, and expiry tests; then widen the list. The order of
+      settings is in [`hosted-deploy.md`](hosted-deploy.md) ("Turning Solana on").
 - [ ] Measured quote-to-finality latency, fill rate, slippage, fees, rent and
       recovery reliability against equivalent RH workloads before any claim it is
       better.

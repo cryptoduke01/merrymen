@@ -10,7 +10,8 @@ import { applySolanaPaperCommit, applySolanaPaperWriteOff, solanaPaperIntentFing
   type SolanaPaperCommit, type SolanaPaperReceipt, type SolanaPaperSnapshot, type SolanaPaperWriteOffRecord } from "./solana-paper-store";
 import type { SolanaPaperLedger } from "./solana-paper-service";
 import { solanaDebitWindowStart, type SolanaLiveJournal, type SolanaLiveRecord, type SolanaLiveSettlement, type SolanaSignedSubmission } from "./solana-executor";
-import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, verifySolanaReferenceBound, type SolanaPythGeneration, type SolanaReferenceBound } from "./solana-reference-price";
+import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, solanaReferenceNotional, solanaReferenceWsolValue, verifySolanaReferenceBound, type SolanaPythGeneration,
+  type SolanaReferenceBound } from "./solana-reference-price";
 
 export interface SolanaAccountScope { tenant: string; owner: string }
 export class SolanaTradingStoreError extends Error {
@@ -22,6 +23,12 @@ export interface SolanaTradingBinding extends SolanaAccountScope {
 export interface SolanaRegisteredSession {
   programId: string; vault: string; session: string; sessionEpoch: string;
   registrationSignature: string; registeredAtMs: number;
+  /**
+   * The limits the vault holds for this session, raw, as activateLive read and checked them against the signed ones when it
+   * registered it. Lets a buy under a session above the platform's live caps be refused before any quote. Absent from a record
+   * registered before it was kept: the vault's own limits are then the only check (assessRisk).
+   */
+  limits?: { perTradeUsdg: string; dailyUsdg: string; perTradeWsol: string; dailyWsol: string };
 }
 export interface SolanaLiveBook {
   hwmRaw: string; cashRaw: string; wsolRaw: string;
@@ -286,6 +293,9 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS solana_runtime_worker_heartbeat (
  worker TEXT PRIMARY KEY, last_seen_at_ms BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS solana_runtime_live_rollout_seen (
+ service TEXT PRIMARY KEY CHECK(service IN ('web','worker')), fingerprint TEXT NOT NULL, seen_at_ms BIGINT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS solana_runtime_paper_books (
  tenant TEXT NOT NULL, owner TEXT NOT NULL, book_json TEXT NOT NULL, PRIMARY KEY(tenant,owner)
 );
@@ -400,10 +410,134 @@ export function solanaExpiredAttemptAllowance(env: Readonly<Record<string, strin
   if (!/^(0|[1-9][0-9]?)$/.test(value) || Number(value) > SOLANA_MAX_OPS_PER_DAY) refuse(SOLANA_EXPIRED_ATTEMPT_ALLOWANCE_MISCONFIGURED);
   return Number(value);
 }
-/** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
 /** An owner withdrawal larger than the recorded vault balance is never saved: it could not be booked once it landed. */
 export const SOLANA_WITHDRAWAL_ABOVE_BOOK = "The withdrawal exceeds the recorded vault balance, which changed since it was prepared. Prepare it again.";
+/** recordSigned's refusal when proven-expired attempts beyond the allowance have used up the owner's daily operations. */
 export const SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED = "Too many Solana transactions expired without landing in the last 24 hours: they count toward the daily operation limit. Trading resumes as they leave the window.";
+/**
+ * THE ROLLING 24-HOUR USDG AND SOL LIMITS, AS ADMISSION COUNTS THEM (recordSigned, the exit reserve and status share these).
+ * Submissions created inside the window count until canonical failure or expiry evidence releases them, buys and sales alike:
+ * the vault program charges a sale's USDG proceeds to the same per-trade and daily USDG limits as a buy's spend, and its SOL to
+ * the SOL sold limits. So buys must leave room for the position's exit (EXITS KEEP ROOM IN THE ROLLING LIMITS, below).
+ */
+function countedInWindow<T extends { status: string }>(rows: T[]): T[] { return rows.filter(r => !["failed", "expired"].includes(r.status)); }
+/** The USDG notional of submissions that count, buys and sales alike. */
+function windowNotional(counted: ReadonlyArray<{ notional_raw: string }>): bigint { return counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n); }
+/** The SOL their sales sold. */
+function windowSold(counted: ReadonlyArray<{ submission_json: string }>): bigint {
+  return counted.reduce((n, r) => {
+    const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
+    return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
+  }, 0n);
+}
+/**
+ * What one account's live trades used of its rolling 24-hour USDG and SOL sold limits at `nowMs`, by the same window and
+ * arithmetic recordSigned admits by. For status blockers and warnings; admission never reads it, and counts the same rows
+ * itself under its lock.
+ */
+export async function solanaRollingLimitUse(db: Db, scope: SolanaAccountScope, nowMs: number): Promise<{ notionalRaw: bigint; soldWsolRaw: bigint }> {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) refuse("Invalid Solana rolling limit query.");
+  const rows = await db.prepare("SELECT notional_raw,status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?")
+    .all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ notional_raw: string; status: string; submission_json: string }>;
+  const counted = countedInWindow(rows);
+  return { notionalRaw: windowNotional(counted), soldWsolRaw: windowSold(counted) };
+}
+/**
+ * Whether a live buy that still counts (failure or expiry evidence has not released it) was made inside the rolling window at
+ * `nowMs`, by the window and rule recordSigned counts by: whether a fill may have grown the position since the window began, which
+ * status then prices (THE POSITION ABOVE ITS EXIT ROOM, in the app runtime).
+ */
+export async function solanaBoughtInWindow(db: Db, scope: SolanaAccountScope, nowMs: number): Promise<boolean> {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) refuse("Invalid Solana rolling limit query.");
+  const rows = await db.prepare("SELECT status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?")
+    .all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string; submission_json: string }>;
+  return countedInWindow(rows).some(r => (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent.inputMint === SOLANA_USDG_MINT);
+}
+/**
+ * EXITS KEEP ROOM IN THE ROLLING LIMITS: BUYS ARE REFUSED FIRST. Sales count
+ * against the same limits as buys (above), and the platform's live caps bound
+ * those limits, so a day of buys could otherwise leave no room to sell. A live
+ * buy is therefore admitted only while, after it, the account's whole recorded
+ * SOL position could still be sold inside the same 24-hour window at the
+ * independent SOL price: what the window already used, the buy, and the
+ * position's value plus the reference tolerance (a sale is charged at the
+ * higher of its quote and its reference value) fit the USDG per 24 hours limit,
+ * and the position fits what sales left of the SOL sold per 24 hours limit.
+ * What the buy brings is counted at the larger of its quoted and its
+ * reference-implied output plus THE FILL MARGIN (below), since neither bounds
+ * what an ExactIn swap delivers.
+ * Checked before anything is signed (the app runtime's assessRisk, at the
+ * highest price any provider serves) and again at admission (recordSigned, at
+ * the buy's own reference). It only ever refuses buys: a sale never reads it,
+ * and no limit is widened. So a day's buys stop at about half the USDG limit,
+ * and a position never grows beyond what one day's limits can sell at the
+ * price it was bought at (a fill beyond the margin, or a later rise in the SOL
+ * price, can still outgrow it: status then holds buys and says so, and partial
+ * sales and Withdraw remain).
+ */
+export const SOLANA_LIVE_EXIT_RESERVE = "This buy was refused: it would leave too little of your 24-hour live limits to sell your whole SOL position back to USDG, "
+  + "and sales count against the same limits as buys. A smaller buy may fit; exits, revoke and withdraw still work.";
+/**
+ * THE FILL MARGIN. A live buy is an ExactIn swap: the vault program enforces only the signed minimum output, the quote's
+ * outAmount and the reference-implied amount are estimates, and settlement books whatever the swap delivered at or above the
+ * minimum. So EXITS KEEP ROOM... counts what a buy brings at the larger of the two plus this margin, rounded up: a fill up to
+ * this far above both still leaves the whole position sellable inside the window. 300 bps, the default reference tolerance
+ * (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS), whatever tolerance is configured. A fill beyond it is booked as it landed (the book
+ * never caps what the vault holds); the position may then be more than one day's limits can sell, and status holds further buys,
+ * which this check refuses anyway, and says the excess is sold as earlier trades leave the window, or over more than one window
+ * (the app runtime's SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The same margin is used before anything is signed (assessRisk), at admission
+ * (recordSigned) and by the strategy's buy sizing (solanaExitReserveBuyRoom).
+ */
+export const SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS = 300;
+/** The most SOL a buy is counted as bringing (THE FILL MARGIN): the larger of its quoted and reference-implied output, plus the margin, rounded up. */
+export function solanaBuyFillBound(quotedOutRaw: bigint, referenceOutRaw: bigint): bigint {
+  if (quotedOutRaw < 0n || referenceOutRaw < 0n) refuse("Invalid Solana exit reserve.");
+  const brought = quotedOutRaw > referenceOutRaw ? quotedOutRaw : referenceOutRaw;
+  return (brought * BigInt(10_000 + SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS) + 9_999n) / 10_000n;
+}
+/** The USDG a whole-position exit worth `valueUsdgRaw` at the reference must find left of the daily limit: its value plus the tolerance, rounded up. */
+export function solanaExitReserveUsdg(valueUsdgRaw: bigint, toleranceBps: number): bigint {
+  if (valueUsdgRaw < 0n || !Number.isSafeInteger(toleranceBps) || toleranceBps < 0 || toleranceBps > 10_000) refuse("Invalid Solana exit reserve.");
+  return (valueUsdgRaw * BigInt(10_000 + toleranceBps) + 9_999n) / 10_000n;
+}
+/**
+ * Whether a buy leaves the whole position after it sellable inside the window (EXITS KEEP ROOM...): `usedUsdgRaw` and
+ * `soldWsolRaw` are the window's use (solanaRollingLimitUse, or admission's own count), `positionAfterWsolRaw` the recorded
+ * position plus what the buy may bring (solanaBuyFillBound), and `positionAfterValueUsdgRaw` its value at the reference. With no
+ * buy (`buyUsdgRaw` 0, the position as booked), whether the position itself can still be sold inside the window.
+ */
+export function solanaBuyKeepsExitRoom(input: { usedUsdgRaw: bigint; soldWsolRaw: bigint; buyUsdgRaw: bigint; positionAfterWsolRaw: bigint;
+  positionAfterValueUsdgRaw: bigint; dailyUsdgRaw: bigint; dailyWsolRaw: bigint; toleranceBps: number }): boolean {
+  return input.usedUsdgRaw + input.buyUsdgRaw + solanaExitReserveUsdg(input.positionAfterValueUsdgRaw, input.toleranceBps) <= input.dailyUsdgRaw
+    && input.soldWsolRaw + input.positionAfterWsolRaw <= input.dailyWsolRaw;
+}
+/**
+ * The daily limits EXITS KEEP ROOM... keeps room within: for each, the lower of the saved limits and those of the permission
+ * registered on the vault, when known (`registered`: the session record's kept limits, or what a provider shows the vault
+ * holding). The vault charges a sale to its own limits, whatever was saved since: saved limits above them (the caps raised and
+ * the limits saved again, under the same permission) must not let a buy use room the vault will not give the exit.
+ */
+export function solanaExitReserveLimits(saved: { dailyUsdg: bigint; dailyWsol: bigint },
+  registered: { dailyUsdg: string | bigint; dailyWsol: string | bigint } | undefined): { dailyUsdg: bigint; dailyWsol: bigint } {
+  if (!registered) return saved;
+  const lower = (a: bigint, b: string | bigint) => BigInt(b) < a ? BigInt(b) : a;
+  return { dailyUsdg: lower(saved.dailyUsdg, registered.dailyUsdg), dailyWsol: lower(saved.dailyWsol, registered.dailyWsol) };
+}
+/**
+ * For planning only (the autonomous strategy sizes its buys by it, so it does not build a route admission would refuse): the
+ * largest buy, in USDG, that keeps the USDG room EXITS KEEP ROOM... asks for, with the position held worth `positionValueUsdgRaw`
+ * and what the buy brings valued at up to the tolerance above what it costs, plus THE FILL MARGIN, as the check counts it. Zero
+ * when none does. The SOL sold room is left to the check itself, which refuses such a buy before anything is signed.
+ */
+export function solanaExitReserveBuyRoom(input: { usedUsdgRaw: bigint; dailyUsdgRaw: bigint; positionValueUsdgRaw: bigint; toleranceBps: number }): bigint {
+  // Four base units below what is left, for the reserve's rounding up (of the position and the buy together, and of the margin).
+  const left = input.dailyUsdgRaw - input.usedUsdgRaw - solanaExitReserveUsdg(input.positionValueUsdgRaw, input.toleranceBps) - 4n;
+  if (left <= 0n) return 0n;
+  // b + b × (1 + t)² × (1 + m) ≤ left, with t the tolerance and m the fill margin: what the buy brings is valued at up to the
+  // tolerance above its cost, counted with the margin, and reserved at that value plus the tolerance.
+  const scale = 10_000n, grown = BigInt(10_000 + input.toleranceBps), margin = BigInt(10_000 + SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS);
+  return left * scale * scale * scale / (scale * scale * scale + grown * grown * margin);
+}
 /**
  * How proven-expired attempts use one account's daily operations at `nowMs`, by
  * the same rolling 24-hour window and arithmetic recordSigned admits by:
@@ -1032,8 +1166,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       // a pending one counts until finalized evidence proves what it did. Token
       // notional is released only after canonical failure or expiry evidence.
       const operations = recent.filter(r => r.status !== "expired"), dropped = recent.length - operations.length;
-      const counted = recent.filter(r => !["failed", "expired"].includes(r.status));
-      if (operations.length >= limits.maxOpsPerDay || counted.reduce((n, r) => n + BigInt(r.notional_raw), 0n) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
+      const counted = countedInWindow(recent);
+      if (operations.length >= limits.maxOpsPerDay || windowNotional(counted) + notional > raw(limits.dailyUsdg, false)) refuse("The Solana rolling daily limit would be exceeded.");
       // A proven expiry never landed and the program never counted it, but the
       // session key signed it: only the configured allowance of them leaves the
       // owner's operation count (by default none), so at most maxOpsPerDay plus
@@ -1041,10 +1175,7 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (operations.length + Math.max(0, dropped - allowance) >= limits.maxOpsPerDay) {
         refuse(SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED);
       }
-      const soldToday = counted.reduce((n, r) => {
-        const prior = (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent;
-        return prior.inputMint === SOLANA_WRAPPED_SOL_MINT ? n + raw(prior.amountRaw, false) : n;
-      }, 0n);
+      const soldToday = windowSold(counted);
       if (sold > 0n && soldToday + sold > sellLimits.dailyWsol) refuse("The Solana rolling daily SOL sell limit would be exceeded.");
       let book = rowJson<SolanaLiveBook>(await tx.prepare("SELECT book_json FROM solana_runtime_live_books WHERE tenant=? AND owner=?").get(tenant, owner), "book_json");
       const equity = raw(s.risk.equityUsdg), peak = raw(s.risk.peakEquityUsdg), cash = raw(s.risk.cashUsdg), wsol = raw(s.risk.wsolRaw);
@@ -1069,6 +1200,17 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         await tx.prepare(`INSERT INTO solana_runtime_live_books(tenant,owner,book_json) VALUES(?,?,?)
           ON CONFLICT(tenant,owner) DO UPDATE SET book_json=excluded.book_json`).run(tenant, owner, JSON.stringify(book));
         drawdownRefused = true; return false;
+      }
+      // EXITS KEEP ROOM IN THE ROLLING LIMITS: a buy that would leave the whole position after it unsellable inside this window,
+      // at this buy's own reference price, is refused (after the breaker above, which a buy in drawdown must still commit). What
+      // it brings is counted with THE FILL MARGIN: neither the quote nor the reference bounds an ExactIn fill.
+      if (buying) {
+        const positionAfter = raw(book.wsolRaw) + solanaBuyFillBound(raw(s.quote.outAmount, false), raw(reference.referenceOut, false));
+        // Within the registered permission's limits too, kept in the session record, where they are below the saved ones.
+        const reserve = solanaExitReserveLimits({ dailyUsdg: raw(limits.dailyUsdg, false), dailyWsol: sellLimits.dailyWsol }, session.limits);
+        if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: windowNotional(counted), soldWsolRaw: soldToday, buyUsdgRaw: notional, positionAfterWsolRaw: positionAfter,
+          positionAfterValueUsdgRaw: solanaReferenceWsolValue(positionAfter, reference.reference), dailyUsdgRaw: reserve.dailyUsdg,
+          dailyWsolRaw: reserve.dailyWsol, toleranceBps })) refuse(SOLANA_LIVE_EXIT_RESERVE);
       }
       this.checkAdmissionSignal();
       const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
@@ -1104,7 +1246,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
       const { tenant } = this.scope;
-      const prior = record(await tx.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, requestId));
+      const row = await tx.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, requestId) as { notional_raw: string } | undefined;
+      const prior = record(row);
       if (!prior || prior.submission.signature !== signature || settlement.signature !== signature) refuse("Solana settlement does not match the reserved transaction.");
       if (prior.status !== "pending") {
         if (JSON.stringify({ ...prior.settlement, finalizedAtMs: 0 }) !== JSON.stringify({ ...settlement, finalizedAtMs: 0 })) refuse("Solana settlement already exists with different evidence.");
@@ -1148,10 +1291,16 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         raw(book.cashRaw); raw(book.wsolRaw);
         if (raw(book.cashRaw) > raw(book.hwmRaw)) book.hwmRaw = book.cashRaw;
       } else if (input !== 0n || output !== 0n) refuse("A failed Solana transaction cannot book token movements.");
+      // THE ROLLING WINDOW COUNTS WHAT THE PROGRAM CHARGED. A sale is charged its actual proceeds (`received` in the program's
+      // swap), which can land above the notional admission reserved (the higher of its quote and its reference value): the
+      // window then counts those proceeds, in the same transaction that books them. It only ever raises the count, so status,
+      // admission and the exit reserve never see more room than the vault has. A buy is charged the USDG it offered, its notional.
+      let notional = raw(row!.notional_raw);
+      if (settlement.status === "finalized" && prior.submission.intent.inputMint !== SOLANA_USDG_MINT && output > notional) notional = output;
       book.slot = settlement.slot; book.updatedAtMs = clock(this.now);
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
-      await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
-        .run(settlement.status, JSON.stringify(settlement), tenant, owner, requestId);
+      await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=?,notional_raw=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
+        .run(settlement.status, JSON.stringify(settlement), notional.toString(), tenant, owner, requestId);
       if (resolutionId !== null) {
         // Who booked it is part of the booking: no mark, no booking (the transaction rolls back).
         const marked = await tx.prepare(`UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND request_id=? AND signature=?

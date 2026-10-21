@@ -5,21 +5,27 @@ import { parseSolanaRawAmount, parseSolanaSwapIntent, SOLANA_LIVE_BELOW_MINIMUM,
   type SolanaQuote } from "../../packages/core/src/solana";
 import { SOLANA_WRAPPED_SOL_MINT } from "../../packages/core/src/solana-live";
 import { SqlSolanaBindingStore, validateSolanaStrategy, type SolanaStrategy } from "../../web/src/lib/solana-binding-store";
-import { getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK } from "./solana-app-runtime";
+import { createSolanaAppRuntime, getSolanaAppRuntime, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_USDG_BUYS_USED, type SolanaAppRuntimeOptions } from "./solana-app-runtime";
 import type { Db } from "./db";
 import { createSolanaMarket, SolanaMarketError } from "./solana-market";
 import type { SolanaPaperMarket } from "./solana-paper-service";
 import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_BPS, solanaReferenceToleranceBps } from "./solana-reference-price";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
-import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED,
-  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes, solanaPendingOwnerTransactions, SolanaTradingStoreError,
-  type SolanaAccountScope } from "./solana-trading-store";
+import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE,
+  SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExitReserveBuyRoom, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes,
+  solanaPendingOwnerTransactions, solanaRollingLimitUse, SolanaTradingStoreError, type SolanaAccountScope, type SolanaRegisteredSession } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
   cashRaw: string; wsolRaw: string; solValueUsdgRaw: string; limits: SolanaPaperLimits;
   strategy: SolanaStrategy; mode: "paper" | "live"; revision: number; nowMs: number;
   /** The account's next autonomous attempt index (solanaAutonomousSchedule): each attempt has its own request ID. */
   attempt: number;
+  /**
+   * Live only: the largest buy that keeps room to sell the whole position inside the rolling window (solanaExitReserveBuyRoom,
+   * EXITS KEEP ROOM IN THE ROLLING LIMITS in solana-trading-store.ts). A buy is sized below it, and none is planned under the live
+   * minimum. Absent: not bounded here (paper; admission still checks it).
+   */
+  buyRoomUsdgRaw?: string;
 }
 /** Integer-only sizing against an executable full-position exit quote. */
 export function planSolanaRebalance(input: SolanaRebalanceInput) {
@@ -35,8 +41,8 @@ export function planSolanaRebalance(input: SolanaRebalanceInput) {
   const deviation = delta < 0n ? -delta : delta;
   if (deviation * 10_000n < equity * BigInt(strategy.rebalanceBps) || delta === 0n) return null;
   const notional = [deviation, BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
-  const buying = delta > 0n;
-  let amount = buying ? (notional < cash ? notional : cash) : held * notional / value;
+  const buying = delta > 0n, room = input.buyRoomUsdgRaw === undefined ? null : parseSolanaRawAmount(input.buyRoomUsdgRaw, true);
+  let amount = buying ? [notional, cash, ...(room === null ? [] : [room])].reduce((a, b) => a < b ? a : b) : held * notional / value;
   // A sell never asks for more WSOL input than the owner signed for one trade.
   if (!buying && limits.perTradeWsol !== undefined && amount > BigInt(limits.perTradeWsol)) amount = BigInt(limits.perTradeWsol);
   if (amount === 0n) return null;
@@ -72,7 +78,7 @@ export async function boundSolanaRebalanceSell(
  * solMarkDust is optional for test runtimes; without it no zero-output mark of live SOL is taken for dust.
  * feePayerCheck is optional too; without it the agent checks no fee payer of its own.
  */
-type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust" | "feePayerCheck">>;
+type Runtime = Pick<ReturnType<typeof getSolanaAppRuntime>, "status" | "trade"> & Partial<Pick<ReturnType<typeof getSolanaAppRuntime>, "solMarkDust" | "feePayerCheck" | "publishLiveRollout">>;
 export interface SolanaAgentOptions {
   db: Db; runtime: Runtime; market: SolanaPaperMarket; now?: () => number; postgres?: boolean; signal?: AbortSignal;
   /** Live sells are charged at up to this much above their quote by the reference price; size below the cap by it. */
@@ -240,11 +246,22 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         account, side, minimumUsdgRaw: SOLANA_LIVE_MIN_TRADE_USDG_RAW.toString(), intervalSeconds })} — the owner's strategy trade size, USDG per trade and SOL `
       + "sold per trade must each be worth at least 1 USDG (docs/solana-integration.md); a small vault's rebalance stays below it until the band widens");
   };
-  const headroom = BigInt(10_000 - (options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS));
+  const toleranceBps = options.referenceToleranceBps ?? SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, headroom = BigInt(10_000 - toleranceBps);
   // When each tenant's strategy last found nothing to do (in band), or admission refused it
   // because expired attempts used up its daily operations, by settings revision.
   // Only provider load rides on this: admission spacing is durable in the store.
   const checked = new Map<string, { revision: number; atMs: number }>();
+  /**
+   * The USDG per 24 hours limit of the permission registered for this account, as activateLive kept it in the session record;
+   * undefined without one (or one recorded before limits were kept). For planning only: admission reads it itself.
+   */
+  const registeredDailyUsdg = async (scope: SolanaAccountScope): Promise<bigint | undefined> => {
+    const row = await options.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(scope.tenant, scope.owner) as { record_json: string } | undefined;
+    try {
+      const daily = row ? (JSON.parse(row.record_json) as SolanaRegisteredSession).limits?.dailyUsdg : undefined;
+      return typeof daily === "string" && /^[0-9]{1,20}$/.test(daily) ? BigInt(daily) : undefined;
+    } catch { return undefined; }
+  };
   const admitted = async (scope: SolanaAccountScope, requestId: string) => !!(
     await options.db.prepare("SELECT 1 FROM solana_runtime_autonomous_attempts WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
     await options.db.prepare("SELECT 1 FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
@@ -259,6 +276,14 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
         if (!force && at - beatAtMs < HEARTBEAT_REFRESH_MS) return;
         beatAtMs = at;
         await options.db.prepare("INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?) ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms").run(at);
+        // With the heartbeat, the live rollout settings this worker runs, which the web compares with its own. Best effort: a
+        // publish that fails leaves a digest older than this heartbeat, which the web counts as differing and holds live buys
+        // for (SETTINGS THAT MUST MATCH, CHECKED, in the app runtime). It never stops receipt recovery, exits or this tick.
+        try { await options.runtime.publishLiveRollout?.(); said.delete("rollout-unpublished"); } catch {
+          say("rollout-unpublished", "[alert] solana-live-rollout unpublished: the Solana worker could not publish its MERRYMEN_SOLANA_LIVE_TENANTS and "
+            + "MERRYMEN_SOLANA_LIVE_MAX_* digest with its heartbeat (solana_runtime_live_rollout_seen), so the web holds every live Solana buy until it can; "
+            + "receipt recovery, exits, revoke and withdraw continue");
+        }
       };
       await beat(true);
       // Disabling a strategy never disables receipt recovery. Confirmation is
@@ -327,11 +352,28 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             else if (row.requested_mode === "paper" || await options.runtime.solMarkDust?.(wsolRaw)) wsolRaw = "0";
             else throw new SolanaMarketError("invalid-quote");
           }
-          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt });
+          // A live buy keeps room to sell the whole position inside the rolling window (EXITS KEEP ROOM...): sized below it here, so
+          // no route is built for a buy assessRisk would refuse, with what it brings counted with THE FILL MARGIN as the check counts
+          // it (solanaExitReserveBuyRoom). The mark is Jupiter's guaranteed output, which may sit up to the tolerance below the
+          // independent price the check values the position at. Within the registered permission's USDG per
+          // 24 hours limit too, where it is below the saved one (solanaExitReserveLimits): the vault sells the exit under its own.
+          let buyRoomUsdgRaw: string | undefined;
+          if (row.requested_mode === "live") {
+            const used = await solanaRollingLimitUse(options.db, scope, now()), registered = await registeredDailyUsdg(scope);
+            const daily = registered !== undefined && registered < BigInt(limits.dailyUsdg) ? registered : BigInt(limits.dailyUsdg);
+            buyRoomUsdgRaw = solanaExitReserveBuyRoom({ usedUsdgRaw: used.notionalRaw, dailyUsdgRaw: daily,
+              positionValueUsdgRaw: BigInt(solValueUsdgRaw) * 10_000n / headroom, toleranceBps }).toString();
+          }
+          let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt,
+            ...(buyRoomUsdgRaw === undefined ? {} : { buyRoomUsdgRaw }) });
           const cap = [BigInt(strategy.tradeUsdgRaw), BigInt(limits.perTradeUsdg)].reduce((a, b) => a < b ? a : b);
           if (intent) intent = await boundSolanaRebalanceSell(intent, row.requested_mode === "live" ? cap * headroom / 10_000n : cap, options.market, now);
           if (!intent) { said.delete(`below-minimum:${solanaAccountRef(scope)}`); inBand(); continue; }
           if (row.requested_mode === "live" && !status.live.ready && intent.inputMint === SOLANA_USDG_MINT) { results.push({ owner: row.owner, outcome: "held" }); continue; }
+          // Under 1 USDG of the day's USDG limit left (SOLANA_STATUS_DAILY_USDG_BUYS_USED): only a sale of the whole position fits, so a
+          // partial one would be refused at admission after a paid route. It waits its interval instead, as the window moves.
+          if (row.requested_mode === "live" && intent.inputMint === SOLANA_WRAPPED_SOL_MINT && intent.amountRaw !== wsolRaw
+            && status.live.blockers.includes(SOLANA_STATUS_DAILY_USDG_BUYS_USED)) { inBand(); continue; }
           if (options.signal?.aborted) break;
           // Already admitted under this ID (another worker got there first): a replay submits nothing.
           if (await admitted(scope, intent.requestId)) { results.push({ owner: row.owner, outcome: "replayed" }); continue; }
@@ -343,6 +385,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             if (error.message === SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED) { await expiredUse(scope, limits.maxOpsPerDay, true); inBand(); continue; }
             // Worth under the live minimum at the reference: in band until the interval passes (BELOW THE LIVE MINIMUM).
             if (error.message === SOLANA_LIVE_BELOW_MINIMUM) { belowMinimum(scope, intent.inputMint === SOLANA_USDG_MINT ? "buy" : "sell", strategy.intervalSeconds); inBand(); continue; }
+            // A buy that would leave too little room to sell the position (EXITS KEEP ROOM..., refused before anything was signed or at
+            // admission): in band until the interval passes, as the window moves or the price does. Never a sale.
+            if (error.message === SOLANA_LIVE_EXIT_RESERVE) { inBand(); continue; }
             throw error;
           }
           said.delete(`below-minimum:${solanaAccountRef(scope)}`);
@@ -354,6 +399,16 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
       return results;
     },
   };
+}
+
+/**
+ * The Solana worker's own app runtime, the one runSolanaAgent runs: it publishes the live rollout settings it runs as the
+ * worker's (solana_runtime_live_rollout_seen) and judges the web's (SETTINGS THAT MUST MATCH, CHECKED, in the app runtime).
+ * Built as the web's runtime instead, it would write over the web's digest and read a worker digest nobody writes, so
+ * neither service would ever see a difference.
+ */
+export function solanaWorkerRuntime(options: Omit<SolanaAppRuntimeOptions, "service"> = {}) {
+  return createSolanaAppRuntime({ localTestDeployment: false, ...options, service: "worker" });
 }
 
 /** Dedicated sibling worker; Solana addresses never enter the RH worker loop. */
@@ -369,7 +424,9 @@ export async function runSolanaAgent(signal: AbortSignal) {
   // Only for the expired-attempt alerts; a malformed setting refuses every live trade in the runtime anyway.
   let expiredAttemptAllowance = SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE;
   try { expiredAttemptAllowance = solanaExpiredAttemptAllowance(process.env); } catch { /* Refused at trade time. */ }
-  const agent = createSolanaAgent({ db, runtime: getSolanaAppRuntime(), market: createSolanaMarket(), postgres: !!process.env.DATABASE_URL, signal,
+  // The worker's own runtime: it publishes its live rollout settings as the worker's, and holds buys while the web's differ.
+  const agent = createSolanaAgent({ db, runtime: solanaWorkerRuntime(), market: createSolanaMarket(),
+    postgres: !!process.env.DATABASE_URL, signal,
     referenceToleranceBps, expiredAttemptAllowance });
   while (!signal.aborted) {
     try {

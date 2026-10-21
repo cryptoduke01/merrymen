@@ -112,7 +112,9 @@ async function fixture() {
       contextSlot: 1000, quotedAtMs: clock.now, expiresAtMs: clock.now + 30_000 }),
   };
   const env = { MERRYMEN_SOLANA_VAULT_PROGRAM: PROGRAM, MERRYMEN_SOLANA_VAULT_SHA256: createHash("sha256").update(binary).digest("hex"),
-    MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"), MERRYMEN_JUPITER_API_KEY: "fixture" };
+    MERRYMEN_STORE_DEK: Buffer.alloc(32, 30).toString("base64"), MERRYMEN_SOLANA_FEE_PAYER_SEED: Buffer.alloc(32, 31).toString("base64"), MERRYMEN_JUPITER_API_KEY: "fixture",
+    // On the live list, with daily caps at the fixture's limits (50 USDG and 0.5 SOL; per trade the defaults).
+    MERRYMEN_SOLANA_LIVE_TENANTS: TENANT, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "50", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "0.5" };
   const app = createSolanaAppRuntime({ db, rpc, market, env, now: () => clock.now });
   const sign = async (wire: string) => getBase64EncodedWireTransaction(await signTransaction([ownerKeys], getTransactionDecoder().decode(Buffer.from(wire, "base64"))));
   const live = async () => { const binding = (await bindings.get(TENANT))!; await bindings.settings(TENANT, owner, binding.revision, "live", limits); };
