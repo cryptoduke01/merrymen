@@ -19,7 +19,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
+import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW, SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SOLANA_STATUS_DAILY_USDG_BUYS_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveExitLimitsRefusal, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
@@ -1205,9 +1205,12 @@ test("sales count against the rolling USDG limit as buys do: after a day of buys
   // Under 1 USDG left is the same: no trade of at least the live minimum fits.
   await f.db.prepare("UPDATE solana_runtime_submissions SET notional_raw='24000001' WHERE request_id='buy-0'").run();
   assert.deepEqual((await f.app.status(f.scope)).live.blockers, [SOLANA_STATUS_DAILY_USDG_USED]);
-  // Once a buy is released (failed) there is room again: no blocker, and the same sale is admitted and sent.
+  // Once a buy is released (failed) there is room again for exits: the same sale is admitted and sent. Buying still waits: the 1 SOL
+  // held ($150) is more than the 25 USDG left can sell today (THE POSITION ABOVE ITS EXIT ROOM), which never stops a sale.
   await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='buy-0'").run();
-  assert.deepEqual((await f.app.status(f.scope)).live.blockers, []);
+  const released = await f.app.status(f.scope);
+  assert.deepEqual(released.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(released.live.canExit, true);
+  assert.ok(released.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW));
   const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-with-room") });
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });
@@ -1240,13 +1243,17 @@ test("under 1 USDG left of the day's USDG limit stops only buys while a sale of 
   assert.ok((await unpriced.app.status(unpriced.scope)).live.blockers.includes(SOLANA_STATUS_DAILY_USDG_USED), "a stale price: not shown as sellable");
 });
 
-test("a day's SOL sold limit used by sales is a status warning pointing to Withdraw, as admission refuses the next sale; buys, which it does not limit, stay open", async t => {
+test("a day's SOL sold limit used by sales is a status warning pointing to Withdraw, as admission refuses the next sale; the position it leaves unsellable today holds buys, which the exit reserve refuses", async t => {
   // The fixture's limits: 0.2 SOL sold per trade, 1 SOL a day. Five sales of 0.2 SOL in the last 24 hours (charged 1 USDG each here).
   const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" } });
   for (let i = 0; i < 5; i++) await windowRow(f, `sale-${i}`, "finalized", 7_200_000 - i, SOLANA_WRAPPED_SOL_MINT, "200000000", "1000000");
   const status = await f.app.status(f.scope);
   assert.ok(status.live.warnings.includes(SOLANA_STATUS_DAILY_SOL_SOLD_USED), JSON.stringify(status.live.warnings));
-  assert.deepEqual(status.live.blockers, []); assert.equal(status.live.ready, true, "buys are not limited by SOL sold");
+  // The 1 SOL held cannot be sold today either: buying waits (no price needed, and no buy in the window to price), exits stay open in status.
+  assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
+  assert.ok(status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW)); assert.deepEqual(f.pythReads, []);
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "1000000", "buy-over-sol") }),
+    (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "sale-over-sol") }), /rolling daily SOL sell limit would be exceeded/);
   assert.equal(f.sends.length, 0);
   // Failed sales are released: no warning.
@@ -1263,11 +1270,11 @@ test("exits keep room: a live buy that would leave the whole position unsellable
   };
   const exitReserve = (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE;
   const placedAs = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => (await f.submissions()).filter(row => row.request_id === id);
-  // 25 USDG more would leave $47.50 of SOL to sell after 77 used: 77 + 48.93 > 100.
+  // 25 USDG more may leave $48.25 of SOL to sell (what it brings counted with the 3% fill margin) after 77 used: 77 + 49.70 > 100.
   const f = await fresh();
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-too-much") }), exitReserve);
   assert.deepEqual(await placedAs(f, "buy-too-much"), []); assert.equal(f.sends.length, 0, "nothing signed or sent");
-  // 12 USDG fits at $150 (64 + 35.54), but not where one provider serves $170 (64 + 40.27): the higher value is kept, and
+  // 12 USDG fits at $150 (64 + 35.91), but not where one provider serves $170 (64 + 40.69): the higher value is kept, and
   // refused before anything is signed (admission, at the buy's own $150 reference, would have taken it).
   const g = await fresh();
   await assert.rejects(g.runtime({}, split(g, undefined, pythAt(17_000_000_000n))).trade(g.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12000000", "buy-high") }), exitReserve);
@@ -1275,6 +1282,48 @@ test("exits keep room: a live buy that would leave the whole position unsellable
   const placed = await g.app.trade(g.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12000000", "buy-that-fits") });
   assert.ok("status" in placed && placed.status === "pending"); assert.equal(g.sends.length, 1);
   assert.equal((await placedAs(g, "buy-that-fits")).length, 1);
+});
+
+test("exits keep room, counting what a buy brings with the fill margin before anything is signed: a buy that would fit only were its fill no better than its quote is refused by assessRisk and never reaches admission", async t => {
+  // As above: 52 USDG of buys in the window, 0.15 SOL ($22.50) held, $150 a SOL. 12.1 USDG brings 0.080667 SOL by its quote:
+  // 64.1 + 35.64 would fit, but counted 3% better (0.083087 SOL) it is 64.1 + 36.01 > 100.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 150_000_000n, mark: "fair", build: { kind: "fair" } });
+  for (const [i, usdg] of ["25000000", "25000000", "2000000"].entries()) await windowRow(f, `buy-${i}`, "finalized", 3_600_000 - i, SOLANA_USDG_MINT, usdg, usdg);
+  const admissions = t.mock.method(SolanaTradingStore.prototype, "recordSigned");
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12100000", "buy-over-margin") }),
+    (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  assert.equal(admissions.mock.callCount(), 0, "refused before anything was signed"); assert.equal(f.sends.length, 0);
+  // 12 USDG fits with the margin (64 + 35.91), and is sent.
+  const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "12000000", "buy-within-margin") });
+  assert.ok("status" in placed && placed.status === "pending"); assert.equal(admissions.mock.callCount(), 1); assert.equal(f.sends.length, 1);
+});
+
+test("the fill margin exceeded: after a buy that filled further above its quote, the booked position is more than the day's limits can sell; status holds buys and warns that the rest exits over the next window, the worker buys nothing, a manual buy is refused before anything is signed, and sales go through", async t => {
+  // 25 USDG and 0.2 SOL per trade, 100 USDG and 1 SOL a day, $150 a SOL. A 25 USDG buy in the window filled well above its quote,
+  // and was booked as it landed: 0.55 SOL ($82.50) held, and 25 + 84.98 USDG is more than the 100 a day. The strategy wants 90% SOL.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 550_000_000n, mark: "fair", build: { kind: "fair" }, strategy: { ...rebalance, targetSolBps: 9000 } });
+  await windowRow(f, "big-fill", "finalized", 3_600_000, SOLANA_USDG_MINT, "25000000", "25000000");
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
+  assert.ok(status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW), JSON.stringify(status.live.warnings));
+  assert.ok(f.pythReads.length > 0, "priced after a buy in the window");
+  // The worker holds its buy: no route is built.
+  assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
+  assert.ok(!f.net.urls.includes(SWAP_BUILD)); assert.deepEqual((await f.submissions()).map(row => row.request_id), ["big-fill"]);
+  // A manual buy, however small, is refused by the exit reserve before anything is signed.
+  const admissions = t.mock.method(SolanaTradingStore.prototype, "recordSigned");
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "1000000", "buy-after-big-fill") }),
+    (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
+  assert.equal(admissions.mock.callCount(), 0); assert.equal(f.sends.length, 0);
+  // A sale goes through, within the per-trade limits: 0.15 SOL ($22.50).
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "150000000", "exit-after-big-fill") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(admissions.mock.callCount(), 1); assert.equal(f.sends.length, 1);
+  // Once the buy leaves the window the position fits a day's limits again (the warning's next window): the hold and the warning go.
+  const later = await fixture(t, { cash: 50_000_000n, wsol: 550_000_000n, mark: "fair", build: { kind: "fair" } });
+  await windowRow(later, "big-fill", "finalized", 86_400_001, SOLANA_USDG_MINT, "25000000", "25000000");
+  const after = await later.app.status(later.scope);
+  assert.deepEqual(after.live.blockers, []); assert.ok(!after.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW));
+  assert.deepEqual(later.pythReads, [], "with no buy in the window, status reads no price for it");
 });
 
 test("exits keep room: after the most buys the window admits, the worker buys nothing (no route built), a manual buy is refused, and the whole position is sold back to USDG", async t => {
@@ -1399,10 +1448,28 @@ test("exits keep room within the limits the vault enforces: saved live limits ab
   assert.ok("status" in bought && bought.status === "pending"); assert.equal(k.sends.length, 1);
 });
 
+test("the position above its exit room is judged within the registered permission's limits, as the vault holds them and as activateLive kept them, where they are below the saved ones", async t => {
+  // The caps raised to 200 USDG a day and the limits saved at it. 20 USDG bought in the window and 0.6 SOL ($90) held: 20 + 92.70 fits 200, not 100.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 600_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "200" } });
+  await windowRow(f, "earlier-buy", "finalized", 3_600_000, SOLANA_USDG_MINT, "20000000", "20000000");
+  await f.bindings.settings(TENANT, f.scope.owner, (await f.bindings.get(TENANT))!.revision, "live", { ...limits, dailyUsdg: "200000000" });
+  // The vault holds the permission registered at 100 a day (the fixture's): buying waits.
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]);
+  // Where the vault allows the saved 200 a day: nothing is held.
+  const roomy = vaultLimits(f, { perTrade: 25_000_000n, daily: 200_000_000n, perTradeWsol: 200_000_000n, dailyWsol: 1_000_000_000n });
+  assert.deepEqual((await f.runtime({}, split(f, roomy, roomy)).status(f.scope)).live.blockers, []);
+  // Unless the limits activateLive kept for that permission say 100 a day.
+  const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=?").get(TENANT) as { record_json: string }).record_json);
+  await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=? WHERE tenant=?").run(JSON.stringify({ ...record,
+    limits: { perTradeUsdg: "25000000", dailyUsdg: "100000000", perTradeWsol: "200000000", dailyWsol: "1000000000" } }), TENANT);
+  assert.deepEqual((await f.runtime({}, split(f, roomy, roomy)).status(f.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]);
+});
+
 test("live rollout caps: on the list, an account whose permission is registered above caps lowered since may save its live limits up to what it signed, so a re-save never narrows its exits; buys stay refused", async t => {
   // The registered permission allows 25 and 100 USDG, 0.2 and 1 SOL (kept as activateLive keeps it); the caps are lowered to the defaults.
   const lowered = { MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "", MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_WSOL: "", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "" };
-  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: lowered });
+  // 0.4 SOL ($60) held: one day of the signed limits can sell it beside the 30 USDG used below.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 400_000_000n, mark: "fair", build: { kind: "fair" }, env: lowered });
   const signed = { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: limits.dailyUsdg, perTradeWsol: limits.perTradeWsol, dailyWsol: limits.dailyWsol };
   const keep = async (kept: Record<string, string>) => {
     const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=?").get(TENANT) as { record_json: string }).record_json);

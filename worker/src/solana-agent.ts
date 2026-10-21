@@ -353,8 +353,9 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
             else throw new SolanaMarketError("invalid-quote");
           }
           // A live buy keeps room to sell the whole position inside the rolling window (EXITS KEEP ROOM...): sized below it here, so
-          // no route is built for a buy assessRisk would refuse. The mark is Jupiter's guaranteed output, which may sit up to the
-          // tolerance below the independent price the check values the position at. Within the registered permission's USDG per
+          // no route is built for a buy assessRisk would refuse, with what it brings counted with THE FILL MARGIN as the check counts
+          // it (solanaExitReserveBuyRoom). The mark is Jupiter's guaranteed output, which may sit up to the tolerance below the
+          // independent price the check values the position at. Within the registered permission's USDG per
           // 24 hours limit too, where it is below the saved one (solanaExitReserveLimits): the vault sells the exit under its own.
           let buyRoomUsdgRaw: string | undefined;
           if (row.requested_mode === "live") {

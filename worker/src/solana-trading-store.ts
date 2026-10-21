@@ -443,6 +443,17 @@ export async function solanaRollingLimitUse(db: Db, scope: SolanaAccountScope, n
   return { notionalRaw: windowNotional(counted), soldWsolRaw: windowSold(counted) };
 }
 /**
+ * Whether a live buy that still counts (failure or expiry evidence has not released it) was made inside the rolling window at
+ * `nowMs`, by the window and rule recordSigned counts by: whether a fill may have grown the position since the window began, which
+ * status then prices (THE POSITION ABOVE ITS EXIT ROOM, in the app runtime).
+ */
+export async function solanaBoughtInWindow(db: Db, scope: SolanaAccountScope, nowMs: number): Promise<boolean> {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) refuse("Invalid Solana rolling limit query.");
+  const rows = await db.prepare("SELECT status,submission_json FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND created_at_ms>?")
+    .all(scope.tenant, scope.owner, nowMs - DAY) as Array<{ status: string; submission_json: string }>;
+  return countedInWindow(rows).some(r => (JSON.parse(r.submission_json) as SolanaSignedSubmission).intent.inputMint === SOLANA_USDG_MINT);
+}
+/**
  * EXITS KEEP ROOM IN THE ROLLING LIMITS: BUYS ARE REFUSED FIRST. Sales count
  * against the same limits as buys (above), and the platform's live caps bound
  * those limits, so a day of buys could otherwise leave no room to sell. A live
@@ -452,16 +463,39 @@ export async function solanaRollingLimitUse(db: Db, scope: SolanaAccountScope, n
  * position's value plus the reference tolerance (a sale is charged at the
  * higher of its quote and its reference value) fit the USDG per 24 hours limit,
  * and the position fits what sales left of the SOL sold per 24 hours limit.
+ * What the buy brings is counted at the larger of its quoted and its
+ * reference-implied output plus THE FILL MARGIN (below), since neither bounds
+ * what an ExactIn swap delivers.
  * Checked before anything is signed (the app runtime's assessRisk, at the
  * highest price any provider serves) and again at admission (recordSigned, at
  * the buy's own reference). It only ever refuses buys: a sale never reads it,
  * and no limit is widened. So a day's buys stop at about half the USDG limit,
  * and a position never grows beyond what one day's limits can sell at the
- * price it was bought at (a later rise in the SOL price can still outgrow it;
- * partial sales and Withdraw remain).
+ * price it was bought at (a fill beyond the margin, or a later rise in the SOL
+ * price, can still outgrow it: status then holds buys and says so, and partial
+ * sales and Withdraw remain).
  */
 export const SOLANA_LIVE_EXIT_RESERVE = "This buy was refused: it would leave too little of your 24-hour live limits to sell your whole SOL position back to USDG, "
   + "and sales count against the same limits as buys. A smaller buy may fit; exits, revoke and withdraw still work.";
+/**
+ * THE FILL MARGIN. A live buy is an ExactIn swap: the vault program enforces only the signed minimum output, the quote's
+ * outAmount and the reference-implied amount are estimates, and settlement books whatever the swap delivered at or above the
+ * minimum. So EXITS KEEP ROOM... counts what a buy brings at the larger of the two plus this margin, rounded up: a fill up to
+ * this far above both still leaves the whole position sellable inside the window. 300 bps, the default reference tolerance
+ * (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS), whatever tolerance is configured: a price that moves further in the buyer's favour
+ * between the quote and the landing is rare at these sizes. A fill beyond it is booked as it landed (the book never caps what the
+ * vault holds); the position may then be more than one day's limits can sell, and status holds further buys, which this check
+ * refuses anyway, and says the excess exits over the next window (the app runtime's SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The
+ * same margin is used before anything is signed (assessRisk), at admission (recordSigned) and by the strategy's buy sizing
+ * (solanaExitReserveBuyRoom).
+ */
+export const SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS = 300;
+/** The most SOL a buy is counted as bringing (THE FILL MARGIN): the larger of its quoted and reference-implied output, plus the margin, rounded up. */
+export function solanaBuyFillBound(quotedOutRaw: bigint, referenceOutRaw: bigint): bigint {
+  if (quotedOutRaw < 0n || referenceOutRaw < 0n) refuse("Invalid Solana exit reserve.");
+  const brought = quotedOutRaw > referenceOutRaw ? quotedOutRaw : referenceOutRaw;
+  return (brought * BigInt(10_000 + SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS) + 9_999n) / 10_000n;
+}
 /** The USDG a whole-position exit worth `valueUsdgRaw` at the reference must find left of the daily limit: its value plus the tolerance, rounded up. */
 export function solanaExitReserveUsdg(valueUsdgRaw: bigint, toleranceBps: number): bigint {
   if (valueUsdgRaw < 0n || !Number.isSafeInteger(toleranceBps) || toleranceBps < 0 || toleranceBps > 10_000) refuse("Invalid Solana exit reserve.");
@@ -470,7 +504,8 @@ export function solanaExitReserveUsdg(valueUsdgRaw: bigint, toleranceBps: number
 /**
  * Whether a buy leaves the whole position after it sellable inside the window (EXITS KEEP ROOM...): `usedUsdgRaw` and
  * `soldWsolRaw` are the window's use (solanaRollingLimitUse, or admission's own count), `positionAfterWsolRaw` the recorded
- * position plus what the buy brings, and `positionAfterValueUsdgRaw` its value at the reference.
+ * position plus what the buy may bring (solanaBuyFillBound), and `positionAfterValueUsdgRaw` its value at the reference. With no
+ * buy (`buyUsdgRaw` 0, the position as booked), whether the position itself can still be sold inside the window.
  */
 export function solanaBuyKeepsExitRoom(input: { usedUsdgRaw: bigint; soldWsolRaw: bigint; buyUsdgRaw: bigint; positionAfterWsolRaw: bigint;
   positionAfterValueUsdgRaw: bigint; dailyUsdgRaw: bigint; dailyWsolRaw: bigint; toleranceBps: number }): boolean {
@@ -492,16 +527,17 @@ export function solanaExitReserveLimits(saved: { dailyUsdg: bigint; dailyWsol: b
 /**
  * For planning only (the autonomous strategy sizes its buys by it, so it does not build a route admission would refuse): the
  * largest buy, in USDG, that keeps the USDG room EXITS KEEP ROOM... asks for, with the position held worth `positionValueUsdgRaw`
- * and what the buy brings valued at up to the tolerance above what it costs. Zero when none does. The SOL sold room is left to the
- * check itself, which refuses such a buy before anything is signed.
+ * and what the buy brings valued at up to the tolerance above what it costs, plus THE FILL MARGIN, as the check counts it. Zero
+ * when none does. The SOL sold room is left to the check itself, which refuses such a buy before anything is signed.
  */
 export function solanaExitReserveBuyRoom(input: { usedUsdgRaw: bigint; dailyUsdgRaw: bigint; positionValueUsdgRaw: bigint; toleranceBps: number }): bigint {
-  // Four base units below what is left, for the reserve's rounding up (of the position and the buy together).
+  // Four base units below what is left, for the reserve's rounding up (of the position and the buy together, and of the margin).
   const left = input.dailyUsdgRaw - input.usedUsdgRaw - solanaExitReserveUsdg(input.positionValueUsdgRaw, input.toleranceBps) - 4n;
   if (left <= 0n) return 0n;
-  // b + b × (1 + t)² ≤ left, with t the tolerance: what the buy brings is reserved at its own value plus the tolerance, twice over.
-  const scale = 10_000n, grown = BigInt(10_000 + input.toleranceBps);
-  return left * scale * scale / (scale * scale + grown * grown);
+  // b + b × (1 + t)² × (1 + m) ≤ left, with t the tolerance and m the fill margin: what the buy brings is valued at up to the
+  // tolerance above its cost, counted with the margin, and reserved at that value plus the tolerance.
+  const scale = 10_000n, grown = BigInt(10_000 + input.toleranceBps), margin = BigInt(10_000 + SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS);
+  return left * scale * scale * scale / (scale * scale * scale + grown * grown * margin);
 }
 /**
  * How proven-expired attempts use one account's daily operations at `nowMs`, by
@@ -1167,10 +1203,10 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         drawdownRefused = true; return false;
       }
       // EXITS KEEP ROOM IN THE ROLLING LIMITS: a buy that would leave the whole position after it unsellable inside this window,
-      // at this buy's own reference price, is refused (after the breaker above, which a buy in drawdown must still commit).
+      // at this buy's own reference price, is refused (after the breaker above, which a buy in drawdown must still commit). What
+      // it brings is counted with THE FILL MARGIN: neither the quote nor the reference bounds an ExactIn fill.
       if (buying) {
-        const brought = [raw(s.quote.outAmount, false), raw(reference.referenceOut, false)].reduce((a, b) => a > b ? a : b);
-        const positionAfter = raw(book.wsolRaw) + brought;
+        const positionAfter = raw(book.wsolRaw) + solanaBuyFillBound(raw(s.quote.outAmount, false), raw(reference.referenceOut, false));
         // Within the registered permission's limits too, kept in the session record, where they are below the saved ones.
         const reserve = solanaExitReserveLimits({ dailyUsdg: raw(limits.dailyUsdg, false), dailyWsol: sellLimits.dailyWsol }, session.limits);
         if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: windowNotional(counted), soldWsolRaw: soldToday, buyUsdgRaw: notional, positionAfterWsolRaw: positionAfter,
