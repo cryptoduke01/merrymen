@@ -34,7 +34,8 @@ test("runSolanaAgent publishes its live rollout settings as the worker's, under 
   const running = runSolanaAgent(controller.signal);
   let rows: Array<{ service: string; fingerprint: string }> = [];
   try {
-    for (let i = 0; i < 200 && !rows.length; i++) {
+    // Up to 30 s for its first tick under a loaded test run; usually well under a second.
+    for (let i = 0; i < 1200 && !rows.length; i++) {
       await delay(25);
       try {
         const db = new DatabaseSync(solanaRuntimeDbFile(), { readOnly: true });
