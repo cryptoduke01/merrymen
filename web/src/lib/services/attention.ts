@@ -341,7 +341,9 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       started_at: signedAt! + grace, ends_at: null,
     });
   }
-  if (!pending && running && beat !== null && now - beat > freshWithinSec) {
+  // Only a live permission owes a heartbeat, as the stale_data alert rules
+  // (notify.ts evalStale): after expiry the expired item is what to act on.
+  if (live && !pending && running && beat !== null && now - beat > freshWithinSec) {
     items.push({
       key: `worker-stale:${slug}:${beat}`, severity: "today", kind: "worker-stale", agent: slug,
       title: "The agent's worker stopped reporting",

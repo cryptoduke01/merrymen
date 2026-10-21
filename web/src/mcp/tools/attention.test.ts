@@ -294,6 +294,10 @@ test("kill switch, a stale worker, a provider failure and reached caps are named
   assert.equal(item.owner_can_fix, false);
   assert.equal(item.started_at, new Date((NOW - HOUR + 570) * 1000).toISOString(), "stale from the moment the heartbeat aged past 2 x tick + 90 s");
 
+  // Past its permission's expiry a silent worker owes nothing: the expired item is the one to act on.
+  const expiredLater = await ask({}, undefined, 4102444800 + HOUR);
+  assert.deepEqual(expiredLater.items.map((i) => i.kind), ["permission-expired"]);
+
   d.raw.prepare("UPDATE agents SET beat_at = ?").run(NOW - 30);
   for (let at = NOW - 40 * 60; at <= NOW - 120; at += 240) event(d, ACCOUNT_A, "strategist driver failed: 400 json_validate_failed", at);
   item = only(await ask(), "provider-failure");
