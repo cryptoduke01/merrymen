@@ -33,7 +33,8 @@ import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestRefe
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, solanaBoughtInWindow, solanaBuyFillBound, solanaBuyKeepsExitRoom, solanaExitReserveLimits, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, solanaBoughtInWindow, solanaBuyFillBound, solanaBuyKeepsExitRoom, solanaExitReserveLimits,
+  solanaExitReserveUsdg, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse,
   solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
@@ -127,8 +128,9 @@ export const SOLANA_STATUS_DAILY_OPERATIONS_USED = "This account made its maximu
  *   blocker of exits too, while it does not or cannot be priced (trade() could not price it either).
  * - SOLANA_STATUS_DAILY_SOL_SOLD_USED, a warning: the SOL sold per 24 hours limit is used, so admission refuses every sale;
  *   status does not hold buys for it alone (a position it leaves unsellable today holds them: the next item).
- * - SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, buys-only, with the warning SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW: the booked SOL position
- *   is more than the rolling limits can sell inside the window (THE POSITION ABOVE ITS EXIT ROOM, below).
+ * - SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, buys-only, with the warning SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW or
+ *   SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS: the booked SOL position is more than the rolling limits can sell inside the window
+ *   (THE POSITION ABOVE ITS EXIT ROOM, below).
  */
 export const SOLANA_STATUS_DAILY_USDG_USED = "This account's live trades in the last 24 hours used its USDG per 24 hours limit. Sales back to USDG count against it as "
   + "buys do, so no live trade, exits included, is admitted until earlier trades leave the 24-hour window. Withdraw works at any time.";
@@ -139,10 +141,14 @@ export const SOLANA_STATUS_DAILY_SOL_SOLD_USED = "This account's sales in the la
 /**
  * THE POSITION ABOVE ITS EXIT ROOM. A buy is admitted only while the whole position after it, counting what it may bring with THE
  * FILL MARGIN (solana-trading-store.ts), could still be sold inside the rolling window. A fill further above its quote than the
- * margin (the program bounds a buy's output from below only, and settlement books what landed), or a rise in the SOL price, can
- * still leave the booked position larger than that. Status then holds buys with SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, a buys-only
- * blocker (every buy would fail the exit reserve anyway: assessRisk and admission refuse it), and says with the warning
- * SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW that what today's limits cannot sell exits as earlier trades leave the window. Judged by the
+ * margin (the program bounds a buy's output from below only, and settlement books what landed), a rise in the SOL price (the USDG
+ * room only), or daily limits lowered since (saved again lower, or a permission registered with lower ones) can still leave the
+ * booked position larger than that. Status then holds buys with SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, a buys-only blocker (every
+ * buy would fail the exit reserve anyway: assessRisk and admission refuse it), and warns with what the owner can do: where the
+ * position fits a whole window's limits, SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW (what is left today cannot sell it all; the rest as
+ * earlier trades leave the window); where it is more than a whole window's limits can sell (more SOL than the SOL sold per 24
+ * hours limit, or, priced, worth more with the tolerance than the USDG per 24 hours limit), SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS
+ * (selling it all takes more than one window). Neither names one cause, which status cannot tell apart. Judged by the
  * reserve's own arithmetic with no buy (solanaBuyKeepsExitRoom), within the lower of the saved limits and the registered
  * permission's (as kept, and as the vault holds them), while a position is held and at least the live minimum of the USDG limit
  * is left (under it, SOLANA_STATUS_DAILY_USDG_* already say what fits). The SOL sold room needs no price and is always judged; the
@@ -153,8 +159,12 @@ export const SOLANA_STATUS_DAILY_SOL_SOLD_USED = "This account's sales in the la
  */
 export const SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM = "Buying is paused: your SOL position is more than this account's 24-hour live limits can sell back to USDG today, "
   + "and sales count against the same limits as buys. Exits, revoke and withdraw still work.";
-export const SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW = "Not all of your SOL position can be sold back to USDG within today's 24-hour live limits (a buy filled above its quote, "
-  + "or the SOL price rose). Sell what the limits allow now; the rest can be sold as earlier trades leave the 24-hour window. Withdraw works at any time.";
+export const SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW = "Your SOL position is more than what is left of this account's 24-hour live limits can sell back to USDG today. "
+  + "Sell what the limits allow now; the rest can be sold as earlier trades leave the 24-hour window. This can happen when a buy fills above its quote, "
+  + "the SOL price rises or the daily limits are lowered. Withdraw works at any time.";
+export const SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS = "Your SOL position is more than this account's 24-hour live limits can sell back to USDG in one "
+  + "24-hour window, so selling all of it takes more than one: sell what the limits allow in each. This can happen when a buy fills above its quote, "
+  + "the SOL price rises or the daily limits are lowered. Withdraw works at any time.";
 export const SOLANA_STATUS_NO_FALLBACK = "Live trading needs a second, independent RPC provider; an operator must configure one.";
 /**
  * The status warning while MERRYMEN_SOLANA_FEE_PAYER_LOW_LAMPORTS cannot be
@@ -622,24 +632,26 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    * Whether the booked SOL position is more than the rolling limits can sell inside the window (THE POSITION ABOVE ITS EXIT ROOM):
    * the exit reserve's arithmetic with no buy, within the lower of `saved` and each of `registered` that is known. The SOL sold
    * room needs no price; the USDG room values the position at the highest price any provider serves, read only with `liveReads`
-   * and while a buy made inside the window still counts. False when nothing is held, or when the price or the tolerance cannot be
-   * read (trade() then refuses buys itself).
+   * and while a buy made inside the window still counts. "several-windows" when even an empty window's limits could not sell it
+   * all, "next-window" when only what this window used stands in the way. Null when it fits, when nothing is held, or when the
+   * price or the tolerance cannot be read (trade() then refuses buys itself).
    */
   async function positionAboveExitRoom(s: SolanaTradingStore, saved: { dailyUsdg: bigint; dailyWsol: bigint },
     registered: Array<{ dailyUsdg: string | bigint; dailyWsol: string | bigint } | undefined>, used: { notionalRaw: bigint; soldWsolRaw: bigint },
-    liveReads: boolean): Promise<boolean> {
+    liveReads: boolean): Promise<"next-window" | "several-windows" | null> {
     const held = BigInt((await s.liveBook())?.wsolRaw ?? "0");
-    if (held === 0n) return false;
+    if (held === 0n) return null;
     const limits = registered.reduce<{ dailyUsdg: bigint; dailyWsol: bigint }>((lower, item) => solanaExitReserveLimits(lower, item), saved);
-    if (used.soldWsolRaw + held > limits.dailyWsol) return true;
-    if (!liveReads || !(await solanaBoughtInWindow(s.db, s.scope, now()))) return false;
+    if (used.soldWsolRaw + held > limits.dailyWsol) return held > limits.dailyWsol ? "several-windows" : "next-window";
+    if (!liveReads || !(await solanaBoughtInWindow(s.db, s.scope, now()))) return null;
     try {
       const toleranceBps = referenceToleranceBps();
       const prices = await referencePrices(rpc(), requireSolanaPythGeneration(env, now()));
       const valued = prices.map(price => solanaReferenceWsolValue(held, price)).reduce((a, b) => a > b ? a : b);
-      return !solanaBuyKeepsExitRoom({ usedUsdgRaw: used.notionalRaw, soldWsolRaw: used.soldWsolRaw, buyUsdgRaw: 0n, positionAfterWsolRaw: held,
-        positionAfterValueUsdgRaw: valued, dailyUsdgRaw: limits.dailyUsdg, dailyWsolRaw: limits.dailyWsol, toleranceBps });
-    } catch { return false; }
+      if (solanaBuyKeepsExitRoom({ usedUsdgRaw: used.notionalRaw, soldWsolRaw: used.soldWsolRaw, buyUsdgRaw: 0n, positionAfterWsolRaw: held,
+        positionAfterValueUsdgRaw: valued, dailyUsdgRaw: limits.dailyUsdg, dailyWsolRaw: limits.dailyWsol, toleranceBps })) return null;
+      return solanaExitReserveUsdg(valued, toleranceBps) > limits.dailyUsdg ? "several-windows" : "next-window";
+    } catch { return null; }
   }
   /** The account went live: it has a registered permission or a live book. Off the list, such an account is exits-only. */
   async function wentLive(s: SolanaTradingStore): Promise<boolean> { return !!(await s.session()) || !!(await s.liveBook()); }
@@ -1394,9 +1406,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
             } catch { /* Unpriced: not shown as possible. */ }
           }
           if (wholeExitFits) buysOnly(SOLANA_STATUS_DAILY_USDG_BUYS_USED); else blockers.push(SOLANA_STATUS_DAILY_USDG_USED);
-        } else if (binding.limits.dailyWsol !== undefined && await positionAboveExitRoom(s, { dailyUsdg: BigInt(binding.limits.dailyUsdg),
-          dailyWsol: BigInt(binding.limits.dailyWsol) }, [session?.limits, vaultDaily], spent, liveReads)) {
-          buysOnly(SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM); warnings.push(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW);
+        } else if (binding.limits.dailyWsol !== undefined) {
+          const above = await positionAboveExitRoom(s, { dailyUsdg: BigInt(binding.limits.dailyUsdg), dailyWsol: BigInt(binding.limits.dailyWsol) },
+            [session?.limits, vaultDaily], spent, liveReads);
+          if (above) {
+            buysOnly(SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM);
+            warnings.push(above === "several-windows" ? SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS : SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW);
+          }
         }
         if (binding.limits.dailyWsol !== undefined && spent.soldWsolRaw >= BigInt(binding.limits.dailyWsol)) warnings.push(SOLANA_STATUS_DAILY_SOL_SOLD_USED);
       }

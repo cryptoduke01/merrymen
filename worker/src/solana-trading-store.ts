@@ -484,8 +484,8 @@ export const SOLANA_LIVE_EXIT_RESERVE = "This buy was refused: it would leave to
  * this far above both still leaves the whole position sellable inside the window. 300 bps, the default reference tolerance
  * (SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS), whatever tolerance is configured. A fill beyond it is booked as it landed (the book
  * never caps what the vault holds); the position may then be more than one day's limits can sell, and status holds further buys,
- * which this check refuses anyway, and says the excess exits over the next window (the app runtime's
- * SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The same margin is used before anything is signed (assessRisk), at admission
+ * which this check refuses anyway, and says the excess is sold as earlier trades leave the window, or over more than one window
+ * (the app runtime's SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM). The same margin is used before anything is signed (assessRisk), at admission
  * (recordSigned) and by the strategy's buy sizing (solanaExitReserveBuyRoom).
  */
 export const SOLANA_EXIT_RESERVE_FILL_MARGIN_BPS = 300;

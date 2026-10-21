@@ -19,7 +19,7 @@ import { SOLANA_CLASSIC_TOKEN_PROGRAM, SOLANA_JUPITER_SHARED_ROUTE_DISCRIMINATOR
 import { SqlSolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { makePgDb, wrapSqlite, type Db } from "./db";
 import { createSolanaAgent, solanaWorkerRuntime } from "./solana-agent";
-import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW, SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
+import { createSolanaAppRuntime, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW, SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS, SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM, SOLANA_STATUS_DAILY_OPERATIONS_USED, SOLANA_STATUS_DAILY_SOL_SOLD_USED, SOLANA_STATUS_DAILY_USDG_USED,
   SOLANA_STATUS_DAILY_USDG_BUYS_USED,
   SolanaAppRuntimeError } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveExitLimitsRefusal, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
@@ -1206,11 +1206,12 @@ test("sales count against the rolling USDG limit as buys do: after a day of buys
   await f.db.prepare("UPDATE solana_runtime_submissions SET notional_raw='24000001' WHERE request_id='buy-0'").run();
   assert.deepEqual((await f.app.status(f.scope)).live.blockers, [SOLANA_STATUS_DAILY_USDG_USED]);
   // Once a buy is released (failed) there is room again for exits: the same sale is admitted and sent. Buying still waits: the 1 SOL
-  // held ($150) is more than the 25 USDG left can sell today (THE POSITION ABOVE ITS EXIT ROOM), which never stops a sale.
+  // held ($150) is more than the 25 USDG left can sell today (THE POSITION ABOVE ITS EXIT ROOM), which never stops a sale. With the
+  // 3% tolerance it is more than even a whole day's 100 USDG can sell, so the warning says selling it all takes more than one window.
   await f.db.prepare("UPDATE solana_runtime_submissions SET status='failed' WHERE request_id='buy-0'").run();
   const released = await f.app.status(f.scope);
   assert.deepEqual(released.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(released.live.canExit, true);
-  assert.ok(released.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW));
+  assert.ok(released.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS)); assert.ok(!released.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW));
   const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-with-room") });
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });
@@ -1252,6 +1253,7 @@ test("a day's SOL sold limit used by sales is a status warning pointing to Withd
   // The 1 SOL held cannot be sold today either: buying waits (no price needed, and no buy in the window to price), exits stay open in status.
   assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
   assert.ok(status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW)); assert.deepEqual(f.pythReads, []);
+  assert.ok(!status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS), "1 SOL fits a whole day's 1 SOL sold limit");
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "1000000", "buy-over-sol") }),
     (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE);
   await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "sale-over-sol") }), /rolling daily SOL sell limit would be exceeded/);
@@ -1306,6 +1308,7 @@ test("the fill margin exceeded: after a buy that filled further above its quote,
   const status = await f.app.status(f.scope);
   assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.ready, false); assert.equal(status.live.canExit, true);
   assert.ok(status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW), JSON.stringify(status.live.warnings));
+  assert.ok(!status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS), "$84.98 fits a whole day's 100 USDG");
   assert.ok(f.pythReads.length > 0, "priced after a buy in the window");
   // The worker holds its buy: no route is built.
   assert.deepEqual((await f.agent().tick()).map(r => r.outcome), ["held"]);
@@ -1483,6 +1486,22 @@ test("the position above its exit room is priced as the exit reserve prices it: 
   assert.deepEqual((await g.app.status(g.scope)).live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]);
   // The configured tolerance, not a fixed one: at 200 bps it fits (25 + 74.97).
   assert.deepEqual((await g.runtime({ MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS: "200" }).status(g.scope)).live.blockers, []);
+});
+
+test("daily limits lowered below the position hold buys with a warning that names lowered limits among the causes and says selling it all takes more than one window; a sale within them goes through", async t => {
+  // 0.2 SOL held ($30) and no trade in the window; the owner saves 0.1 SOL sold per trade and per 24 hours (the vault's permission
+  // allows 1 SOL). A price rise or a fill cannot be the cause: no buy is in the window, and the SOL sold room needs no price.
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 200_000_000n, mark: "fair", build: { kind: "fair" } });
+  assert.deepEqual((await f.app.status(f.scope)).live.blockers, []);
+  await f.bindings.settings(TENANT, f.scope.owner, (await f.bindings.get(TENANT))!.revision, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "100000000" });
+  const status = await f.app.status(f.scope);
+  assert.deepEqual(status.live.blockers, [SOLANA_STATUS_POSITION_ABOVE_EXIT_ROOM]); assert.equal(status.live.canExit, true);
+  assert.ok(status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS), JSON.stringify(status.live.warnings));
+  assert.ok(!status.live.warnings.includes(SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW)); assert.deepEqual(f.pythReads, []);
+  for (const warning of [SOLANA_STATUS_EXIT_OVER_SEVERAL_WINDOWS, SOLANA_STATUS_EXIT_OVER_NEXT_WINDOW]) assert.match(warning, /the daily limits are lowered/);
+  // A sale within the lowered limits is admitted and sent: 0.1 SOL now, the rest in a later window.
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-under-lowered") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });
 
 test("the position above its exit room is priced only while a buy that still counts is in the window: a failed or expired buy, released, reads no price and holds nothing", async t => {
