@@ -16,7 +16,7 @@ import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionE
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
-import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps,
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps,
   type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
 
@@ -291,7 +291,12 @@ function ConnectedSolana() {
   const liveAccess = status?.runtime?.liveAccess;
   // An account that went live (a registered permission or a live book) keeps live mode for its exits, as the server lets it.
   const wentLive = !!status?.runtime?.live.session || !!status?.runtime?.live.book;
-  const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED : !liveAccess.onList ? (wentLive ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN) : null;
+  // Its permission expired or replaced on Solana, such an account cannot sell either: the server then says so (the _NO_PERMISSION
+  // variants, never "exits still work"), and the page says the same.
+  const saidByServer = (text: string) => !!status?.runtime?.live.blockers.includes(text);
+  const paused = saidByServer(SOLANA_LIVE_PAUSED_NO_PERMISSION) ? SOLANA_LIVE_PAUSED_NO_PERMISSION : SOLANA_LIVE_PAUSED;
+  const misconfigured = saidByServer(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION) ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION : SOLANA_LIVE_ROLLOUT_MISCONFIGURED;
+  const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? misconfigured : !liveAccess.onList ? (wentLive ? paused : SOLANA_LIVE_NOT_OPEN) : null;
   // The caps a new live permission must fit: only while this account may register one.
   const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
   const policy = (): SolanaPaperLimits => {

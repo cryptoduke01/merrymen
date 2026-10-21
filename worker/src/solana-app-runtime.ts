@@ -41,7 +41,8 @@ import { readSolanaExternalWithdrawal, SolanaExternalWithdrawalError } from "./s
 import { readSolanaWithdrawHookAccounts, SolanaTransferHookReadError } from "./solana-transfer-hook";
 import { SolanaLiveRolloutError, solanaLiveCapRefusal, solanaLiveCaps, solanaLiveCapsExceeded, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, solanaLiveTenants,
   type SolanaLiveCaps } from "./solana-live-rollout";
-import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED } from "../../web/src/lib/solana-live-caps";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "../../web/src/lib/solana-live-caps";
 
 /**
  * Codes:
@@ -184,9 +185,10 @@ export const SOLANA_STATUS_REGISTERED_AFTER_REVOKE = "A trading permission that 
 /**
  * The live rollout's owner-facing words (web/src/lib/solana-live-caps.ts, shared with the page): SOLANA_LIVE_NOT_OPEN for a tenant
  * the list does not name that never went live, SOLANA_LIVE_PAUSED for one that went live and is off the list now (exits-only), and
- * SOLANA_LIVE_ROLLOUT_MISCONFIGURED while the list or a cap cannot be read.
+ * SOLANA_LIVE_ROLLOUT_MISCONFIGURED while the list or a cap cannot be read; the _NO_PERMISSION variants in status for an account that
+ * went live whose permission expired or was replaced on Solana, which cannot sell either.
  */
-export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED };
+export { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION };
 /** Chain balances at or above the book: an excess waits to be booked, a shortfall stops trading. */
 function shortOfBook(book: SolanaLiveBook, chain: { cashUsdg: string; wsolRaw: string }): boolean {
   return BigInt(chain.cashUsdg) < BigInt(book.cashRaw) || BigInt(chain.wsolRaw) < BigInt(book.wsolRaw) + solanaQuarantinedWsol(book);
@@ -1001,6 +1003,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // The live rollout: whether this tenant may open new live permissions and buy, and the caps in force.
       // Neither ever stops an exit; a setting that cannot be read leaves the account off the list (and says the [alert]).
       let onList = false, caps: SolanaLiveCaps | null = null, rolloutMisconfigured = false;
+      // Whether the vault holds a current permission matching the one the app keeps ("unknown" while it could not be read):
+      // without one nothing can be sold, so the exits-only blocker below must not say exits still work.
+      let permission: "current" | "missing" | "unknown" = "unknown";
       try { onList = liveListed(scope.tenant); } catch { rolloutMisconfigured = true; }
       try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
@@ -1075,13 +1080,15 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
               if (!shortOfBook(book, finalized) && aboveBook(book, finalized)) await s.reconcileExternalInflows({ ...finalized, observedAtMs, commitment: "finalized" });
             } catch { /* Retried on the next status read. */ }
           }
-          if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) blockers.push("Register an owner-approved live trading permission.");
-          else {
+          if (!session || session.programId !== programId || session.vault !== vault || live.state.session !== session.session || live.state.sessionEpoch.toString() !== session.sessionEpoch) {
+            blockers.push("Register an owner-approved live trading permission."); permission = "missing";
+          } else {
             const storedSeed = await s.sessionSeed(dek());
             if (!storedSeed || await getAddressFromPublicKey((await createKeyPairFromPrivateKeyBytes(seed(storedSeed, "The session cannot be opened."))).publicKey) !== session.session)
               fail("The saved trading permission cannot be opened.", "configuration");
             // Registered above caps lowered since: buys are refused before anything is signed (trade), exits keep the signed limits.
             if (onList && caps && sessionAboveCaps(live.state, caps)) buysOnly(solanaLiveSessionAboveCaps(caps));
+            permission = "current";
           }
           // A finalized registration activateLive never activates (the epoch moved more than its own landing: a
           // revocation landed before it, beside it or outside Merrymen) whose session is still live on Solana.
@@ -1106,7 +1113,7 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
           if (currentBook && shortOfBook(currentBook, balances) && !settling) {
             blockers.push(balances.slot < currentBook.slot ? SOLANA_STATUS_BEHIND_BOOK : SOLANA_STATUS_BELOW_BOOK);
           }
-          if (live.state.expiresAt * 1000n <= BigInt(now())) blockers.push("The on-chain trading permission has expired.");
+          if (live.state.expiresAt * 1000n <= BigInt(now())) { blockers.push("The on-chain trading permission has expired."); permission = "missing"; }
           if (live.state.paused) buysOnly("The on-chain buying breaker is paused; exits remain available.");
           // A donation in the next swap's temporary input account goes back to the
           // owner's own token account for that mint during the swap; while that
@@ -1120,10 +1127,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // Off the list, or while the rollout settings cannot be read, an account that went live (a registered permission or a live
       // book) is exits-only: its buys and new permissions are refused, and exits, revoke and withdraw continue. One in live mode that
       // never went live is told it is not open (as prepareLive says); a paper one has nothing to say here: liveAccess says it.
-      const exitsOnly = !!session || !!(await s.liveBook());
+      // One whose permission expired or was replaced on Solana cannot sell either, and cannot register another meanwhile: told
+      // so, never that exits still work (its own blocker above already stops exits).
+      const exitsOnly = !!session || !!(await s.liveBook()), noPermission = exitsOnly && permission === "missing";
       if (exitsOnly || binding.requestedMode === "live") {
-        if (rolloutMisconfigured) buysOnly(SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
-        else if (!onList) buysOnly(exitsOnly ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN);
+        if (rolloutMisconfigured) buysOnly(noPermission ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION : SOLANA_LIVE_ROLLOUT_MISCONFIGURED);
+        else if (!onList) buysOnly(noPermission ? SOLANA_LIVE_PAUSED_NO_PERMISSION : exitsOnly ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN);
       }
       // Saved live limits above the caps (saved before they were lowered) cannot be registered; a permission already registered is judged above.
       if (onList && caps && binding.requestedMode === "live" && binding.limits && solanaLiveCapsExceeded(binding.limits, caps).length) warnings.push(solanaLiveSavedAboveCaps(caps));

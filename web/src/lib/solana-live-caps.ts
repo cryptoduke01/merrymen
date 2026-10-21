@@ -32,10 +32,18 @@ const LABELS: Readonly<Record<SolanaLiveCapField, string>> = { perTradeUsdg: "US
  * - SOLANA_LIVE_ROLLOUT_MISCONFIGURED: the list or a cap cannot be read: new
  *   permissions and buys are refused for everyone, as configuration; exits
  *   continue.
+ * - The _NO_PERMISSION variants, in status only, for an account that went live
+ *   whose permission expired or was replaced on Solana: nothing can be sold
+ *   without a current permission, and a new one cannot be registered meanwhile,
+ *   so they never say exits still work. Revoke and withdraw always do.
  */
 export const SOLANA_LIVE_NOT_OPEN = "Live trading is not open for this account yet. Paper trading is available.";
 export const SOLANA_LIVE_PAUSED = "Live trading is paused for this account: exits, revoke and withdraw still work.";
+export const SOLANA_LIVE_PAUSED_NO_PERMISSION = "Live trading is paused for this account: revoke and withdraw still work. Selling needs a current trading permission, "
+  + "and a new one cannot be registered while live trading is paused.";
 export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. Exits, revoke and withdraw still work.";
+export const SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION = "The live trading access settings are misconfigured: new live permissions and buys are refused until an operator fixes them. "
+  + "Revoke and withdraw still work. Selling needs a current trading permission, and a new one cannot be registered until then.";
 
 /** The limits a live permission carries (or would), as raw amounts. Missing SOL limits are not compared. */
 export type SolanaLiveCappedLimits = { perTradeUsdg: string | bigint; dailyUsdg: string | bigint; perTradeWsol?: string | bigint; dailyWsol?: string | bigint };

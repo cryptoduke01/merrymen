@@ -16,7 +16,8 @@ import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-comm
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
-import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, solanaLiveCapRefusal, solanaLiveSavedAboveCaps } from "../lib/solana-live-caps";
+import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
+  SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps } from "../lib/solana-live-caps";
 
 const OWNER = "So11111111111111111111111111111111111111112";
 const TENANT = `0x${"11".repeat(20)}`;
@@ -2526,4 +2527,21 @@ test("an account that went live and is off the list keeps its live switch for ex
   assert.equal(button("Register bounded trading permission").disabled, true);
   assert.ok(ui.container.textContent!.includes(solanaLiveSavedAboveCaps(SOLANA_LIVE_CAP_DEFAULTS)));
   assert.equal(signCount, 0); assert.equal(calls.some((call) => call.path === "setup"), false);
+});
+
+test("off the list, an account that went live whose permission expired or was replaced is told selling needs a permission, never that exits still work", async () => {
+  state = initial("live"); state.runtime.live.programId = PROGRAM; state.binding.limits = liveLimits();
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: false, blockers: ["The on-chain trading permission has expired.", SOLANA_LIVE_PAUSED_NO_PERMISSION] });
+  await render();
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED_NO_PERMISSION));
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_PAUSED), "never \"exits, revoke and withdraw still work\"");
+  assert.equal(button("Register bounded trading permission").disabled, true);
+  // The same while a rollout setting cannot be read.
+  runtime.liveAccess = access(false, true);
+  state.runtime.live.blockers = ["Register an owner-approved live trading permission.", SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION];
+  await press("Refresh account");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION));
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
 });

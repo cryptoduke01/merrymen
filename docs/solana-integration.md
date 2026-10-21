@@ -357,7 +357,12 @@ reads both from its own env, so the web and the Solana worker decide alike.
   record withdrawals made outside Merrymen, use paper and read status. Status
   says "Live trading is paused for this account: exits, revoke and withdraw
   still work." as a blocker that leaves exits open, so the worker sells but never
-  buys. Such an account may save live mode again, without the caps, because live
+  buys. Exits need a current permission, though: once the one it holds has
+  expired or been replaced on Solana, nothing can be sold and no new one can be
+  registered off the list, and status says instead "Live trading is paused for
+  this account: revoke and withdraw still work. Selling needs a current trading
+  permission, and a new one cannot be registered while live trading is paused."
+  (likewise for a misconfigured setting). Such an account may save live mode again, without the caps, because live
   mode is how its exits are sold. A renewal it prepared and submitted while
   listed that lands after it left the list is still activated: on Solana it
   already replaced the permission before it, so without it nothing could be

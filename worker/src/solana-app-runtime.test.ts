@@ -30,7 +30,7 @@ import { buildWithdrawSolanaVaultInstruction, SOLANA_TRANSFER_HOOK_NAMES_OWNER }
 import { SOLANA_LIVE_SELL_CAP_BELOW_MINIMUM, SOLANA_LIVE_SELL_CAP_UNCHECKED, SOLANA_STATUS_BELOW_BOOK, SOLANA_STATUS_REGISTERED_AFTER_REVOKE, SOLANA_STATUS_USDG_MINT_REFUSED, SOLANA_WITHDRAW_BELOW_BOOK } from "./solana-app-runtime";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, SOLANA_REVOKE_PREPARED_BESIDE, SOLANA_WITHDRAWAL_ABOVE_BOOK,
   SOLANA_WITHDRAWAL_RECORDED_OUTSIDE, SolanaTradingStoreError } from "./solana-trading-store";
-import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED } from "./solana-app-runtime";
+import { SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION } from "./solana-app-runtime";
 import { SOLANA_LIVE_CAP_DEFAULTS, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "./solana-live-rollout";
 
 const TENANT = "0x1111111111111111111111111111111111111111";
@@ -2624,5 +2624,40 @@ test("live rollout: a renewal that lands after the tenant left the list is activ
       await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "renewed-buy" } }),
         rollout(listed === OTHER_TENANT ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_ROLLOUT_MISCONFIGURED, listed === OTHER_TENANT ? "permission" : "configuration"));
     } finally { f.raw.close(); }
+  }
+});
+
+test("live rollout: off the list, an account whose permission expired or was replaced on Solana is never told exits still work: it cannot sell, and only revoke and withdraw remain", async () => {
+  const REGISTER = "Register an owner-approved live trading permission.", EXPIRED = "The on-chain trading permission has expired.";
+  for (const [listed, said] of [[OTHER_TENANT, SOLANA_LIVE_PAUSED_NO_PERMISSION], [`${TENANT},`, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION]] as const) {
+    const exitsOpen = listed === OTHER_TENANT ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_ROLLOUT_MISCONFIGURED;
+    // Expired: the permission the owner signed ran out after the tenant left the list, and no new one can be registered off it.
+    const f = await fixture();
+    try {
+      await readyLive(f); await cashBook(f);
+      const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: listed }, log: () => {} });
+      assert.deepEqual((await off.status(f.scope)).live.blockers, [exitsOpen], "a current permission: exits are open, and said to be");
+      f.clock.now = limits.expiresAtMs;
+      const expired = await off.status(f.scope);
+      assert.ok(expired.live.blockers.includes(EXPIRED) && expired.live.blockers.includes(said), expired.live.blockers.join(" | "));
+      assert.ok(!expired.live.blockers.includes(exitsOpen), "never \"exits still work\"");
+      assert.equal(expired.live.canExit, false);
+      // Revoke and withdraw still prepare.
+      assert.ok((await off.prepareOwnerAction(f.scope, { action: "withdraw", mint: SOLANA_USDG_MINT, amountRaw: "1000000" })).transactionBase64);
+      assert.ok((await off.prepareOwnerAction(f.scope, { action: "revoke" })).transactionBase64);
+    } finally { f.raw.close(); }
+    // Replaced: a renewal submitted while listed landed after the tenant left it; until it is activated the app's permission is not the vault's.
+    const g = await fixture();
+    try {
+      await readyLive(g); await cashBook(g);
+      const chain = ownerChain(g);
+      const setup = await g.app.prepareLive(g.scope, { limits, sessionPublicKey: g.session });
+      const signed = await g.sign(setup.transactionBase64);
+      const registration = await g.app.submitSetup(g.scope, { signedTransactionBase64: signed });
+      chain.land(registration.signature, signed); g.controls.epoch = 2n;
+      const replaced = await g.runtime({ env: { ...g.env, MERRYMEN_SOLANA_LIVE_TENANTS: listed }, log: () => {} }).status(g.scope);
+      assert.ok(replaced.live.blockers.includes(REGISTER) && replaced.live.blockers.includes(said), replaced.live.blockers.join(" | "));
+      assert.ok(!replaced.live.blockers.includes(exitsOpen)); assert.equal(replaced.live.canExit, false);
+    } finally { g.raw.close(); }
   }
 });
