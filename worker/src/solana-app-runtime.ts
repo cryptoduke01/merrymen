@@ -1088,12 +1088,13 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       // The list never stops an exit (the caps bound new permissions' limits, which bound sales too: SALES COUNT AGAINST...);
       // a setting that cannot be read leaves the account off the list (and says the [alert]).
       let onList = false, caps: SolanaLiveCaps | null = null, rolloutMisconfigured = false;
+      try { onList = liveListed(s); } catch { rolloutMisconfigured = true; }
+      try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
+      // Whether the other service runs different list or caps (SETTINGS THAT MUST MATCH, CHECKED): buying waits, below.
+      const differs = await rolloutDiffers(s.db);
       // Whether the vault holds a current permission matching the one the app keeps ("unknown" while it could not be read):
       // without one nothing can be sold, so the exits-only blocker below must not say exits still work.
       let permission: "current" | "missing" | "unknown" = "unknown";
-      try { onList = liveListed(s); } catch { rolloutMisconfigured = true; }
-      try { caps = liveCaps(); } catch { rolloutMisconfigured = true; }
-      const differs = await rolloutDiffers(s.db);
       let programId: string | null = null, vault: string | null = null, cashTokenAccount: string | null = null;
       let balances: { slot: number; cashUsdg: string; wsolRaw: string } | null = null;
       let feePayerView: { lamports: string; exitMinimumLamports: string; buyMinimumLamports: string; lowLamports: string | null; level: FeePayerLevel } | null = null;
