@@ -393,7 +393,9 @@ reads both from its own env, so the web and the Solana worker decide alike.
   proceeds to the session's per-trade and daily USDG limits, as it charges a
   buy's spend, and the SOL it sells to the SOL sold limits (`swap` in
   `contracts/solana/programs/merrymen-vault/src/lib.rs`); admission counts the
-  same way. So a buy is refused (`SOLANA_LIVE_EXIT_RESERVE`) once it would leave
+  same way (a sale at the higher of its quote and its reference value when it
+  is admitted, raised to its actual proceeds when it lands above them, in the
+  transaction that books it). So a buy is refused (`SOLANA_LIVE_EXIT_RESERVE`) once it would leave
   too little of the rolling 24-hour limits to sell the account's whole recorded
   SOL position inside them: the USDG the window already used, the buy, and the
   position after it valued at the independent price plus the reference

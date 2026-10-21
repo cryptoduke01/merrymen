@@ -1211,7 +1211,8 @@ export class SolanaTradingStore implements SolanaLiveJournal {
     return this.db.tx(async tx => {
       await this.bindingIn(tx, true);
       const { tenant } = this.scope;
-      const prior = record(await tx.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, requestId));
+      const row = await tx.prepare("SELECT * FROM solana_runtime_submissions WHERE tenant=? AND owner=? AND request_id=?").get(tenant, owner, requestId) as { notional_raw: string } | undefined;
+      const prior = record(row);
       if (!prior || prior.submission.signature !== signature || settlement.signature !== signature) refuse("Solana settlement does not match the reserved transaction.");
       if (prior.status !== "pending") {
         if (JSON.stringify({ ...prior.settlement, finalizedAtMs: 0 }) !== JSON.stringify({ ...settlement, finalizedAtMs: 0 })) refuse("Solana settlement already exists with different evidence.");
@@ -1255,10 +1256,16 @@ export class SolanaTradingStore implements SolanaLiveJournal {
         raw(book.cashRaw); raw(book.wsolRaw);
         if (raw(book.cashRaw) > raw(book.hwmRaw)) book.hwmRaw = book.cashRaw;
       } else if (input !== 0n || output !== 0n) refuse("A failed Solana transaction cannot book token movements.");
+      // THE ROLLING WINDOW COUNTS WHAT THE PROGRAM CHARGED. A sale is charged its actual proceeds (`received` in the program's
+      // swap), which can land above the notional admission reserved (the higher of its quote and its reference value): the
+      // window then counts those proceeds, in the same transaction that books them. It only ever raises the count, so status,
+      // admission and the exit reserve never see more room than the vault has. A buy is charged the USDG it offered, its notional.
+      let notional = raw(row!.notional_raw);
+      if (settlement.status === "finalized" && prior.submission.intent.inputMint !== SOLANA_USDG_MINT && output > notional) notional = output;
       book.slot = settlement.slot; book.updatedAtMs = clock(this.now);
       await tx.prepare("UPDATE solana_runtime_live_books SET book_json=? WHERE tenant=? AND owner=?").run(JSON.stringify(book), tenant, owner);
-      await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
-        .run(settlement.status, JSON.stringify(settlement), tenant, owner, requestId);
+      await tx.prepare("UPDATE solana_runtime_submissions SET status=?,settlement_json=?,notional_raw=? WHERE tenant=? AND owner=? AND request_id=? AND status='pending'")
+        .run(settlement.status, JSON.stringify(settlement), notional.toString(), tenant, owner, requestId);
       if (resolutionId !== null) {
         // Who booked it is part of the booking: no mark, no booking (the transaction rolls back).
         const marked = await tx.prepare(`UPDATE solana_operator_resolutions SET booked_at_ms=? WHERE id=? AND tenant=? AND owner=? AND request_id=? AND signature=?

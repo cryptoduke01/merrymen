@@ -1603,3 +1603,45 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     await assert.rejects(same.preview(scope, { mode: "live", intent: buy }), (error: unknown) => error instanceof Error && error.message !== SOLANA_LIVE_ROLLOUT_DIFFERS);
   });
 }
+
+for (const dialect of ["sqlite", "postgres"] as const) {
+  const options = dialect === "postgres" && !process.env.MERRYMEN_TEST_PG_URL ? { skip: "Set MERRYMEN_TEST_PG_URL to an isolated PostgreSQL test database." } : {};
+  test(`${dialect}: a sale that lands above its quote counts its actual proceeds in the rolling window, as the program charges them, so the next buy's exit reserve sees them`, options, async t => {
+    // 20 USDG per trade and 50 a day, 0.05 and 0.12 SOL; $500 a SOL, 3% tolerance.
+    const f = await fixture(t, dialect), scope = { tenant: TENANT, owner: OWNER };
+    await f.binding.settings(TENANT, OWNER, (await f.binding.get(TENANT))!.revision, "live", { ...limits, perTradeUsdg: "20000000" });
+    const finalized = (s: SolanaSignedSubmission, amountOut: string): SolanaLiveSettlement => ({ status: "finalized", signature: s.signature, slot: 1001, feeLamports: "10000",
+      amountIn: s.intent.amountRaw, amountOut, finalizedAtMs: NOW + 1 });
+    const notional = async (id: string) => (await f.db.prepare("SELECT notional_raw FROM solana_runtime_submissions WHERE request_id=?").get(id) as { notional_raw: string }).notional_raw;
+    // A 10 USDG buy, booked at its guaranteed 0.0198 SOL: charged the 10 USDG it offered, whatever it received.
+    const buy = buyFor("buy-1", "0", 10_000_000n, { slot: 1000, cash: CASH.toString(), wsol: "0" });
+    assert.equal(await f.store.recordSigned(buy), true);
+    await f.store.settle(OWNER, "buy-1", buy.signature, finalized(buy, "21000000"));
+    assert.equal(await notional("buy-1"), "10000000");
+    // The whole 0.0198 SOL sold, quoted at 9.9 USDG and reserved at it, lands at 12 USDG (positive slippage): the window counts 12.
+    const exit = sale("exit-1", "1", "19800000", { slot: 1001, cash: "90000000", wsol: "21000000" });
+    assert.equal(exit.risk.notionalUsdg, "9900000");
+    assert.equal(await f.store.recordSigned(exit), true);
+    assert.deepEqual(await solanaRollingLimitUse(f.db, scope, NOW), { notionalRaw: 19_900_000n, soldWsolRaw: 19_800_000n });
+    const receipt = finalized(exit, "12000000");
+    await f.store.settle(OWNER, "exit-1", exit.signature, receipt);
+    assert.equal(await notional("exit-1"), "12000000");
+    assert.deepEqual(await solanaRollingLimitUse(f.db, scope, NOW), { notionalRaw: 22_000_000n, soldWsolRaw: 19_800_000n });
+    // The same evidence again changes nothing.
+    await f.store.settle(OWNER, "exit-1", exit.signature, { ...receipt, finalizedAtMs: NOW + 2 });
+    assert.equal(await notional("exit-1"), "12000000");
+    // A 14 USDG buy, which leaves 0.0292 SOL ($14.60) to sell, would fit what the quote left (19.9 + 14 + 15.04 <= 50), not what the
+    // vault was charged (22 + 14 + 15.04 > 50). A 13 USDG one fits either (22 + 13 + 14.01).
+    const book = { slot: 1001, cash: "102000000", wsol: "1200000" };
+    await assert.rejects(f.store.recordSigned(buyFor("buy-2", "2", 14_000_000n, book)), (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_EXIT_RESERVE);
+    assert.equal(await f.store.recordSigned(buyFor("buy-3", "2", 13_000_000n, book)), true);
+    // A sale that lands at or below its reserved notional keeps it; a failed one books nothing and is released as before.
+    await f.store.settle(OWNER, "buy-3", "test-signature-buy-3", { status: "failed", signature: "test-signature-buy-3", slot: 1001, feeLamports: "10000", amountIn: "0", amountOut: "0",
+      finalizedAtMs: NOW + 1 });
+    assert.equal(await notional("buy-3"), "13000000");
+    const low = sale("exit-2", "3", "1200000", book, "600000");
+    assert.equal(await f.store.recordSigned(low), true);
+    await f.store.settle(OWNER, "exit-2", low.signature, finalized(low, "599000"));
+    assert.equal(await notional("exit-2"), low.risk.notionalUsdg);
+  });
+}
