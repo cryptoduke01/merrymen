@@ -9,7 +9,8 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { runStart } from "@/lib/services/attention";
+import { getAddress } from "viem";
+import { conditionOfKey, runStart } from "@/lib/services/attention";
 import { proposalRow } from "@/lib/services/proposals";
 import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
@@ -88,7 +89,7 @@ test("a healthy agent needs nothing, and the parts this connection cannot see ar
   assert.deepEqual(r.items, []);
   assert.deepEqual(r.counts, { act_now: 0, today: 0, fyi: 0 });
   assert.deepEqual(r.agents_checked, [SLUG_A]);
-  assert.deepEqual(r.not_checked.map((n) => n.part), ["proposals", "alert deliveries"]);
+  assert.deepEqual(r.not_checked.map((n) => n.part), ["trade proposals", "settings proposals and agent setup drafts", "post drafts", "alert deliveries"]);
 });
 
 test("permission expiry rises through fyi, today and act_now, each a new key, and an old expiry quietens to fyi", async () => {
@@ -166,6 +167,19 @@ test("a breaker the worker restates every tick is one act_now item from the star
   assert.deepEqual((await ask({}, undefined, NOW + HOUR)).items.filter((i) => i.kind === "breaker"), []);
 });
 
+test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it)", async () => {
+  const earlier = "0x52908400098527886e0f7030069857d2e4169ee7" as const; // EIP-55's own mixed-case example
+  const { d, ask } = await setup({ agentA: { accounts: [ACCOUNT_A, earlier] } });
+  agentRow(d, ACCOUNT_A);
+  const checksummed = getAddress(earlier);
+  assert.equal(checksummed, "0x52908400098527886E0F7030069857D2E4169EE7");
+  for (let at = NOW - HOUR; at <= NOW - 60; at += 240) event(d, checksummed, BREAKER, at);
+  refused(d, checksummed, "daily-cap", NOW - 600);
+  const r = await ask();
+  assert.equal(only(r, "breaker").severity, "act_now");
+  assert.equal(only(r, "daily-cap").severity, "fyi");
+});
+
 test("kill switch, a stale worker, a provider failure and reached caps are named at their severities", async () => {
   const { d, ask } = await setup();
   agentRow(d, ACCOUNT_A, { status: "killed" });
@@ -198,7 +212,7 @@ test("kill switch, a stale worker, a provider failure and reached caps are named
   assert.equal((await ask()).items.filter((i) => i.kind === "ops-cap").length, 0);
 });
 
-test("seen_keys: what was reported is not new, a fixed condition resolves, a risen severity is news, and an unchecked key never resolves", async () => {
+test("seen_keys: what was reported is not new, a fixed condition resolves, a risen severity is news but not a resolution, and an unchecked key never resolves", async () => {
   const { d, ask } = await setup({ agentA: { expiresAt: NOW + 2 * DAY } });
   agentRow(d, ACCOUNT_A, { blocker: "no-cash" });
   const first = await ask();
@@ -213,11 +227,19 @@ test("seen_keys: what was reported is not new, a fixed condition resolves, a ris
 
   d.raw.prepare("UPDATE agents SET live_blocker = NULL").run();
   const later = await ask({ seen_keys: seen }, undefined, NOW + 2 * DAY - 9 * HOUR);
-  assert.deepEqual(later.resolved_keys.sort(), [first.items.find((i) => i.kind === "live-blocker")!.key, first.items.find((i) => i.kind === "permission-expiring")!.key].sort());
+  const blockerKey = first.items.find((i) => i.kind === "live-blocker")!.key;
+  const twoDaysKey = first.items.find((i) => i.kind === "permission-expiring")!.key;
+  assert.deepEqual(later.resolved_keys, [blockerKey], "funded: resolved. The permission is not: it got closer to expiry");
   const risen = only(later, "permission-expiring");
   assert.equal(risen.severity, "act_now");
   assert.equal(risen.new, true, "nine hours from expiry is news even though two days was reported");
   assert.ok(!later.resolved_keys.includes(elsewhere), "a key about an agent this read did not check stays unknown");
+
+  // Past expiry the same permission is an expired item; neither earlier key resolves.
+  const expired = await ask({ seen_keys: [twoDaysKey, risen.key] }, undefined, NOW + 2 * DAY + HOUR);
+  assert.equal(only(expired, "permission-expired").new, true);
+  assert.deepEqual(expired.resolved_keys, []);
+  assert.equal(conditionOfKey(twoDaysKey), conditionOfKey(only(expired, "permission-expired").key));
 
   const bad = await runTool(attention, { seen_keys: ["not a key"] }, (await setup()).pa, "trace-test", { now: () => NOW });
   assert.equal(errorOf(bad).code, "invalid_input");
@@ -230,12 +252,17 @@ test("proposals waiting for approval appear only under a proposal scope, link to
   assert.equal(made.isError, undefined, made.content[0]?.text);
   const id = (made.structuredContent as { proposal_id: string }).proposal_id;
 
-  const r = await ask();
+  const tradeKey = `proposal-waiting:${SLUG_A}:trade.prp_${"0".repeat(32)}`;
+  const r = await ask({ seen_keys: [tradeKey] });
   const item = only(r, "proposal-waiting");
   assert.equal(item.severity, "today");
+  assert.equal(item.key, `proposal-waiting:${SLUG_A}:post.${id}`);
   assert.equal(item.link, `https://app.test/connect/approve/${id}`);
   assert.equal(item.agent, SLUG_A);
-  assert.ok(!r.not_checked.some((n) => n.part === "proposals"));
+  // social:write sees posts and nothing else: the other kinds are named as unknown, and a seen trade proposal cannot resolve.
+  assert.deepEqual(r.not_checked.map((n) => n.part), ["trade proposals", "settings proposals and agent setup drafts", "alert deliveries"]);
+  assert.deepEqual(r.resolved_keys, []);
+  assert.deepEqual((await ask({ seen_keys: [`proposal-waiting:${SLUG_A}:constructor.x`] })).resolved_keys, [], "a made-up kind is never checked");
 
   const past = await ask({}, pa, NOW + 30 * DAY);
   assert.deepEqual(past.items.filter((i) => i.kind === "proposal-waiting"), [], "a lapsed proposal is not waiting");

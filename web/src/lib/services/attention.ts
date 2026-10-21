@@ -19,7 +19,8 @@
  *
  * NOT A SECOND OPINION. Every condition here is one another surface already
  * reports, read the same way:
- *   status, live blocker, worker liveness ..... agent-status.ts readAgentStatus
+ *   status, live blocker, worker liveness ..... agent-status.ts (readAgentRow,
+ *                                                blockerView, freshWithin)
  *   what a blocker means and who fixes it ..... live-blocker.ts blockerAdvice
  *   permission expiry .......................... the signed grant (OwnedAgent.expiresAt)
  *   kill switch, breaker, provider failure .... the events the risk_halt and
@@ -31,13 +32,16 @@
  * signed permission doing its job: the item says what it holds back and that
  * selling is not blocked, and has no what_to_do.
  *
- * READ-ONLY. Nothing here expires a proposal, follows a trade or marks an
- * alert sent: a check every few hours must not change what it checks.
+ * READ-ONLY AND INDEXED. Nothing here expires a proposal, follows a trade or
+ * marks an alert sent: a check every few hours must not change what it checks.
+ * Events and trades are read by the exact spellings an account can be stored
+ * under (notify.ts spellings), never lower(agent_id), so the (agent_id,
+ * created_at) indexes serve them; the agent's row is the only status read.
  */
 import type { Db } from "../../../../worker/src/db";
-import { classifyAlertEvent, DELIVERY_ERROR_TEXT, PROVIDER_TEXT } from "../../../../worker/src/mcp/notify";
+import { classifyAlertEvent, DELIVERY_ERROR_TEXT, PROVIDER_TEXT, spellings } from "../../../../worker/src/mcp/notify";
 import { blockerAdvice } from "../live-blocker";
-import { readAgentStatus } from "./agent-status";
+import { blockerView, freshWithin, readAgentRow } from "./agent-status";
 import type { SettingsView } from "./settings-view";
 
 export type Severity = "act_now" | "today" | "fyi";
@@ -88,7 +92,7 @@ export const ATTENTION_LOOKBACK_SEC = DAY;
 const EXPIRED_LOUD_SEC = 3 * DAY;
 /** A cap refusal newer than this means the cap is holding buys now. */
 const CAP_CURRENT_SEC = 2 * HOUR;
-const ADDRESS = /^0x[0-9a-f]{40}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const MAX_ACCOUNTS = 32;
 
 const EXPIRY_TIERS: ReadonlyArray<{ within: number; severity: Severity; tag: string }> = [
@@ -125,8 +129,21 @@ export function runStart(newestFirst: readonly number[], gap: number, floor: num
   return truncated || start - floor <= gap ? null : start;
 }
 
-function accountList(accounts: readonly string[]): string[] {
-  return [...new Set(accounts.map((a) => a.toLowerCase()).filter((a) => ADDRESS.test(a)))].slice(0, MAX_ACCOUNTS);
+/** Every stored spelling of every account, for `agent_id IN (…)`. */
+function accountSpellings(accounts: readonly string[]): string[] {
+  const list = [...new Set(accounts.filter((a) => ADDRESS.test(a)).map((a) => a.toLowerCase()))].slice(0, MAX_ACCOUNTS);
+  return [...new Set(list.flatMap(spellings))];
+}
+
+/**
+ * The condition a key is about, whatever its severity: a permission is one
+ * condition from its first expiry tier through its expiry, so a key replaced
+ * by a more severe one for the same permission has not resolved.
+ */
+export function conditionOfKey(key: string): string {
+  const [kind, agent, rest = ""] = key.split(":");
+  if (kind === "permission-expiring" || kind === "permission-expired") return `permission:${agent}:${rest.split("-")[0]}`;
+  return key;
 }
 
 /** Permission items: none signed, expired, or inside an expiry tier. */
@@ -205,20 +222,22 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   const items = permissionItems(slug, account, input.expiresAt, now, links);
   if (!account) return { name: input.settings?.agentName ?? null, items };
 
-  const status = await readAgentStatus(db, account, input.settings, now);
-  const fresh = status.freshness;
+  const row = await readAgentRow(db, account);
+  const status = row?.status ?? null;
+  const freshWithinSec = freshWithin(input.settings?.tickSeconds);
+  const beat = row?.beat_at ?? null;
   // A condition the worker restates every tick is current while its newest
   // sighting is younger than two heartbeat windows (never under half an hour),
   // and a run of sightings is one occurrence while they are no further apart
   // than an hour, or two heartbeat windows when that is longer.
-  const currentSec = Math.max(30 * MINUTE, 2 * fresh.fresh_within_s);
-  const gapSec = Math.max(HOUR, 2 * fresh.fresh_within_s);
+  const currentSec = Math.max(30 * MINUTE, 2 * freshWithinSec);
+  const gapSec = Math.max(HOUR, 2 * freshWithinSec);
   const floor = now - ATTENTION_LOOKBACK_SEC;
-  const ids = accountList(input.accounts.length ? input.accounts : [account]);
+  const ids = accountSpellings(input.accounts.length ? input.accounts : [account]);
   const inList = ids.map(() => "?").join(", ");
 
   const events = ids.length ? (await db.prepare(
-    `SELECT message, created_at FROM events WHERE lower(agent_id) IN (${inList}) AND level IN ('warn', 'err') AND created_at >= ?
+    `SELECT message, created_at FROM events WHERE agent_id IN (${inList}) AND level IN ('warn', 'err') AND created_at >= ?
       ORDER BY created_at DESC LIMIT ${ATTENTION_EVENTS_MAX}`,
   ).all(...ids, floor)) as Array<{ message: string; created_at: number }> : [];
   const truncated = events.length >= ATTENTION_EVENTS_MAX;
@@ -228,7 +247,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     if (kind) seen[kind].push(Number(ev.created_at));
   }
 
-  if (status.status === "killed") {
+  if (status === "killed") {
     const at = seen.kill[0] ?? null;
     items.push({
       key: `killed:${slug}:${at ?? "open"}`, severity: "fyi", kind: "killed", agent: slug,
@@ -238,7 +257,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       started_at: at, ends_at: null,
     });
   }
-  if (status.status === "error") {
+  if (status === "error") {
     items.push({
       key: `arm-error:${slug}:open`, severity: "today", kind: "arm-error", agent: slug,
       title: "The agent could not arm its trading key",
@@ -246,18 +265,18 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       owner_can_fix: false, what_to_do: null, link: null, started_at: null, ends_at: null,
     });
   }
-  const running = status.status === "active" || status.status === "armed";
-  if (running && fresh.worker_fresh === false && fresh.heartbeat_at !== null) {
+  const running = status === "active" || status === "armed";
+  if (running && beat !== null && now - beat > freshWithinSec) {
     items.push({
-      key: `worker-stale:${slug}:${fresh.heartbeat_at}`, severity: "today", kind: "worker-stale", agent: slug,
+      key: `worker-stale:${slug}:${beat}`, severity: "today", kind: "worker-stale", agent: slug,
       title: "The agent's worker stopped reporting",
-      detail: `The worker has not reported since ${iso(fresh.heartbeat_at)}, so the agent may not be trading or running its exits. Merrymen restarts workers; the owner cannot fix this from here.`,
+      detail: `The worker has not reported since ${iso(beat)}, so the agent may not be trading or running its exits. Merrymen restarts workers; the owner cannot fix this from here.`,
       owner_can_fix: false, what_to_do: null, link: null,
-      started_at: fresh.heartbeat_at + fresh.fresh_within_s, ends_at: null,
+      started_at: beat + freshWithinSec, ends_at: null,
     });
   }
 
-  const b = status.live_blocker;
+  const b = blockerView(row?.live_blocker ?? null);
   const advice = b ? blockerAdvice(b.rule) : null;
   // A deliberate state (live trading off, a key arming on the next pass) is not a fault and needs nobody.
   if (b && (advice?.fault ?? true)) {
@@ -301,7 +320,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
 
   const caps = ids.length ? (await db.prepare(
     `SELECT reject_rule AS rule, MIN(created_at) AS first, MAX(created_at) AS last FROM trades
-      WHERE lower(agent_id) IN (${inList}) AND status = 'rejected' AND reject_rule IN ('daily-cap', 'ops-cap') AND created_at >= ?
+      WHERE agent_id IN (${inList}) AND status = 'rejected' AND reject_rule IN ('daily-cap', 'ops-cap') AND created_at >= ?
       GROUP BY reject_rule`,
   ).all(...ids, floor)) as Array<{ rule: string; first: number; last: number }> : [];
   for (const c of caps) {
@@ -319,7 +338,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       owner_can_fix: false, what_to_do: null, link: null, started_at: start, ends_at: null,
     });
   }
-  return { name: status.name, items };
+  return { name: row?.name ?? input.settings?.agentName ?? null, items };
 }
 
 const PROPOSAL_TITLE: Readonly<Record<string, string>> = {
@@ -332,7 +351,7 @@ const PROPOSAL_TITLE: Readonly<Record<string, string>> = {
 /** One item per proposal still waiting for the owner. The caller filters to what the connection may see. */
 export function proposalItems(rows: ReadonlyArray<{ id: string; kind: string; agent_slug: string | null; created_at: number; expires_at: number; approval_url: string | null }>): AttentionItem[] {
   return rows.map((r) => ({
-    key: `proposal-waiting:${r.agent_slug ?? "-"}:${r.id.toLowerCase()}`, severity: "today" as const, kind: "proposal-waiting" as const, agent: r.agent_slug,
+    key: `proposal-waiting:${r.agent_slug ?? "-"}:${r.kind}.${r.id.toLowerCase()}`, severity: "today" as const, kind: "proposal-waiting" as const, agent: r.agent_slug,
     title: PROPOSAL_TITLE[r.kind] ?? "A proposal is waiting for approval",
     detail: `Nothing happens unless the owner approves it in Merrymen. It expires at ${iso(r.expires_at)}.`,
     owner_can_fix: true, what_to_do: "Open the approval page to review it, then approve or decline.", link: r.approval_url,

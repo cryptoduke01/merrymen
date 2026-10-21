@@ -435,7 +435,8 @@ function bookTag(mode: string | null): string {
 }
 const bookOf = (mode: string | null): Candidate["book"] => (mode === "live" ? "live" : mode === "paper" ? "paper" : "unknown");
 
-function spellings(account: string): string[] {
+/** An account as stored, lowercase and EIP-55: the spellings `agent_id = ?` can meet, so an IN list over them uses the (agent_id, …) indexes. */
+export function spellings(account: string): string[] {
   const lower = account.toLowerCase();
   const out = new Set([account, lower]);
   if (isAddress(lower, { strict: false })) out.add(getAddress(lower));

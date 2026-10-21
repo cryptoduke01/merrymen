@@ -10,19 +10,24 @@
  */
 import * as z from "zod";
 import {
-  KEY_RE, SEVERITIES, SEVERITY_MEANING, deliveryItems, proposalItems, rankItems, readAgentAttention,
+  KEY_RE, SEVERITIES, SEVERITY_MEANING, conditionOfKey, deliveryItems, proposalItems, rankItems, readAgentAttention,
   type AttentionItem, type AttentionLinks, type Severity,
 } from "@/lib/services/attention";
-import { connectionStanding, KIND_CAPABILITY, listProposalRows } from "@/lib/services/proposals";
+import { connectionStanding, KIND_CAPABILITY, listProposalRows, type ProposalKind } from "@/lib/services/proposals";
 import { settingsReader } from "@/lib/services/settings-view";
 import { mcpConfig } from "../config";
 import { hasCapability } from "../policy";
-import type { Capability } from "../scopes";
+import { scopeFor, type Capability } from "../scopes";
 import { defineTool } from "../tool";
 import { approvalUrl } from "./proposals";
 import { AGENT_ARG, isoOrNull, untrusted } from "./shared";
 
-const PROPOSAL_CAPABILITIES: readonly Capability[] = ["trade.propose", "drafts.write", "social.write"];
+/** What the owner calls each scope's proposals, for not_checked. */
+const PROPOSAL_SCOPES: ReadonlyArray<{ capability: Capability; what: string }> = [
+  { capability: "trade.propose", what: "trade proposals" },
+  { capability: "drafts.write", what: "settings proposals and agent setup drafts" },
+  { capability: "social.write", what: "post drafts" },
+];
 /** Waiting proposals read per call. Trade proposals live 15 minutes, so more than this is a runaway client. */
 const PROPOSALS_MAX = 50;
 const MAX_SEEN = 100;
@@ -61,7 +66,7 @@ const getAttention = defineTool({
     items: z.array(ITEM).describe("Most severe first; within a severity, new before already seen, then the most recent first"),
     counts: COUNTS,
     new_counts: COUNTS,
-    resolved_keys: z.array(z.string()).describe("Keys from seen_keys whose condition no longer holds: renewed, funded, recovered, approved or lapsed"),
+    resolved_keys: z.array(z.string()).describe("Keys from seen_keys whose condition no longer holds: renewed, funded, recovered, approved or lapsed. A key replaced by a more severe one for the same condition is not resolved"),
     severity_meaning: z.object({ act_now: z.string(), today: z.string(), fyi: z.string() }),
     agents_checked: z.array(z.string()),
     not_checked: z.array(z.object({ part: z.string(), why: z.string() })).describe("What this read could not look at, and why; an absent item there is unknown, not fine"),
@@ -92,25 +97,30 @@ const getAttention = defineTool({
 
     // Proposals: only the kinds this connection may see, about agents it was
     // given, from apps that still stand behind them. Read, never expired here.
-    const proposalsChecked = PROPOSAL_CAPABILITIES.some((c) => hasCapability(ctx.principal, c));
-    if (proposalsChecked) {
+    // Each kind is checked or not on its own: holding social:write says
+    // nothing about trade proposals, which stay unknown.
+    const kindChecked = (kind: string) => Object.hasOwn(KIND_CAPABILITY, kind) && hasCapability(ctx.principal, KIND_CAPABILITY[kind as ProposalKind]);
+    let proposalsCut = false;
+    if (PROPOSAL_SCOPES.some((s) => hasCapability(ctx.principal, s.capability))) {
       const d = await ctx.mcp();
       const rows = await listProposalRows(d.db, ctx.principal.tenant, { status: "awaiting_approval", limit: PROPOSALS_MAX });
+      // A full page may have left an open proposal unread: none of its seen keys can resolve.
+      proposalsCut = rows.length >= PROPOSALS_MAX;
       const waiting = [];
       for (const r of rows) {
-        if (r.expires_at <= now || !hasCapability(ctx.principal, KIND_CAPABILITY[r.kind])) continue;
+        if (r.expires_at <= now || !kindChecked(r.kind)) continue;
         if (r.agent_slug === null ? ref !== undefined : !slugs.has(r.agent_slug)) continue;
         if (!(await connectionStanding(d.db, r)).ok) continue;
         waiting.push({ id: r.id, kind: r.kind, agent_slug: r.agent_slug, created_at: r.created_at, expires_at: r.expires_at, approval_url: issuer ? approvalUrl(r.id) : null });
       }
       items.push(...proposalItems(waiting));
+    }
+    if ((ctx.principal.profile ?? "full") === "directory") {
+      notChecked.push({ part: "proposals", why: "The connector-directory listing never sees proposals; they are listed in Merrymen." });
     } else {
-      notChecked.push({
-        part: "proposals",
-        why: (ctx.principal.profile ?? "full") === "directory"
-          ? "The connector-directory listing never sees proposals; they are listed in Merrymen."
-          : "Seeing proposals needs one of the trade:propose, drafts:write or social:write scopes.",
-      });
+      for (const s of PROPOSAL_SCOPES) {
+        if (!hasCapability(ctx.principal, s.capability)) notChecked.push({ part: s.what, why: `Seeing them needs the ${scopeFor(s.capability)} scope.` });
+      }
     }
 
     // Alert messages to the owner's Telegram that died in the last day.
@@ -137,16 +147,18 @@ const getAttention = defineTool({
 
     const seen = new Set(seen_keys ?? []);
     const ranked = rankItems(items.map((i) => ({ ...i, new: !seen.has(i.key) })));
-    const open = new Set(ranked.map((i) => i.key));
-    // A seen key resolves only if this read looked where it lives: a key about
-    // an agent not checked, or a part this connection cannot see, stays unknown.
+    // A seen key resolves only when its condition is gone, not when a more
+    // severe key for the same condition replaced it, and only if this read
+    // looked where it lives: a key about an agent not checked, or a part (or
+    // proposal kind) this connection cannot see, stays unknown.
+    const openConditions = new Set(ranked.map((i) => conditionOfKey(i.key)));
     const looked = (key: string) => {
-      const [kind, agent = ""] = key.split(":");
+      const [kind, agent = "", rest = ""] = key.split(":");
       if (kind === "alerts-failing") return alertsChecked && ref === undefined;
-      if (kind === "proposal-waiting") return proposalsChecked && (agent === "-" ? ref === undefined : slugs.has(agent));
+      if (kind === "proposal-waiting") return !proposalsCut && kindChecked(rest.split(".")[0]!) && (agent === "-" ? ref === undefined : slugs.has(agent));
       return slugs.has(agent);
     };
-    const resolved = [...seen].filter((k) => !open.has(k) && looked(k));
+    const resolved = [...seen].filter((k) => !openConditions.has(conditionOfKey(k)) && looked(k));
 
     const count = (pick: (i: (typeof ranked)[number]) => boolean) =>
       Object.fromEntries(SEVERITIES.map((s) => [s, ranked.filter((i) => i.severity === s && pick(i)).length])) as Record<Severity, number>;
