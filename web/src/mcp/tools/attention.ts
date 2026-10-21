@@ -116,6 +116,7 @@ const getAttention = defineTool({
       const rows = await liveAwaitingRows(d.db, ctx.principal.tenant, now, PROPOSALS_MAX);
       // A full page may have left an open proposal unread: none of its seen keys can resolve.
       proposalsCut = rows.length >= PROPOSALS_MAX;
+      if (proposalsCut) notChecked.push({ part: "older waiting proposals", why: `More proposals are waiting than one read takes (${PROPOSALS_MAX}); only the newest were read, and Merrymen lists them all.`, scope: null });
       const waiting = [];
       for (const r of rows) {
         if (!kindChecked(r.kind)) continue;

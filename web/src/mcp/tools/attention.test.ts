@@ -12,7 +12,7 @@ import { afterEach, test } from "node:test";
 import { getAddress } from "viem";
 import { ATTENTION_EVENTS_MAX, conditionOfKey, runStart } from "@/lib/services/attention";
 import { settingsArmRefusal } from "../../../../worker/src/settings";
-import { proposalRow } from "@/lib/services/proposals";
+import { MAX_OPEN_PROPOSALS, proposalRow } from "@/lib/services/proposals";
 import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
 import { resetMetricsForTest } from "../observe";
@@ -402,6 +402,15 @@ test("proposals waiting for approval appear only under a proposal scope, link to
   }
   const crowded = await ask({}, pa, NOW + 100);
   assert.equal(only(crowded, "proposal-waiting").key, `proposal-waiting:${SLUG_A}:post.${id}`);
+  assert.ok(!crowded.not_checked.some((n) => n.part === "older waiting proposals"), "lapsed rows do not fill the page");
+
+  // More live ones than a page (creation's quota check can be raced): the read says it did not see them all.
+  for (let i = 0; i < 2 * MAX_OPEN_PROPOSALS; i++) {
+    d.raw.prepare(`INSERT INTO mcp_proposals (${cols.join(", ")}) SELECT ${copy} FROM mcp_proposals WHERE id = ?`)
+      .run(`prp_${(0x100 + i).toString(16).padStart(32, "0")}`, NOW + 10 + i, NOW + DAY, id);
+  }
+  const full = await ask({}, pa, NOW + 100);
+  assert.ok(full.not_checked.some((n) => n.part === "older waiting proposals" && n.scope === null));
 
   const past = await ask({}, pa, NOW + 30 * DAY);
   assert.deepEqual(past.items.filter((i) => i.kind === "proposal-waiting"), [], "a lapsed proposal is not waiting");
