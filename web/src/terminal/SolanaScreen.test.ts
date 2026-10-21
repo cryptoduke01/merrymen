@@ -2545,3 +2545,31 @@ test("off the list, an account that went live whose permission expired or was re
   assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION));
   assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
 });
+
+test("an account that went live and later chose paper keeps its live switch off the list, so it can return to live mode to sell its exits", async () => {
+  // Paper is selected, but the account holds a live permission (or a live book): admission sells only in live mode.
+  state = initial("paper"); state.runtime.live.programId = PROGRAM;
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  Object.assign(state.runtime.live, { session: OWNER, canExit: false, blockers: [SOLANA_LIVE_PAUSED, "Live mode is not selected."] });
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); return json({ binding: { ...state.binding, requestedMode: "live", limits: body!.limits } }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.equal(!!liveSwitch(), true, "live mode stays offered: it is how its exits are sold");
+  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
+  assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps: it cannot register while off the list");
+  await act(async () => { liveSwitch()!.click(); });
+  await act(async () => { (ui.container.querySelector("input[type=checkbox]") as HTMLInputElement).click(); });
+  await press("Save Solana mode and limits");
+  assert.equal(saved.length, 1, ui.container.textContent!);
+  assert.equal(saved[0]!.mode, "live"); assert.equal(saved[0]!.liveConsent, true);
+  // The same paper account that never went live is offered no live switch.
+  Object.assign(state.runtime.live, { session: null, blockers: ["Live mode is not selected."] });
+  state.binding.requestedMode = "paper";
+  await press("Refresh account");
+  assert.equal(!!liveSwitch(), false);
+});
