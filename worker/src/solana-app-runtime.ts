@@ -33,7 +33,7 @@ import { readSolanaReferencePrice, requireSolanaPythGeneration, solanaLowestRefe
 import { SolanaRpcError } from "./solana-rpc";
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { isSolanaTransactionError } from "./solana-settlement";
-import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, solanaBuyKeepsExitRoom, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse,
+import { ensureSolanaTradingSchema, OPERATOR_HOLD, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE, solanaBuyKeepsExitRoom, solanaExitReserveLimits, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaRollingLimitUse,
   solanaOwnerExpiryProven, solanaQuarantinedWsol, SolanaTradingStore, SolanaTradingStoreError, type SolanaAccountScope,
   type SolanaLiveBook, type SolanaOwnerExpiryProof, type SolanaPreparedSetup, type SolanaWithdrawValuation } from "./solana-trading-store";
 import { SOLANA_REGISTERED_AFTER_REVOKE, SOLANA_RESUMED_AFTER_REVOKE, SOLANA_REVOKE_ALREADY_LANDED, solanaLandedBeside, solanaLiveAfterRevoke, solanaOwnerEpochOffset, solanaRegisteredEpoch,
@@ -1478,8 +1478,12 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
               const used = await solanaRollingLimitUse(s.db, s.scope, observedAtMs);
               const brought = [BigInt(quote.outAmount), BigInt(reference.referenceOut)].reduce((a, b) => a > b ? a : b), positionAfter = held + brought;
               const valued = views.map(view => solanaReferenceWsolValue(positionAfter, view.price)).reduce((a, b) => a > b ? a : b);
+              // Within the limits the vault enforces too, as every provider shows them, where they are below the saved ones
+              // (saved after the permission was registered, say): the vault sells the exit under its own (solanaExitReserveLimits).
+              const reserve = views.reduce((limits, view) => solanaExitReserveLimits(limits, { dailyUsdg: view.daily, dailyWsol: view.dailyWsol }),
+                { dailyUsdg: BigInt(saved.dailyUsdg), dailyWsol: sellLimits.dailyWsol });
               if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: used.notionalRaw, soldWsolRaw: used.soldWsolRaw, buyUsdgRaw: BigInt(current.amountRaw), positionAfterWsolRaw: positionAfter,
-                positionAfterValueUsdgRaw: valued, dailyUsdgRaw: BigInt(saved.dailyUsdg), dailyWsolRaw: sellLimits.dailyWsol, toleranceBps })) {
+                positionAfterValueUsdgRaw: valued, dailyUsdgRaw: reserve.dailyUsdg, dailyWsolRaw: reserve.dailyWsol, toleranceBps })) {
                 throw new SolanaTradingStoreError(SOLANA_LIVE_EXIT_RESERVE);
               }
             }

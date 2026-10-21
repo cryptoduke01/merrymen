@@ -394,7 +394,12 @@ reads both from its own env, so the web and the Solana worker decide alike.
   position after it valued at the independent price plus the reference
   tolerance must fit the USDG per 24 hours limit, and that position must fit
   what sales left of the SOL sold per 24 hours limit
-  ([`solanaBuyKeepsExitRoom`](../worker/src/solana-trading-store.ts)). It is
+  ([`solanaBuyKeepsExitRoom`](../worker/src/solana-trading-store.ts)). Each
+  limit is the lower of the saved one and the registered permission's (as
+  every provider shows the vault holding it, and as activateLive kept it): the
+  vault charges the exit to its own limits, so limits saved above the
+  permission since (the caps raised, say) never let a buy use room the exit
+  will not get. It is
   checked before anything is signed, at the highest price either provider
   serves, and again at admission; it never refuses a sale and never widens a
   limit. The autonomous strategy sizes its buys below it, and a refusal waits

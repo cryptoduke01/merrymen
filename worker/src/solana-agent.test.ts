@@ -566,6 +566,42 @@ test("a live buy refused for the exit reserve (before signing or at admission) i
   assert.equal(control.trades.length, 2, "no buy planned below the live minimum");
 });
 
+test("a live buy is sized within the registered permission's USDG per 24 hours limit where it is below the saved one: the vault sells the exit under its own", async t => {
+  const tick = async (registeredDailyUsdg: string | null) => {
+    const raw = new DatabaseSync(":memory:"), db = wrapSqlite(raw); t.after(() => raw.close());
+    const bindings = new SqlSolanaBindingStore(async () => db, "sqlite", () => NOW);
+    await bindings.bind(TENANT, "did:privy:registered", OWNER);
+    // Saved at 100 USDG a day; 5 USDG strategy trades into a book of 100 USDG and no SOL: every rebalance is a buy.
+    await bindings.settings(TENANT, OWNER, 0, "live", { ...limits, perTradeWsol: "100000000", dailyWsol: "1000000000", expiresAtMs: NOW + 100 * 3_600_000 });
+    await bindings.strategy(TENANT, OWNER, 1, { ...strategy, intervalSeconds: 30 });
+    await ensureSolanaTradingSchema(db);
+    // 8.5 USDG used in the window.
+    await db.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(TENANT, OWNER, "used", "vault", "0", "sig-used", "finalized", NOW - 1000, "8500000",
+      JSON.stringify({ intent: { requestId: "used", inputMint: SOLANA_USDG_MINT, amountRaw: "8500000" } }));
+    // The permission as activateLive keeps it; null: one recorded before limits were kept.
+    const record = { programId: "program", vault: "vault", session: "session", sessionEpoch: "1", registrationSignature: "registration", registeredAtMs: NOW,
+      ...(registeredDailyUsdg ? { limits: { perTradeUsdg: limits.perTradeUsdg, dailyUsdg: registeredDailyUsdg, perTradeWsol: "100000000", dailyWsol: "1000000000" } } : {}) };
+    await db.prepare("INSERT INTO solana_runtime_sessions(tenant,owner,record_json,sealed_seed) VALUES(?,?,?,?)").run(TENANT, OWNER, JSON.stringify(record), "sealed");
+    const trades: Array<{ inputMint: string; amountRaw: string }> = [];
+    const runtime = {
+      status: async () => ({ paper: null, live: { balances: {}, tradable: { cashUsdg: "100000000", wsolRaw: "0" }, pending: [], ready: true, canExit: true, blockers: [] } }),
+      trade: async (_scope: unknown, request: { intent: { inputMint: string; amountRaw: string } }) => { trades.push(request.intent); return {}; },
+    } as unknown as Parameters<typeof createSolanaAgent>[0]["runtime"];
+    const market: SolanaPaperMarket = { readMint: async () => { throw new Error("unused"); }, quote: async () => { throw new Error("no SOL held, no mark"); } };
+    const outcomes = (await createSolanaAgent({ db, runtime, market, now: () => NOW }).tick()).map(r => r.outcome);
+    return { outcomes, trades };
+  };
+  // Registered at 10 USDG a day: 1.5 USDG is left, too little for a 1 USDG buy and its exit, so none is planned (in band).
+  assert.deepEqual(await tick("10000000"), { outcomes: ["held"], trades: [] });
+  // Registered above the saved 100, or before limits were kept: the saved limit sizes it, and the strategy's 5 USDG buy is tried.
+  for (const registered of ["500000000", null]) {
+    const roomy = await tick(registered);
+    assert.deepEqual(roomy.outcomes, ["submitted"], String(registered));
+    assert.deepEqual(roomy.trades.map(i => [i.inputMint, i.amountRaw]), [[SOLANA_USDG_MINT, "5000000"]], String(registered));
+  }
+});
+
 test("expired attempts that count for more than half of the day's operations say a [warn]; within half, or covered by the allowance, nothing", async t => {
   // 3 of 4 operations counted: more than half.
   const high = await expiryAccount(t, { maxOpsPerDay: 4, expired: 3 });

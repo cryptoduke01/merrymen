@@ -478,6 +478,18 @@ export function solanaBuyKeepsExitRoom(input: { usedUsdgRaw: bigint; soldWsolRaw
     && input.soldWsolRaw + input.positionAfterWsolRaw <= input.dailyWsolRaw;
 }
 /**
+ * The daily limits EXITS KEEP ROOM... keeps room within: for each, the lower of the saved limits and those of the permission
+ * registered on the vault, when known (`registered`: the session record's kept limits, or what a provider shows the vault
+ * holding). The vault charges a sale to its own limits, whatever was saved since: saved limits above them (the caps raised and
+ * the limits saved again, under the same permission) must not let a buy use room the vault will not give the exit.
+ */
+export function solanaExitReserveLimits(saved: { dailyUsdg: bigint; dailyWsol: bigint },
+  registered: { dailyUsdg: string | bigint; dailyWsol: string | bigint } | undefined): { dailyUsdg: bigint; dailyWsol: bigint } {
+  if (!registered) return saved;
+  const lower = (a: bigint, b: string | bigint) => BigInt(b) < a ? BigInt(b) : a;
+  return { dailyUsdg: lower(saved.dailyUsdg, registered.dailyUsdg), dailyWsol: lower(saved.dailyWsol, registered.dailyWsol) };
+}
+/**
  * For planning only (the autonomous strategy sizes its buys by it, so it does not build a route admission would refuse): the
  * largest buy, in USDG, that keeps the USDG room EXITS KEEP ROOM... asks for, with the position held worth `positionValueUsdgRaw`
  * and what the buy brings valued at up to the tolerance above what it costs. Zero when none does. The SOL sold room is left to the
@@ -1159,9 +1171,11 @@ export class SolanaTradingStore implements SolanaLiveJournal {
       if (buying) {
         const brought = [raw(s.quote.outAmount, false), raw(reference.referenceOut, false)].reduce((a, b) => a > b ? a : b);
         const positionAfter = raw(book.wsolRaw) + brought;
+        // Within the registered permission's limits too, kept in the session record, where they are below the saved ones.
+        const reserve = solanaExitReserveLimits({ dailyUsdg: raw(limits.dailyUsdg, false), dailyWsol: sellLimits.dailyWsol }, session.limits);
         if (!solanaBuyKeepsExitRoom({ usedUsdgRaw: windowNotional(counted), soldWsolRaw: soldToday, buyUsdgRaw: notional, positionAfterWsolRaw: positionAfter,
-          positionAfterValueUsdgRaw: solanaReferenceWsolValue(positionAfter, reference.reference), dailyUsdgRaw: raw(limits.dailyUsdg, false),
-          dailyWsolRaw: sellLimits.dailyWsol, toleranceBps })) refuse(SOLANA_LIVE_EXIT_RESERVE);
+          positionAfterValueUsdgRaw: solanaReferenceWsolValue(positionAfter, reference.reference), dailyUsdgRaw: reserve.dailyUsdg,
+          dailyWsolRaw: reserve.dailyWsol, toleranceBps })) refuse(SOLANA_LIVE_EXIT_RESERVE);
       }
       this.checkAdmissionSignal();
       const inserted = await tx.prepare(`INSERT INTO solana_runtime_submissions(tenant,owner,request_id,vault,sequence,signature,status,created_at_ms,notional_raw,submission_json)

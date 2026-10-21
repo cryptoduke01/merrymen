@@ -13,7 +13,7 @@ import { SOLANA_REFERENCE_DEFAULT_TOLERANCE_BPS, SOLANA_REFERENCE_MAX_TOLERANCE_
 import { getSolanaRuntimeDb } from "./solana-runtime-db";
 import { ensureSolanaTradingSchema, SOLANA_AUTONOMOUS_REQUEST_PREFIX, SOLANA_DEFAULT_EXPIRED_ATTEMPT_ALLOWANCE, SOLANA_EXPIRED_ATTEMPTS_EXHAUSTED, SOLANA_LIVE_EXIT_RESERVE,
   SOLANA_OPERATOR_HOLD_ALL, solanaAutonomousSchedule, solanaExitReserveBuyRoom, solanaExpiredAttemptAllowance, solanaExpiredAttemptUse, solanaPendingOwnerScopes,
-  solanaPendingOwnerTransactions, solanaRollingLimitUse, SolanaTradingStoreError, type SolanaAccountScope } from "./solana-trading-store";
+  solanaPendingOwnerTransactions, solanaRollingLimitUse, SolanaTradingStoreError, type SolanaAccountScope, type SolanaRegisteredSession } from "./solana-trading-store";
 
 export interface SolanaRebalanceInput {
   cashRaw: string; wsolRaw: string; solValueUsdgRaw: string; limits: SolanaPaperLimits;
@@ -251,6 +251,17 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
   // because expired attempts used up its daily operations, by settings revision.
   // Only provider load rides on this: admission spacing is durable in the store.
   const checked = new Map<string, { revision: number; atMs: number }>();
+  /**
+   * The USDG per 24 hours limit of the permission registered for this account, as activateLive kept it in the session record;
+   * undefined without one (or one recorded before limits were kept). For planning only: admission reads it itself.
+   */
+  const registeredDailyUsdg = async (scope: SolanaAccountScope): Promise<bigint | undefined> => {
+    const row = await options.db.prepare("SELECT record_json FROM solana_runtime_sessions WHERE tenant=? AND owner=?").get(scope.tenant, scope.owner) as { record_json: string } | undefined;
+    try {
+      const daily = row ? (JSON.parse(row.record_json) as SolanaRegisteredSession).limits?.dailyUsdg : undefined;
+      return typeof daily === "string" && /^[0-9]{1,20}$/.test(daily) ? BigInt(daily) : undefined;
+    } catch { return undefined; }
+  };
   const admitted = async (scope: SolanaAccountScope, requestId: string) => !!(
     await options.db.prepare("SELECT 1 FROM solana_runtime_autonomous_attempts WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
     await options.db.prepare("SELECT 1 FROM solana_runtime_paper_trades WHERE tenant=? AND owner=? AND request_id=?").get(scope.tenant, scope.owner, requestId) ??
@@ -337,11 +348,13 @@ export function createSolanaAgent(options: SolanaAgentOptions) {
           }
           // A live buy keeps room to sell the whole position inside the rolling window (EXITS KEEP ROOM...): sized below it here, so
           // no route is built for a buy assessRisk would refuse. The mark is Jupiter's guaranteed output, which may sit up to the
-          // tolerance below the independent price the check values the position at.
+          // tolerance below the independent price the check values the position at. Within the registered permission's USDG per
+          // 24 hours limit too, where it is below the saved one (solanaExitReserveLimits): the vault sells the exit under its own.
           let buyRoomUsdgRaw: string | undefined;
           if (row.requested_mode === "live") {
-            const used = await solanaRollingLimitUse(options.db, scope, now());
-            buyRoomUsdgRaw = solanaExitReserveBuyRoom({ usedUsdgRaw: used.notionalRaw, dailyUsdgRaw: BigInt(limits.dailyUsdg),
+            const used = await solanaRollingLimitUse(options.db, scope, now()), registered = await registeredDailyUsdg(scope);
+            const daily = registered !== undefined && registered < BigInt(limits.dailyUsdg) ? registered : BigInt(limits.dailyUsdg);
+            buyRoomUsdgRaw = solanaExitReserveBuyRoom({ usedUsdgRaw: used.notionalRaw, dailyUsdgRaw: daily,
               positionValueUsdgRaw: BigInt(solValueUsdgRaw) * 10_000n / headroom, toleranceBps }).toString();
           }
           let intent = planSolanaRebalance({ cashRaw, wsolRaw, solValueUsdgRaw, limits, strategy, mode: row.requested_mode, revision, nowMs: now(), attempt: schedule.attempt,

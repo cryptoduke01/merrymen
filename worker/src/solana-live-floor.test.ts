@@ -212,7 +212,7 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
   const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
   return { app, scope, sends, submissions, agent, net, runtime, served, pythReads, get db() { return db; }, rpc, env, clock, sessionKeys, vault, vaultState, read, reopen, feePayer, cashAta, wsolAta,
-    market };
+    market, bindings };
 }
 /** The compute-unit limit and price a signed swap carries (ComputeBudget instructions 2 and 3). */
 function computeBudget(submission: SolanaSignedSubmission): { units: number; price: bigint } {
@@ -1298,4 +1298,60 @@ test("live rollout: the worker publishes its settings with its heartbeat; once t
     localTestDeployment: true })).tick(), []);
   assert.ok(await idle.db.prepare("SELECT 1 FROM solana_runtime_live_rollout_seen WHERE service='worker'").get(), "published with the heartbeat");
   assert.deepEqual((await idle.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: `${TENANT},0x${"33".repeat(20)}` }, undefined, () => {}).status(idle.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+});
+
+/** A provider that serves the vault with these session limits (raw: USDG per trade and per 24 hours, SOL sold per trade and per 24 hours). */
+const vaultLimits = (f: Awaited<ReturnType<typeof fixture>>, held: { perTrade: bigint; daily: bigint; perTradeWsol: bigint; dailyWsol: bigint }) =>
+  (read: SolanaLiveRead): SolanaLiveRead => async (method, params = []) => {
+    const result = await read(method, params) as { value?: unknown } | null;
+    const patch = (account: unknown) => {
+      const data = (account as { data?: [string, string] } | null)?.data;
+      if (!data || Buffer.from(data[0], "base64").length !== SOLANA_VAULT_ACCOUNT_SIZE) return account;
+      const b = Buffer.from(data[0], "base64");
+      for (const [offset, value] of [[98, held.perTrade], [106, held.daily], [114, held.perTradeWsol], [122, held.dailyWsol]] as const) b.writeBigUInt64LE(value, offset);
+      return { ...(account as object), data: [b.toString("base64"), "base64"] };
+    };
+    if (method === "getAccountInfo" && params[0] === f.vault && result?.value) return { ...result, value: patch(result.value) };
+    if (method === "getMultipleAccounts" && Array.isArray(result?.value)) return { ...result, value: (result!.value as unknown[]).map(patch) };
+    return result;
+  };
+
+test("exits keep room within the limits the vault enforces: saved live limits above the registered permission (the caps raised and the limits saved again) do not let a buy use room the vault will not give the exit", async t => {
+  const exitReserve = (error: unknown) => error instanceof SolanaTradingStoreError && error.message === SOLANA_LIVE_EXIT_RESERVE;
+  const placedAs = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => (await f.submissions()).filter(row => row.request_id === id);
+  // USDG: the caps raised to 200 USDG a day and the limits saved at it, under the permission registered at 100 a day (the vault's).
+  // 20 USDG of buys in the window and 0.2 SOL ($30) held: a 25 USDG buy keeps room for its exit within 200 (20 + 25 + 56.65), not within 100.
+  const usdg = async () => {
+    const f = await fixture(t, { cash: 50_000_000n, wsol: 200_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "200" } });
+    await windowRow(f, "earlier-buy", "finalized", 3_600_000, SOLANA_USDG_MINT, "20000000", "20000000");
+    await f.bindings.settings(TENANT, f.scope.owner, (await f.bindings.get(TENANT))!.revision, "live", { ...limits, dailyUsdg: "200000000" });
+    return f;
+  };
+  const f = await usdg();
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-past-the-vault") }), exitReserve);
+  assert.deepEqual(await placedAs(f, "buy-past-the-vault"), []); assert.equal(f.sends.length, 0, "nothing signed or sent");
+  // One that keeps room within the vault's 100 (20 + 20 + 51.5) is sent.
+  const placed = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "20000000", "buy-within-the-vault") });
+  assert.ok("status" in placed && placed.status === "pending"); assert.equal(f.sends.length, 1);
+  // The same 25 USDG buy where the vault itself allows the saved 200 a day: it fits, and is sent.
+  const g = await usdg();
+  const roomy = vaultLimits(g, { perTrade: 25_000_000n, daily: 200_000_000n, perTradeWsol: 200_000_000n, dailyWsol: 1_000_000_000n });
+  const sent = await g.runtime({}, split(g, roomy, roomy)).trade(g.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-past-the-vault") });
+  assert.ok("status" in sent && sent.status === "pending"); assert.equal(g.sends.length, 1);
+  // One provider showing the vault's lower limit is enough to refuse it.
+  const h = await usdg();
+  await assert.rejects(h.runtime({}, split(h, roomy)).trade(h.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-past-one-provider") }), exitReserve);
+  assert.equal(h.sends.length, 0);
+  // SOL sold: the caps raised to 2 SOL a day and the limits saved at it, under the permission registered at 1 SOL a day (the vault's).
+  // 0.9 SOL held: a 25 USDG buy brings 0.1667 SOL, which 2 SOL a day could sell and 1 SOL a day could not.
+  const k = await fixture(t, { cash: 50_000_000n, wsol: 900_000_000n, mark: "fair", build: { kind: "fair" },
+    env: { MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "1000", MERRYMEN_SOLANA_LIVE_MAX_DAILY_WSOL: "2" } });
+  await k.bindings.settings(TENANT, k.scope.owner, (await k.bindings.get(TENANT))!.revision, "live", { ...limits, dailyUsdg: "1000000000", dailyWsol: "2000000000" });
+  const soldUnderOne = vaultLimits(k, { perTrade: 25_000_000n, daily: 1_000_000_000n, perTradeWsol: 200_000_000n, dailyWsol: 1_000_000_000n });
+  await assert.rejects(k.runtime({}, split(k, soldUnderOne, soldUnderOne)).trade(k.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-past-sol") }), exitReserve);
+  assert.deepEqual(await placedAs(k, "buy-past-sol"), []); assert.equal(k.sends.length, 0);
+  // Where the vault allows the saved 2 SOL a day too, it is sent.
+  const soldUnderTwo = vaultLimits(k, { perTrade: 25_000_000n, daily: 1_000_000_000n, perTradeWsol: 200_000_000n, dailyWsol: 2_000_000_000n });
+  const bought = await k.runtime({}, split(k, soldUnderTwo, soldUnderTwo)).trade(k.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "25000000", "buy-within-sol") });
+  assert.ok("status" in bought && bought.status === "pending"); assert.equal(k.sends.length, 1);
 });

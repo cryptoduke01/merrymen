@@ -745,6 +745,37 @@ test("exits keep room in the SOL sold limit too: a buy whose position after it i
   // A sale is never refused by it.
   assert.equal(await f.store.recordSigned(sale("exit", "1", first.minOutAmount, book)), true);
 });
+test("exits keep room within the registered permission's limits, kept in the session record, where they are below the saved ones: the vault sells the exit under its own", async t => {
+  // Saved: 50 USDG and 0.12 SOL a day. $500 a SOL, 3% tolerance. One 10 USDG buy is admitted and booked first (0.0198 SOL held).
+  const registeredAt = async (registered: { dailyUsdg: string; dailyWsol: string } | null) => {
+    const f = await fixture(t);
+    if (registered) {
+      const record = JSON.parse((await f.db.prepare("SELECT record_json FROM solana_runtime_sessions").get() as { record_json: string }).record_json);
+      await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=?").run(JSON.stringify({ ...record,
+        limits: { perTradeUsdg: limits.perTradeUsdg, perTradeWsol: limits.perTradeWsol, ...registered } }));
+    }
+    const first = buyFor("buy-1", "0", 10_000_000n, { slot: 1000, cash: CASH.toString(), wsol: "0" });
+    assert.equal(await f.store.recordSigned(first), true);
+    await f.store.settle(OWNER, "buy-1", first.signature, { status: "finalized", signature: first.signature, slot: 1001, feeLamports: "10000", amountIn: "10000000",
+      amountOut: first.minOutAmount, finalizedAtMs: NOW + 1 });
+    return { f, book: { slot: 1001, cash: "90000000", wsol: first.minOutAmount } };
+  };
+  const exitReserve = (error: unknown) => error instanceof Error && error.message === SOLANA_LIVE_EXIT_RESERVE;
+  // Registered at 25 USDG a day: a second 10 USDG buy would leave 0.0398 SOL ($19.90) to sell after 20 used (20 + 20.50 > 25), which the
+  // saved 50 would admit. A 2 USDG buy still fits (12 + 12.26).
+  const usdg = await registeredAt({ dailyUsdg: "25000000", dailyWsol: limits.dailyWsol });
+  await assert.rejects(usdg.f.store.recordSigned(buyFor("buy-2", "1", 10_000_000n, usdg.book)), exitReserve);
+  assert.equal((await usdg.f.store.pending()).length, 0, "nothing reserved");
+  assert.equal(await usdg.f.store.recordSigned(buyFor("buy-small", "1", 2_000_000n, usdg.book)), true);
+  // Registered at 0.03 SOL sold a day: the second buy's 0.0398 SOL could not be sold today, which the saved 0.12 would allow.
+  const sol = await registeredAt({ dailyUsdg: limits.dailyUsdg, dailyWsol: "30000000" });
+  await assert.rejects(sol.f.store.recordSigned(buyFor("buy-2", "1", 10_000_000n, sol.book)), exitReserve);
+  // Registered above the saved limits, or before limits were kept: the saved ones bound it, and the same buy is admitted.
+  for (const registered of [{ dailyUsdg: "100000000", dailyWsol: "1000000000" }, null]) {
+    const roomy = await registeredAt(registered);
+    assert.equal(await roomy.f.store.recordSigned(buyFor("buy-2", "1", 10_000_000n, roomy.book)), true, JSON.stringify(registered));
+  }
+});
 test("the exit reserve's planning room: the largest buy it returns keeps room to sell the whole position, valued at up to the tolerance above its cost", () => {
   for (const [used, daily, value] of [[0n, 100_000_000n, 0n], [52_000_000n, 100_000_000n, 22_500_000n], [10_000_000n, 25_000_000n, 3_000_000n]] as const) {
     const room = solanaExitReserveBuyRoom({ usedUsdgRaw: used, dailyUsdgRaw: daily, positionValueUsdgRaw: value, toleranceBps: 300 });
