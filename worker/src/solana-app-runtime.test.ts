@@ -128,7 +128,7 @@ async function fixture(options: { declared?: string } = {}) {
     if (method === "getSignatureStatuses") return response([controls.finalized ? { confirmationStatus: "finalized", slot: 1000, ...(controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null }) } : null]);
     if (method === "getTransaction") return controls.finalized ? { version: 0, slot: 1000, transaction: [controls.signed, "base64"], meta: controls.malformed ? {} : { err: controls.failed ? { InstructionError: [0, "InvalidArgument"] } : null } } : null;
     if (method === "simulateTransaction" && controls.simulatedUnits !== null) {
-      assert.deepEqual(params[1], { encoding: "base64", commitment: "confirmed", sigVerify: false, replaceRecentBlockhash: false });
+      assert.deepEqual(params[1], { encoding: "base64", commitment: "finalized", sigVerify: false, replaceRecentBlockhash: false });
       return response({ err: controls.simulationFails ? { InstructionError: [0, { Custom: 6000 }] } : null, unitsConsumed: controls.simulatedUnits, logs: [], accounts: null });
     }
     if (method === "getRecentPrioritizationFees" && controls.priorityFees) return controls.priorityFees.map((prioritizationFee, index) => ({ slot: 1000 - index, prioritizationFee }));
@@ -2197,7 +2197,7 @@ test("an activation reads the vault no earlier than the slot its permission fina
     const stale = f.state(); keyBytes(key(5)).copy(stale, 42);
     const floors: unknown[] = [];
     f.providers.primary = async (method, params = []) => {
-      if (method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "confirmed") {
+      if (method === "getAccountInfo" && params[0] === f.vault && (params[1] as { commitment?: string }).commitment === "finalized") {
         const floor = (params[1] as { minContextSlot?: number }).minContextSlot; floors.push(floor);
         if ((floor ?? 0) > 999) throw new SolanaRpcError("rpc");
         return { context: { slot: 999 }, value: account(stale) };

@@ -44,9 +44,11 @@ export function pythBound(intent: Parameters<typeof solanaReferenceBound>[0], no
  * the public endpoint https://api.mainnet-beta.solana.com (no API key, no
  * transaction) by an earlier pass on this code, as it reported them.
  * `minContextSlot` came from getSlot (commitment confirmed) sent at
- * `requestedAtMs`; `request` is the getAccountInfo call that followed, the same
- * call `readSolanaReferencePrice` makes; `response` is the RPC's JSON answer as
- * recorded; `fetchedAtMs` is the local clock when it arrived.
+ * `requestedAtMs`; `request` is the getAccountInfo call that followed, the
+ * call `readSolanaReferencePrice` made then; `response` is the RPC's JSON answer as
+ * recorded; `fetchedAtMs` is the local clock when it arrived. The module now
+ * asks the same call at commitment finalized (pythSnapshotCall); the recording
+ * is kept as it was made, before Alpenglow made the two one state.
  *
  * These two answers are the only raw evidence kept from that check; its other
  * captures were not preserved. Their bytes are internally consistent (layout,
@@ -89,6 +91,11 @@ export const PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT: PythMainnetSnapshot = {
   response: '{"jsonrpc":"2.0","result":{"context":{"apiVersion":"4.3.0","slot":458681625},"value":{"data":["IvEjY51+9M1bsRWwDdII6qyfKmvtWLaGyH3c9S5trfFYcCJDMhaezQHvDYtv2izrpB2hXUCV0do5Kg0vjtDGx7wPTPrIwoC1bcHP0nICAAAAIEIxAAAAAAD4////n4zVagAAAACejNVqAAAAAI4gyXECAAAAuyotAAAAAAAZ7VYbAAAAAAA=","base64"],"executable":false,"lamports":1823520,"owner":"rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp","rentEpoch":18446744073709551615,"space":134}},"id":3}',
 };
 
+/** The call `readSolanaReferencePrice` makes for a recorded read today: the recorded request at commitment finalized. */
+export function pythSnapshotCall(snapshot: PythMainnetSnapshot): [string, [string, { encoding: "base64"; commitment: "finalized"; minContextSlot: number }]] {
+  const [account, config] = snapshot.request.params;
+  return [snapshot.request.method, [account, { ...config, commitment: "finalized" }]];
+}
 /** The JSON-RPC `result` of a recorded read: `{ context: { slot }, value }`. */
 export function pythSnapshotResult(snapshot: PythMainnetSnapshot): { context: { slot: number }; value: Record<string, unknown> } {
   return (JSON.parse(snapshot.response) as { result: { context: { slot: number }; value: Record<string, unknown> } }).result;

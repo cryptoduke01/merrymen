@@ -6,7 +6,7 @@
  * - readEach / readSolanaQuorum: every provider's answer. Booking a fill or an
  *   expiry needs both to agree; one provider's word is never enough.
  * - send: the identical signed bytes to both providers, rebroadcast until the
- *   signature is confirmed, the blockhash is no longer valid or the caller's
+ *   signature is finalized, the blockhash is no longer valid or the caller's
  *   window ends. The bytes are never re-signed, so a rebroadcast can land at most once.
  */
 import { createHmac, randomBytes } from "node:crypto";
@@ -28,7 +28,7 @@ export interface SolanaSendOptions {
   /**
    * Keep rebroadcasting the same bytes until this wall-clock time (ms). One round
    * is always sent; 0 sends exactly one round. Without it the window is
-   * SOLANA_DEFAULT_REBROADCAST_MS. A confirmed signature or an expired
+   * SOLANA_DEFAULT_REBROADCAST_MS. A finalized signature or an expired
    * blockhash ends it sooner.
    */
   untilMs?: number;
@@ -227,7 +227,7 @@ export function createSolanaLiveRpc(options: {
         // before it can cost a fee, and a landed one is refused as processed.
         const results = await Promise.allSettled(endpoints.map(url => endpoint(url, async rpc => {
           const result = await rpc("sendTransaction", [wire, { encoding: "base64", skipPreflight: false,
-            preflightCommitment: "confirmed", maxRetries: 0, minContextSlot }]);
+            preflightCommitment: "finalized", maxRetries: 0, minContextSlot }]);
           if (typeof result !== "string" || !isSignature(result) || result !== signature) throw new SolanaRpcError("malformed");
           return result;
         }, signal)));
@@ -238,9 +238,11 @@ export function createSolanaLiveRpc(options: {
         if (now() >= until) break;
         await sleep(Math.min(interval, Math.max(1, until - now())), signal);
         if (signal?.aborted) throw new SolanaRpcError("cancelled");
-        // Stop once any provider reports the signature confirmed (a processed
-        // block can still be abandoned with its fork), or every provider says the
-        // blockhash can no longer land. Unanswered checks just rebroadcast.
+        // Stop once any provider reports the signature finalized, or "confirmed",
+        // which since Alpenglow is the same state and is still reported until Agave
+        // removes it (a processed block can still be abandoned with its fork), or
+        // every provider says the blockhash can no longer land. Unanswered checks
+        // just rebroadcast.
         const checks = await Promise.allSettled(endpoints.map(url => endpoint(url, async rpc => {
           const statuses = await rpc("getSignatureStatuses", [[signature]]);
           const value = statuses && typeof statuses === "object" ? (statuses as { value?: unknown }).value : undefined;

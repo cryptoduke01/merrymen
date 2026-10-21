@@ -10,7 +10,7 @@ import { PYTH_PUSH_ORACLE_PROGRAM, PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_ACCOUNT, 
   solanaReferenceToleranceBps, verifySolanaReferenceBound, SolanaReferencePriceError, type SolanaPythGeneration,
   type SolanaReferenceRefusal } from "./solana-reference-price";
 import { PYTH_SOL_USD_MAINNET_SNAPSHOT, PYTH_SOL_USD_UPGRADED_MAINNET_SNAPSHOT, pythAccount, pythReference,
-  pythSnapshotResult } from "./solana-reference-price-fixture";
+  pythSnapshotCall, pythSnapshotResult } from "./solana-reference-price-fixture";
 
 const NOW = 1_790_000_000_000;
 const sell = { inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "1000000000", slippageBps: 50 };
@@ -48,7 +48,7 @@ test("decodes the recorded mainnet SOL/USD account read with this module's own c
   assert.equal(snap.account, PYTH_SOL_USD_ACCOUNT);
   const calls: unknown[] = [];
   const price = await readSolanaReferencePrice(async (method, params) => { calls.push([method, params]); return result; }, snap.minContextSlot, snap.fetchedAtMs);
-  assert.deepEqual(calls, [[snap.request.method, snap.request.params]]);
+  assert.deepEqual(calls, [pythSnapshotCall(snap)]);
   // $105.16339767 per SOL, ±3 bps, published 1.2 s before the answer arrived.
   assert.deepEqual(price, { source: "pyth", account: PYTH_SOL_USD_ACCOUNT, feedId: PYTH_SOL_USD_FEED_ID, price: "10516339767", conf: "3289584",
     exponent: -8, publishTimeMs: 1_792_380_064_000, postedSlot: 458_681_624, slot: 458_681_624 });
@@ -134,7 +134,7 @@ test("with the upgraded generation selected, the recorded upgraded account answe
   const price = await readSolanaReferencePrice(async (method, params) => { calls.push([method, params]); return result; }, snap.minContextSlot, snap.fetchedAtMs,
     { generation: "upgraded" });
   // The same call shape as the current account's, to the upgraded account.
-  assert.deepEqual(calls, [[snap.request.method, snap.request.params]]);
+  assert.deepEqual(calls, [pythSnapshotCall(snap)]);
   assert.equal(snap.request.params[0], UPGRADED.account);
   // $105.16352961 per SOL, ±3 bps; it agrees with the current snapshot to 0.01 bp.
   assert.deepEqual(price, { source: "pyth", account: UPGRADED.account, feedId: PYTH_SOL_USD_FEED_ID, price: "10516352961", conf: "3228192",
@@ -203,7 +203,7 @@ test("reads a fresh, fully verified SOL/USD update at or after the trade's slot"
   const price = await readSolanaReferencePrice(async (method, params) => {
     calls.push([method, params]); return { context: { slot: 1001 }, value: pythAccount({ publishTimeMs: NOW - 10_000 }) };
   }, 1000, NOW);
-  assert.deepEqual(calls, [["getAccountInfo", [PYTH_SOL_USD_ACCOUNT, { encoding: "base64", commitment: "confirmed", minContextSlot: 1000 }]]]);
+  assert.deepEqual(calls, [["getAccountInfo", [PYTH_SOL_USD_ACCOUNT, { encoding: "base64", commitment: "finalized", minContextSlot: 1000 }]]]);
   assert.equal(price.price, "50000000000"); assert.equal(price.exponent, -8); assert.equal(price.slot, 1001);
   await assert.rejects(readSolanaReferencePrice(async () => ({ context: { slot: 999 }, value: pythAccount({ publishTimeMs: NOW }) }), 1000, NOW, { alerts: quiet }),
     SolanaReferencePriceError);

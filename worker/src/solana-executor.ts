@@ -231,13 +231,13 @@ export async function readSolanaOwnerRefundBlocks(rpc: SolanaLiveRpc, programId:
   const keys: string[] = [];
   for (const [mint, program] of mints) keys.push(await deriveSolanaAta(swapAuthority, mint, program), await deriveSolanaAta(owner, mint, program));
   return rpc.read(async read => {
-    const result = context(await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
+    const result = context(await read("getMultipleAccounts", [keys, { encoding: "base64", commitment: "finalized", minContextSlot }]), minContextSlot);
     if (!Array.isArray(result.value) || result.value.length !== keys.length) return fail();
     const accounts = result.value as unknown[];
     // Lamports at the WSOL temporary address become a donation once the swap opens it there.
     const wsolTemp = accounts[2] === null ? null : account(accounts[2]);
     const nativeReserve = wsolTemp && wsolTemp.owner === "11111111111111111111111111111111" && wsolTemp.data.length === 0 && wsolTemp.lamports > 0n
-      ? BigInt(integer(await read("getMinimumBalanceForRentExemption", [165, { commitment: "confirmed" }]))) : null;
+      ? BigInt(integer(await read("getMinimumBalanceForRentExemption", [165, { commitment: "finalized" }]))) : null;
     return mints.flatMap(([mint, program], index) => {
       const refund = solanaPendingRefund(accounts[2 * index], accounts[2 * index + 1], mint, swapAuthority, owner, program, nativeReserve);
       return refund.donation > 0n && refund.ownerAccountProblem !== null ? [{ mint, problem: refund.ownerAccountProblem }] : [];
@@ -312,7 +312,7 @@ export const SOLANA_DEFAULT_MAX_COMPUTE_UNIT_PRICE = 1_000_000n;
 /** Base fee for the two signatures (fee payer and session) every swap carries. */
 const SIGNATURE_FEES = 10_000n;
 async function readRawAccount(rpc: SolanaLiveRead, key: string, slot: number) {
-  return account(context(await rpc("getAccountInfo", [key, { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot).value);
+  return account(context(await rpc("getAccountInfo", [key, { encoding: "base64", commitment: "finalized", minContextSlot: slot }]), slot).value);
 }
 const PROGRAM_DATA_SLICE = 98_304;
 /**
@@ -331,7 +331,7 @@ async function verifyDeployment(rpc: SolanaLiveRead, programId: string, hash: st
   if (program.owner !== UPGRADEABLE_LOADER || !program.executable || program.data.length !== 36 || program.data.readUInt32LE(0) !== 2) return fail("unsafe-program");
   const dataAddress = getBase58Decoder().decode(program.data.subarray(4));
   const readSlice = async (offset: number, length: number) => {
-    const raw = context(await rpc("getAccountInfo", [dataAddress, { encoding: "base64", commitment: "confirmed", minContextSlot: slot,
+    const raw = context(await rpc("getAccountInfo", [dataAddress, { encoding: "base64", commitment: "finalized", minContextSlot: slot,
       dataSlice: { offset, length } }]), slot).value;
     if (!object(raw)) return fail("unsafe-program");
     const parsed = account(raw);
@@ -374,12 +374,12 @@ export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId:
   const at = Date.now();
   let result: { slot: number; declaresProgramId: boolean };
   if (cached !== undefined && at >= cached.atMs && at - cached.atMs < DEPLOYMENT_CACHE_MS) {
-    const slot = integer(await rpc.read(read => read("getSlot", [{ commitment: "confirmed" }])));
+    const slot = integer(await rpc.read(read => read("getSlot", [{ commitment: "finalized" }])));
     if (slot < 1) return fail();
     result = { slot, declaresProgramId: cached.declaresProgramId };
   } else {
     const views = await readSolanaEachProvider(rpc, async read => {
-      const slot = integer(await read("getSlot", [{ commitment: "confirmed" }]));
+      const slot = integer(await read("getSlot", [{ commitment: "finalized" }]));
       if (slot < 1) return fail();
       return { slot, ...await verifyDeployment(read, programId, binarySha256, slot) };
     });
@@ -391,14 +391,14 @@ export async function verifySolanaVaultDeployment(rpc: SolanaLiveRpc, programId:
   return result;
 }
 /**
- * The vault's confirmed state. With `minContextSlot`, only a bank at or after
+ * The vault's finalized state. With `minContextSlot`, only a bank at or after
  * that slot may answer (an RPC behind it errors instead of answering stale).
  */
 export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string, owner: string, minContextSlot?: number): Promise<{ vault: string; slot: number; state: SolanaVaultState }> {
   const vault = await deriveSolanaVaultAddress(programId, owner);
   if (minContextSlot !== undefined && (!Number.isSafeInteger(minContextSlot) || minContextSlot < 1)) return fail();
   return rpc.read(async read => {
-    const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", ...(minContextSlot === undefined ? {} : { minContextSlot }) }]), minContextSlot ?? 1);
+    const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "finalized", ...(minContextSlot === undefined ? {} : { minContextSlot }) }]), minContextSlot ?? 1);
     const data = account(raw.value);
     if (data.owner !== programId || data.executable) return fail();
     const state = decodeSolanaVaultAccount(data.data);
@@ -406,31 +406,32 @@ export async function readSolanaVaultState(rpc: SolanaLiveRpc, programId: string
     return { vault, slot: raw.slot, state };
   });
 }
-/** One provider's confirmed state of `owner`'s vault at or after `minContextSlot`, in its own read session. */
+/** One provider's finalized state of `owner`'s vault at or after `minContextSlot`, in its own read session. */
 export async function readSolanaVaultStateWith(read: SolanaLiveRead, programId: string, vault: string, owner: string, minContextSlot: number): Promise<SolanaVaultState> {
-  const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "confirmed", minContextSlot }]), minContextSlot);
+  const raw = context(await read("getAccountInfo", [vault, { encoding: "base64", commitment: "finalized", minContextSlot }]), minContextSlot);
   const data = account(raw.value);
   if (data.owner !== programId || data.executable) return fail();
   const state = decodeSolanaVaultAccount(data.data);
   if (state.owner !== owner) return fail();
   return state;
 }
-export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
-  return rpc.read(read => readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment));
+export async function readSolanaVaultBalances(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+  return rpc.read(read => readSolanaVaultBalancesWith(read, vault, minContextSlot));
 }
-/** One provider's answer for the vault's USDG and WSOL balances, at or after `minContextSlot`, in one read session. */
-export async function readSolanaVaultBalancesWith(read: SolanaLiveRead, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "confirmed"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+/** One provider's finalized answer for the vault's USDG and WSOL balances, at or after `minContextSlot`, in one read session. */
+export async function readSolanaVaultBalancesWith(read: SolanaLiveRead, vault: string, minContextSlot = 1): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
   const [cash, wsol] = await Promise.all([deriveSolanaAta(vault, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM),
     deriveSolanaAta(vault, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM)]);
-  const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment, minContextSlot }]), minContextSlot);
+  const result = context(await read("getMultipleAccounts", [[cash, wsol], { encoding: "base64", commitment: "finalized", minContextSlot }]), minContextSlot);
   if (!Array.isArray(result.value) || result.value.length !== 2) return fail();
   return { slot: result.slot, cashUsdg: tokenBalance(account(result.value[0]), SOLANA_USDG_MINT, vault, TOKEN_2022_PROGRAM).toString(),
     wsolRaw: tokenBalance(account(result.value[1]), SOLANA_WRAPPED_SOL_MINT, vault, SOLANA_CLASSIC_TOKEN_PROGRAM).toString() };
 }
 /**
  * How far one provider's context slot may run ahead of another provider's fresh
- * slot at the same commitment: about a minute of honest skew between two
- * providers' banks. A slot further ahead is one provider's invention.
+ * finalized slot: about 30 seconds of honest skew between two providers' banks
+ * at 200 ms slots (a minute at the 400 ms slots it was set for). A slot further
+ * ahead is one provider's invention.
  */
 export const SOLANA_PROVIDER_SLOT_SKEW = 150;
 /**
@@ -460,10 +461,10 @@ export function solanaQuorumSlot(views: readonly { slot: number; fresh?: number 
  * One provider can therefore neither book a phantom deposit nor persist an
  * inflated book slot.
  */
-export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1, commitment: "confirmed" | "finalized" = "finalized"): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
+export async function readSolanaVaultBalancesQuorum(rpc: SolanaLiveRpc, vault: string, minContextSlot = 1): Promise<{ slot: number; cashUsdg: string; wsolRaw: string }> {
   const views = (await readSolanaQuorum(rpc, async read => {
-    const balances = await readSolanaVaultBalancesWith(read, vault, minContextSlot, commitment);
-    return { ...balances, fresh: integer(await read("getSlot", [{ commitment }])) };
+    const balances = await readSolanaVaultBalancesWith(read, vault, minContextSlot);
+    return { ...balances, fresh: integer(await read("getSlot", [{ commitment: "finalized" }])) };
   }, view => JSON.stringify([view.cashUsdg, view.wsolRaw])));
   if (!views.agreed) return fail();
   return { slot: solanaQuorumSlot(views.values), cashUsdg: views.value.cashUsdg, wsolRaw: views.value.wsolRaw };
@@ -573,6 +574,8 @@ export async function observeSolanaSubmission(read: SolanaLiveRead, submission: 
   const result = context(await read("getSignatureStatuses", [[submission.signature], { searchTransactionHistory: true }]), submission.minContextSlot);
   if (!Array.isArray(result.value) || result.value.length !== 1) return fail();
   const status = result.value[0];
+  // "confirmed" is still a status a provider may report until Agave removes it (since Alpenglow it is the
+  // same state as finalized): it counts as seen, like processed, and only "finalized" settles.
   if (status !== null && (!object(status) || !["processed", "confirmed", "finalized"].includes(String(status.confirmationStatus)) ||
     !Object.hasOwn(status, "err") || !isSolanaTransactionError(status.err))) return fail();
   const receipt = await read("getTransaction", [submission.signature, { commitment: "finalized", encoding: "base64", maxSupportedTransactionVersion: 0 }]);
@@ -735,11 +738,11 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
       await verifySolanaVaultDeployment(options.rpc, options.programId, options.programBinarySha256, { requireDeclaredProgramId: true });
       checkAbort();
       const snapshot = await options.rpc.read(async rpc => {
-        const fresh = integer(await rpc("getSlot", [{ commitment: "confirmed" }]));
+        const fresh = integer(await rpc("getSlot", [{ commitment: "finalized" }]));
         if (fresh < 1) return fail();
         const slot = fresh > snapshotFloor ? fresh : snapshotFloor;
         const result = context(await rpc("getMultipleAccounts", [[intent.vault, inputTokenAccount, outputTokenAccount, feePayer],
-          { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
+          { encoding: "base64", commitment: "finalized", minContextSlot: slot }]), slot);
         if (!Array.isArray(result.value) || result.value.length !== 4) return fail();
         const [vault, input, output, payer] = result.value.map(account) as [Account, Account, Account, Account];
         if (vault.owner !== options.programId || vault.executable || payer.owner !== "11111111111111111111111111111111" || payer.executable || payer.data.length) return fail();
@@ -756,10 +759,10 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const swapAuthority = await deriveSolanaSwapAuthority(options.programId, intent.vault, state.seq);
         const tempInput = await deriveSolanaAta(swapAuthority, intent.inputMint, inputProgram);
         const waiting = context(await rpc("getMultipleAccounts", [[tempInput, ownerRefund],
-          { encoding: "base64", commitment: "confirmed", minContextSlot: slot }]), slot);
+          { encoding: "base64", commitment: "finalized", minContextSlot: slot }]), slot);
         if (!Array.isArray(waiting.value) || waiting.value.length !== 2) return fail();
         // The temporary account has the vault input account's size, so this is its rent and, for WSOL, its native reserve.
-        const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "confirmed" }])));
+        const rent = BigInt(integer(await rpc("getMinimumBalanceForRentExemption", [input.data.length, { commitment: "finalized" }])));
         const refund = solanaPendingRefund(waiting.value[0], waiting.value[1], intent.inputMint, swapAuthority, intent.owner, inputProgram, rent);
         if (refund.donation > 0n && !refund.ownerAccountUsable) return fail("owner-refund");
         const refundAccount: string | null = refund.donation > 0n ? ownerRefund : null;
@@ -792,7 +795,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         if (route.accounts.some(meta => [intent.owner, intent.vault, session, feePayer, inputTokenAccount, ownerRefund].includes(meta.address))) return fail("unsafe-route");
         const keys = [...new Set(route.accounts.map(meta => meta.address))];
         const remaining = context(await rpc("getMultipleAccounts", [keys,
-          { encoding: "base64", commitment: "confirmed", minContextSlot: slot, dataSlice: { offset: 0, length: 165 } }]), slot);
+          { encoding: "base64", commitment: "finalized", minContextSlot: slot, dataSlice: { offset: 0, length: 165 } }]), slot);
         if (!Array.isArray(remaining.value) || remaining.value.length !== keys.length) return fail();
         remaining.value.forEach((raw, index) => {
           if (raw === null) return;
@@ -809,7 +812,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
           alts[address(key)] = Array.from({ length: (alt.data.length - 56) / 32 }, (_, index) =>
             address(getBase58Decoder().decode(alt.data.subarray(56 + index * 32, 88 + index * 32))));
         }
-        const blockhash = context(await rpc("getLatestBlockhash", [{ commitment: "confirmed", minContextSlot: slot }]), slot);
+        const blockhash = context(await rpc("getLatestBlockhash", [{ commitment: "finalized", minContextSlot: slot }]), slot);
         if (!object(blockhash.value) || typeof blockhash.value.blockhash !== "string") return fail();
         // Every provider simulates the signed message at or after the bank its blockhash came from (below).
         const simulationSlot = Math.max(slot, blockhash.slot);
@@ -834,7 +837,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         // `read`: the provider asked (this session's by default), at or after `at`.
         const simulate = async (transaction: ReturnType<typeof compile>, read: SolanaLiveRead = rpc, at = slot) => {
           const sim = context(await read("simulateTransaction", [getBase64EncodedWireTransaction(transaction), {
-            encoding: "base64", commitment: "confirmed", minContextSlot: at, sigVerify: false, replaceRecentBlockhash: false,
+            encoding: "base64", commitment: "finalized", minContextSlot: at, sigVerify: false, replaceRecentBlockhash: false,
             accounts: { encoding: "base64", addresses: [intent.vault, inputTokenAccount, outputTokenAccount, feePayer] },
           }]), at);
           if (!object(sim.value) || sim.value.err !== null || !Array.isArray(sim.value.accounts) || sim.value.accounts.length !== 4) return fail("simulation");
@@ -871,7 +874,7 @@ export function createSolanaExecutor(options: SolanaExecutorOptions) {
         const unitPrice = recent > affordable ? affordable : recent;
         const transaction = compile(units, unitPrice);
         const feeResult = context(await rpc("getFeeForMessage", [Buffer.from(transaction.messageBytes).toString("base64"),
-          { commitment: "confirmed", minContextSlot: slot }]), slot);
+          { commitment: "finalized", minContextSlot: slot }]), slot);
         const quoted = BigInt(integer(feeResult.value));
         // The runtime charges both signatures plus ceil(price * limit / 1e6). Never
         // reserve less, even from a provider that leaves the priority fee out:
