@@ -5,6 +5,7 @@
  */
 import type { ToolDef } from "../tool";
 import { AGENT_TOOLS } from "./agents";
+import { ATTENTION_TOOLS } from "./attention";
 import { AGENT_SETTINGS_TOOLS } from "./agent-settings";
 import { ONBOARDING_TOOLS } from "./onboarding";
 import { PORTFOLIO_TOOLS } from "./portfolio";
@@ -25,6 +26,7 @@ import { withAppMeta } from "../apps";
 export const ALL_TOOLS: readonly ToolDef[] = withAppMeta([
   ...ONBOARDING_TOOLS,
   ...AGENT_TOOLS,
+  ...ATTENTION_TOOLS,
   ...AGENT_SETTINGS_TOOLS,
   ...PORTFOLIO_TOOLS,
   ...DECISIONS_TOOLS,

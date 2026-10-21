@@ -77,6 +77,28 @@ approval still ask.
 Claude identifies itself with its Client ID Metadata Document, so the consent
 screen shows "Verified at claude.ai". Callback: `https://claude.ai/api/mcp/auth_callback`.
 
+### Claude Duet
+
+[Claude Duet](https://claude.com/product/claude-duet) (a research preview for US
+Pro and Max plans, opened 2026-10-21) carries over the connectors on your Claude
+account, so the Merrymen connector added above is already there. Duet sends a
+morning brief and checks connected apps every few hours. Merrymen answers that
+check with `get_attention`: one read of everything that needs you across your
+agents, each item ranked `act_now`, `today` or `fyi`. The server's instructions
+ask it to interrupt you only for new `act_now` or `today` items, such as a
+trading permission about to expire, an agent with no ETH or USDG, a tripped
+drawdown breaker or a proposal waiting for you, and to keep `fyi` for the brief.
+You can also tell Duet what you want to hear, for example "only tell me about
+Merrymen when something needs me today".
+
+Duet brings you the link; it does not act. Renewing a permission, funding the
+agent and approving a proposal happen in Merrymen, signed in as you. Duet itself
+is not allowed to trade securities or move money between accounts.
+
+Not yet tried against Duet itself: the preview opened by waitlist the day this
+section was written. The same tool and instructions work from any Claude chat
+("anything I need to do for my Merryman?").
+
 ## Claude Code
 
 **Fastest: the Merrymen plugin.** Inside Claude Code, run these one at a time
@@ -99,6 +121,7 @@ itself when you just ask:
 
 | Command | What it does |
 |---|---|
+| `/merrymen:brief` | What needs you across your agents: a morning brief, or a check-in that speaks only when something is new |
 | `/merrymen:status` | Running or not, paper or live, blockers, permission expiry |
 | `/merrymen:why` | Why the agent has or hasn't traded |
 | `/merrymen:portfolio` | Cash, positions, P&L; paper and live kept apart |

@@ -1,7 +1,7 @@
 # Merrymen for Claude Code
 
-Create or manage your hosted Merrymen trading agent from Claude Code: its status, why it has
-or hasn't traded, your portfolio, a weekly review and token research.
+Create or manage your hosted Merrymen trading agent from Claude Code: what needs you, its
+status, why it has or hasn't traded, your portfolio, a weekly review and token research.
 
 For Claude on the web, Desktop, Cowork or mobile, use the remote connector at
 [Connect Merrymen](https://app.merrymen.dev/connect/mcp); no terminal is needed.
@@ -39,6 +39,7 @@ server takes over from the connector, so you sign in once more.
 
 | Command | What it does |
 |---|---|
+| `/merrymen:brief` | What needs you across your agents: a morning brief, or a quiet check-in that speaks only when something is new |
 | `/merrymen:status` | Is the agent running, paper or live, anything blocking it, when its permission expires |
 | `/merrymen:why` | Why it has or hasn't traded, from its recorded state and decisions |
 | `/merrymen:portfolio` | Cash, positions, profit and loss, paper and live kept apart |

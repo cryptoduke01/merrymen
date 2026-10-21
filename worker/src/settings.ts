@@ -693,10 +693,13 @@ export function settingsProblem(): SettingsProblem | null {
  * last good read in force the agent carries on with it (settingsHoldNotice):
  * stopping a running agent over a typo would turn an edit into an outage.
  */
+/** How the arm refusal below begins, for readers that find it among the agent's events (web attention.ts). */
+export const SETTINGS_ARM_REFUSAL_PREFIX = "this agent is NOT TRADING: ";
+
 export function settingsArmRefusal(p: SettingsProblem | null, hosted = isHostedMode()): string | null {
   if (!p || p.holding) return null;
   return (
-    `this agent is NOT TRADING: ${p.why}, and nothing usable has been read from it since this worker started. ` +
+    `${SETTINGS_ARM_REFUSAL_PREFIX}${p.why}, and nothing usable has been read from it since this worker started. ` +
     `Rather than trade on settings nobody chose (paper, the default strategy, an empty Telegram allowlist), it will not start. ` +
     (hosted
       ? "The file is ours, not yours: it is rewritten from your saved settings within a minute, and the agent starts on the tick after."

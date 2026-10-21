@@ -214,6 +214,17 @@ export async function listProposalRows(db: Db, tenant: string, o: { status?: Pro
   return await db.prepare(`${SELECT} WHERE tenant = ? ORDER BY created_at DESC LIMIT ?`).all(t, o.limit) as ProposalRow[];
 }
 
+/**
+ * Proposals still waiting for the owner and not lapsed, newest first. Lapsed
+ * rows keep 'awaiting_approval' until someone opens them, so the expiry is
+ * filtered before the limit; creation refuses more than MAX_OPEN_PROPOSALS
+ * live ones, so a page of twice that holds them all.
+ */
+export async function liveAwaitingRows(db: Db, tenant: string, now: number, limit = 2 * MAX_OPEN_PROPOSALS): Promise<ProposalRow[]> {
+  return await db.prepare(`${SELECT} WHERE tenant = ? AND status = 'awaiting_approval' AND expires_at > ? ORDER BY created_at DESC LIMIT ?`)
+    .all(tenant.toLowerCase(), now, limit) as ProposalRow[];
+}
+
 /** The binding minus fields that legitimately differ between two submissions of the same request. */
 function stable(b: Binding): unknown {
   const { expires_at: _e, ...rest } = b as Binding & { quote?: unknown };
