@@ -598,8 +598,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   }
   /**
    * The most each live limit may be saved at while the account's registered permission, as activateLive kept it, may allow more
-   * than the caps: the larger of the cap and that permission's limit, of whichever is known (never null together: callers ask
-   * only with one of them).
+   * than the caps: the larger of the cap and that permission's limit, of whichever of them is known (callers ask only when at
+   * least one is).
    */
   function exitCeiling(caps: SolanaLiveCaps | null, kept: SolanaLiveCaps | undefined): SolanaLiveCaps {
     return Object.fromEntries((["perTradeUsdg", "dailyUsdg", "perTradeWsol", "dailyWsol"] as const).map((field: SolanaLiveCapField) => {

@@ -395,9 +395,10 @@ reads both from its own env, so the web and the Solana worker decide alike.
   `contracts/solana/programs/merrymen-vault/src/lib.rs`); admission counts the
   same way (a sale at the higher of its quote and its reference value when it
   is admitted, raised to its actual proceeds when it lands above them, in the
-  transaction that books it). So a buy is refused (`SOLANA_LIVE_EXIT_RESERVE`) once it would leave
-  too little of the rolling 24-hour limits to sell the account's whole recorded
-  SOL position inside them: the USDG the window already used, the buy, and the
+  transaction that books it). So a buy is refused (`SOLANA_LIVE_EXIT_RESERVE`)
+  once it would leave too little of the rolling 24-hour limits to sell the
+  account's whole recorded SOL position inside them: the USDG the window
+  already used, the buy, and the
   position after it valued at the independent price plus the reference
   tolerance must fit the USDG per 24 hours limit, and that position must fit
   what sales left of the SOL sold per 24 hours limit
@@ -406,8 +407,7 @@ reads both from its own env, so the web and the Solana worker decide alike.
   every provider shows the vault holding it, and as activateLive kept it): the
   vault charges the exit to its own limits, so limits saved above the
   permission since (the caps raised, say) never let a buy use room the exit
-  will not get. It is
-  checked before anything is signed, at the highest price either provider
+  will not get. It is checked before anything is signed, at the highest price either provider
   serves, and again at admission; it never refuses a sale and never widens a
   limit. The autonomous strategy sizes its buys below it, and a refusal waits
   the strategy interval. At the defaults (10 and 25 USDG, 0.1 and 0.25 SOL) a
