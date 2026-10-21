@@ -421,8 +421,11 @@ reads both from its own env, so the web and the Solana worker decide alike.
   publishes a digest of the list and caps it runs
   (`solana_runtime_live_rollout_seen`; the worker with every heartbeat, the web
   whenever it serves Solana status, a preview or a trade). The web judges the
-  worker's while the worker is online; the worker judges the web's once the web
-  published it after the worker started. While they differ, every live buy is
+  worker's digest while it is under 90 s old, and counts a worker whose
+  heartbeat is current but whose digest is missing or older (deployed from code
+  that publishes none, or whose publish keeps failing) as differing; the worker
+  judges the web's once the web published it after the worker started. While
+  they differ, every live buy is
   held on both (`SOLANA_LIVE_ROLLOUT_DIFFERS`, a buys-only status blocker; trade
   and preview refuse buys as configuration) with
   `[alert] solana-live-rollout differs`. The worker cannot see a web change
@@ -1031,7 +1034,7 @@ interval shown while it persists.
 | `[alert] solana-reference-price refused: reason=<…> generation=<…> …` | web and worker | A Pyth read was refused (stale, missing, foreign, layout, unverified, …); no live trade is admitted, and no live permission is prepared, until a fresh, fully verified price is read (max age 120 s). Recovery: `[solana-reference-price] read again: …` on stdout | Check Pyth posting and both providers. `reason=config generation=invalid` means `MERRYMEN_SOLANA_PYTH_GENERATION` is wrong: fix the setting, it is not an outage. First refusal and new reasons at once, then at most every 60 s. RPC transport failures go to provider failover and are not alerted here. |
 | `[alert] solana-reference-tolerance misconfigured` | web and worker | `MERRYMEN_SOLANA_REFERENCE_TOLERANCE_BPS` unreadable; every live trade, exits included, is refused | Fix the setting (50 to 1000). At most once a minute. |
 | `[alert] solana-jupiter-key misconfigured` | web and worker | `MERRYMEN_JUPITER_API_KEY` is set but unusable; every quote and live route, exits included, is refused | Fix the key. Unset or empty is "not configured" (a status blocker, no alert). At most once a minute. |
-| `[alert] solana-live-rollout differs: …` | web and worker | The web and the Solana worker run different `MERRYMEN_SOLANA_LIVE_TENANTS` or `MERRYMEN_SOLANA_LIVE_MAX_*` settings (one was redeployed without the other); every live buy is held on both, and status says so | Deploy both with the same values (hosted-deploy.md, "Turning Solana on", step 4). Exits, revoke and withdraw continue. At most once a minute per process. |
+| `[alert] solana-live-rollout differs: …` | web and worker | The web and the Solana worker run different `MERRYMEN_SOLANA_LIVE_TENANTS` or `MERRYMEN_SOLANA_LIVE_MAX_*` settings (one was redeployed without the other), or (from the web) the worker is running but has not published its settings for over 90 s; every live buy is held on both, and status says so | Deploy both with the same values (hosted-deploy.md, "Turning Solana on", step 4). Exits, revoke and withdraw continue. At most once a minute per process. |
 | `[alert] solana-live-rollout misconfigured: <setting and entry position>` | web and worker | `MERRYMEN_SOLANA_LIVE_TENANTS` or a `MERRYMEN_SOLANA_LIVE_MAX_*` cap cannot be read; no new live permission or live buy is admitted, for any tenant | Fix the setting the line names (the value is never printed). Exits, revoke and withdraw continue. At most once a minute. |
 | `[alert] Solana transactions stuck pending` (JSON counts and oldest age) | worker | A live trade or signed owner transaction has been pending over 3 minutes; each holds its account (no new trade, no owner transaction but a revoke) | Check both providers; `npm run solana:resolve -- pending`, then `show` / `owner show` and, with evidence, `book`. Every 10 min. |
 | `[alert] Solana vault below its book` (`kind: vault-below-book`, account ref) | worker | Tokens left a vault outside Merrymen | [A vault below its book](#a-vault-below-its-book). Every 10 min per account. |

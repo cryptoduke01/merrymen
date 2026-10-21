@@ -203,9 +203,11 @@ async function fixture(t: TestContext, opts: { cash: bigint; wsol: bigint; mark:
   // `log` receives the runtime's operator lines (default: stderr); `service`, which service it is (default: the web).
   const runtime = (more: Record<string, string> = {}, via: SolanaLiveRpc = rpc, log?: (line: string) => void, service?: "web" | "worker") =>
     createSolanaAppRuntime({ db, rpc: via, market, env: { ...env, ...more }, now: () => clock.now, ...(log ? { log } : {}), ...(service ? { service } : {}) }), app = runtime();
+  const runtime_ = (service: "web" | "worker") => runtime({}, rpc, undefined, service);
   const submissions = async () => (await db.prepare("SELECT request_id,notional_raw,submission_json FROM solana_runtime_submissions").all() as
     Array<{ request_id: string; notional_raw: string; submission_json: string }>).map(r => ({ ...r, submission: JSON.parse(r.submission_json) as SolanaSignedSubmission }));
-  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = app, log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
+  // The agent runs the worker's runtime by default, as runSolanaAgent does: it publishes its settings as the worker's, beside the web's.
+  const agent = (runtime: ReturnType<typeof createSolanaAppRuntime> = runtime_("worker"), log?: (line: string) => void) => createSolanaAgent({ db, runtime, market, now: () => clock.now, ...(log ? { log } : {}) });
   // `rpc`, `env`, `clock`, `sessionKeys` and `vault` let a test build an executor of its own on this chain.
   /** Close the database file and open it again: everything held in memory by earlier runtimes is gone. */
   const reopen = () => { if (!opts.dbFile) assert.fail("reopen needs a database file"); raw.close(); raw = new DatabaseSync(opts.dbFile); db = wrapSqlite(raw); return db; };
@@ -1049,7 +1051,7 @@ test("live rollout: the autonomous worker places no live buy for a tenant off ME
   assert.ok(!f.net.urls.includes(SWAP_BUILD), "no route was built, so nothing could be signed");
   // The same account on the list: the worker's next tick buys.
   f.clock.now += 61_000;
-  assert.deepEqual((await f.agent(f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: TENANT })).tick()).map(r => r.outcome), ["submitted"]);
+  assert.deepEqual((await f.agent(f.runtime({ MERRYMEN_SOLANA_LIVE_TENANTS: TENANT }, undefined, undefined, "worker")).tick()).map(r => r.outcome), ["submitted"]);
   const [row] = await f.submissions();
   assert.equal(row!.submission.intent.inputMint, SOLANA_USDG_MINT, "a buy"); assert.equal(f.sends.length, 1);
 });

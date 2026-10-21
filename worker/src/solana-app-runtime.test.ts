@@ -2723,6 +2723,34 @@ test("live rollout: a list entry in any case names the tenant, whose id is lower
   } finally { f.raw.close(); }
 });
 
+test("live rollout: the web treats a running Solana worker whose settings digest is missing or stale as differing, holding live buys with the [alert]; a stopped worker is not judged", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    const lines: string[] = [];
+    const unseen = () => lines.filter(line => line.startsWith("[alert] solana-live-rollout differs: the Solana worker is running but has not published")).length;
+    const web = f.runtime({ env: f.env, log: line => lines.push(line) });
+    const beat = (atMs: number) => f.db.prepare(`INSERT INTO solana_runtime_worker_heartbeat(worker,last_seen_at_ms) VALUES('solana',?)
+      ON CONFLICT(worker) DO UPDATE SET last_seen_at_ms=excluded.last_seen_at_ms`).run(atMs);
+    // A worker heartbeat with no digest at all: a worker deployed from code that publishes none.
+    await beat(f.clock.now);
+    const held = await web.status(f.scope);
+    assert.deepEqual(held.live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]); assert.equal(held.live.canExit, true);
+    await assert.rejects(web.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "unseen-buy" } }), rollout(SOLANA_LIVE_ROLLOUT_DIFFERS, "configuration"));
+    assert.equal(unseen(), 1);
+    // The worker publishes the same settings: nothing differs.
+    await f.runtime({ env: f.env, service: "worker", log: () => {} }).publishLiveRollout();
+    assert.deepEqual((await web.status(f.scope)).live.blockers, []);
+    // Its digest goes stale while its heartbeat stays current (a publish that keeps failing): held again.
+    f.clock.now += 91_000; await beat(f.clock.now);
+    assert.deepEqual((await web.status(f.scope)).live.blockers, [SOLANA_LIVE_ROLLOUT_DIFFERS]);
+    assert.equal(unseen(), 2, "said again after a minute");
+    // A worker that stopped altogether (its heartbeat over 90 s old too) is not judged.
+    f.clock.now += 91_000;
+    assert.deepEqual((await web.status(f.scope)).live.blockers, []);
+  } finally { f.raw.close(); }
+});
+
 test("live rollout: while the web and the Solana worker run different list or cap settings, each holds live buys and says so, with one [alert] a minute; exits stay open", async () => {
   const f = await fixture();
   try {
