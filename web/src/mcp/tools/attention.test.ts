@@ -159,12 +159,41 @@ test("a breaker the worker restates every tick is one act_now item from the star
   const item = only(await ask(), "breaker");
   assert.equal(item.severity, "act_now");
   assert.equal(item.started_at, new Date((NOW - 2 * HOUR) * 1000).toISOString());
-  assert.equal(item.key, `breaker:${SLUG_A}:${NOW - 2 * HOUR}`);
+  assert.equal(item.key, `breaker:${SLUG_A}:on`);
   assert.equal(item.what_to_do, null);
   assert.equal(item.owner_can_fix, false);
   assert.doesNotMatch(item.detail, /raise|lower|increase|re-sign/i);
   // An hour after the last sighting it has recovered.
   assert.deepEqual((await ask({}, undefined, NOW + HOUR)).items.filter((i) => i.kind === "breaker"), []);
+});
+
+test("a breaker tripped longer than the lookback keeps its key when its start falls out of the window: not new, not resolved", async () => {
+  const { d, ask } = await setup();
+  agentRow(d, ACCOUNT_A);
+  for (let at = NOW - 20 * HOUR; at <= NOW + 4 * HOUR; at += 240) event(d, ACCOUNT_A, BREAKER, at);
+  const before = only(await ask(), "breaker");
+  assert.equal(before.started_at, new Date((NOW - 20 * HOUR) * 1000).toISOString());
+  const later = await ask({ seen_keys: [before.key] }, undefined, NOW + 4 * HOUR + 60);
+  const after = only(later, "breaker");
+  assert.equal(after.started_at, null, "the first sighting is now older than the window");
+  assert.equal(after.key, before.key);
+  assert.equal(after.new, false);
+  assert.deepEqual(later.resolved_keys, []);
+});
+
+test("an agent stopped on purpose (kill switch, or a discarded permission) is fyi, never 'no permission signed yet' or a stale worker", async () => {
+  {
+    const { d, ask } = await setup({ agentA: { account: null, accounts: [ACCOUNT_A], expiresAt: null } });
+    agentRow(d, ACCOUNT_A, { status: "killed", beat: NOW - 3 * DAY });
+    const r = await ask();
+    assert.deepEqual(r.items.map((i) => [i.kind, i.severity]), [["killed", "fyi"]]);
+    restore?.(); restore = null;
+  }
+  const { d, ask } = await setup({ agentA: { account: null, accounts: [ACCOUNT_A], expiresAt: null } });
+  agentRow(d, ACCOUNT_A, { status: "armed", beat: NOW - 3 * DAY });
+  const r = await ask();
+  assert.deepEqual(r.items.map((i) => [i.key, i.severity]), [[`no-permission:${SLUG_A}:removed`, "fyi"]]);
+  assert.match(r.items[0]!.title, /No trading permission is active/);
 });
 
 test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it)", async () => {
@@ -274,15 +303,25 @@ test("undelivered Telegram alerts are an fyi item under notifications:manage", a
   agentRow(d, ACCOUNT_A);
   d.raw.prepare(`INSERT INTO notify_subscriptions (id, tenant, agent_slug, channel, kind, params_json, status, connection_id, cursor_json, created_at, updated_at, last_evaluated_at)
     VALUES ('sub_1', ?, ?, 'telegram', 'risk_halt', '{}', 'active', 'c', NULL, ?, ?, NULL)`).run(OWNER_A, SLUG_A, NOW - DAY, NOW - DAY);
-  for (const [id, at] of [["dl_1", NOW - 5 * HOUR], ["dl_2", NOW - HOUR], ["dl_old", NOW - 3 * DAY]] as const) {
-    d.raw.prepare(`INSERT INTO notify_deliveries (id, subscription_id, tenant, dedupe_key, kind, channel, status, attempts, next_attempt_at, last_error_code, payload_json, created_at, sent_at)
-      VALUES (?, 'sub_1', ?, ?, 'risk_halt', 'telegram', 'dead', 5, 0, NULL, '{}', ?, NULL)`).run(id, OWNER_A, `k:${id}`, at);
-  }
-  const item = only(await ask(), "alerts-failing");
+  const dead = (id: string, at: number, code: string) => d.raw.prepare(`INSERT INTO notify_deliveries (id, subscription_id, tenant, dedupe_key, kind, channel, status, attempts, next_attempt_at, last_error_code, payload_json, created_at, sent_at)
+      VALUES (?, 'sub_1', ?, ?, 'risk_halt', 'telegram', 'dead', 5, 0, ?, '{}', ?, NULL)`).run(id, OWNER_A, `k:${id}`, code, at);
+  dead("dl_old", NOW - 3 * DAY, "chat_not_found");
+  dead("dl_1", NOW - 5 * HOUR, "network");
+  dead("dl_2", NOW - HOUR, "chat_not_found");
+  let item = only(await ask(), "alerts-failing");
   assert.equal(item.severity, "fyi");
-  assert.match(item.detail, /^2 alert message/);
+  assert.match(item.detail, /^2 alert message.*Link it again/);
   assert.equal(item.started_at, new Date((NOW - 5 * HOUR) * 1000).toISOString());
+  assert.equal(item.owner_can_fix, true);
   assert.equal(item.link, "https://app.test/settings");
+
+  // The newest failure is Telegram being unreachable: no setting clears it, so no chore and no link.
+  dead("dl_3", NOW - 60, "network");
+  item = only(await ask(), "alerts-failing");
+  assert.equal(item.key, "alerts-failing:-:on", "the same condition keeps its key");
+  assert.equal(item.owner_can_fix, false);
+  assert.equal(item.what_to_do, null);
+  assert.equal(item.link, null);
 });
 
 test("another owner's agent never appears, and asking for it by id is not found", async () => {

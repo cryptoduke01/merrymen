@@ -12,7 +12,14 @@
  *    told which items are new and which have resolved, so it can stay quiet
  *    about what the owner has heard and say so when something is fixed. A
  *    severity that rises (a permission three days from expiry, then one) is a
- *    new key, so it is news again;
+ *    new key, so it is news again. A key is built only from durable facts (an
+ *    expiry, a heartbeat, a blocker rule, a proposal id), NEVER from a time
+ *    read inside the lookback window: that time moves as the window slides
+ *    (a run's first sighting becomes unknown, the oldest refusal ages out)
+ *    and would re-announce a condition that never changed. A condition with
+ *    no durable identity (a tripped breaker, a reached cap) is keyed `on`;
+ *    one that clears and recurs between two checks is therefore the same
+ *    key, while one reported resolved and then recurring is news again;
  *  - STARTED_AT, when the condition began or crossed into its severity, or
  *    null when no record says (a live blocker is a current fact on the
  *    agent's row, with no time). Never a guess.
@@ -100,6 +107,9 @@ const EXPIRY_TIERS: ReadonlyArray<{ within: number; severity: Severity; tag: str
   { within: 3 * DAY, severity: "today", tag: "72h" },
   { within: 7 * DAY, severity: "fyi", tag: "7d" },
 ];
+
+/** Delivery failures the owner can clear (their chat, their bot, their switches); the rest are Telegram's or Merrymen's. */
+const OWNER_DELIVERY_CODES: ReadonlySet<string> = new Set(["no_linked_telegram", "owner_disabled", "bot_blocked", "chat_not_found", "bot_token_rejected"]);
 
 const RENEW = "Re-sign the trading permission in Merrymen (Wallet & permissions). Renewal revokes the old permission on chain and costs network fees.";
 
@@ -212,6 +222,16 @@ export interface AgentAttentionInput {
   links: AttentionLinks;
 }
 
+function killedItem(slug: string, links: AttentionLinks, at: number | null): AttentionItem {
+  return {
+    key: `killed:${slug}:on`, severity: "fyi", kind: "killed", agent: slug,
+    title: "Kill switch is on",
+    detail: "The trading key was removed, so the agent can sign nothing. Funds stay in the owner's smart account.",
+    owner_can_fix: true, what_to_do: "Sign a new trading permission in Merrymen when the agent should trade again.", link: links.grant,
+    started_at: at, ends_at: null,
+  };
+}
+
 /**
  * Everything about one agent that needs its owner, and the agent's name as its
  * worker reports it (owner-chosen text: the caller sanitises it). THROWS when
@@ -219,6 +239,24 @@ export interface AgentAttentionInput {
  */
 export async function readAgentAttention(db: Db, input: AgentAttentionInput): Promise<{ name: string | null; items: AttentionItem[] }> {
   const { slug, account, now, links } = input;
+  if (!account && input.accounts.length) {
+    // The identity has held an account but holds no permission now: the owner
+    // used the kill switch or discarded the permission to start over. A
+    // deliberate stop, not an agent that was never signed.
+    const last = await readAgentRow(db, input.accounts[0]!);
+    const name = last?.name ?? input.settings?.agentName ?? null;
+    if (last?.status === "killed") return { name, items: [killedItem(slug, links, null)] };
+    return {
+      name,
+      items: [{
+        key: `no-permission:${slug}:removed`, severity: "fyi", kind: "no-permission", agent: slug,
+        title: "No trading permission is active",
+        detail: "The agent's trading permission was discarded, so it cannot trade until a new one is signed. Funds stay in the owner's smart account.",
+        owner_can_fix: true, what_to_do: "Sign a new trading permission in Merrymen when the agent should trade again.", link: links.grant,
+        started_at: null, ends_at: null,
+      }],
+    };
+  }
   const items = permissionItems(slug, account, input.expiresAt, now, links);
   if (!account) return { name: input.settings?.agentName ?? null, items };
 
@@ -247,19 +285,10 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     if (kind) seen[kind].push(Number(ev.created_at));
   }
 
-  if (status === "killed") {
-    const at = seen.kill[0] ?? null;
-    items.push({
-      key: `killed:${slug}:${at ?? "open"}`, severity: "fyi", kind: "killed", agent: slug,
-      title: "Kill switch is on",
-      detail: "The trading key was removed, so the agent can sign nothing. Funds stay in the owner's smart account.",
-      owner_can_fix: true, what_to_do: "Sign a new trading permission in Merrymen when the agent should trade again.", link: links.grant,
-      started_at: at, ends_at: null,
-    });
-  }
+  if (status === "killed") items.push(killedItem(slug, links, seen.kill[0] ?? null));
   if (status === "error") {
     items.push({
-      key: `arm-error:${slug}:open`, severity: "today", kind: "arm-error", agent: slug,
+      key: `arm-error:${slug}:on`, severity: "today", kind: "arm-error", agent: slug,
       title: "The agent could not arm its trading key",
       detail: "The worker reports that it could not arm the trading key, so nothing is signed. This is Merrymen's to fix, not the owner's.",
       owner_can_fix: false, what_to_do: null, link: null, started_at: null, ends_at: null,
@@ -297,7 +326,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   if (seen.breaker.length && now - seen.breaker[0]! <= currentSec) {
     const start = runStart(seen.breaker, gapSec, floor, truncated);
     items.push({
-      key: `breaker:${slug}:${start ?? "open"}`, severity: "act_now", kind: "breaker", agent: slug,
+      key: `breaker:${slug}:on`, severity: "act_now", kind: "breaker", agent: slug,
       title: "Drawdown breaker tripped",
       detail: "The book is below the drawdown limit in the signed permission, so buys are refused until it recovers. Selling is never blocked.",
       owner_can_fix: false, what_to_do: null, link: null, started_at: start, ends_at: null,
@@ -311,7 +340,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   if (provider) {
     const start = runStart(seen[provider], gapSec, floor, truncated);
     items.push({
-      key: `provider-failure:${slug}:${provider}-${start ?? "open"}`, severity: "fyi", kind: "provider-failure", agent: slug,
+      key: `provider-failure:${slug}:${provider}`, severity: "fyi", kind: "provider-failure", agent: slug,
       title: PROVIDER_TITLE[provider],
       detail: `${PROVIDER_TEXT[provider]} This is Merrymen's to fix; the owner has nothing to do.`,
       owner_can_fix: false, what_to_do: null, link: null, started_at: start, ends_at: null,
@@ -330,7 +359,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     const start = first - floor > CAP_CURRENT_SEC ? first : null;
     const daily = c.rule === "daily-cap";
     items.push({
-      key: `${daily ? "daily-cap" : "ops-cap"}:${slug}:${start ?? "open"}`, severity: "fyi", kind: daily ? "daily-cap" : "ops-cap", agent: slug,
+      key: `${daily ? "daily-cap" : "ops-cap"}:${slug}:on`, severity: "fyi", kind: daily ? "daily-cap" : "ops-cap", agent: slug,
       title: daily ? "Daily spending cap reached" : "Daily trade count reached",
       detail: daily
         ? "Buys past the daily spending cap sealed in the signed permission are refused until the trailing 24-hour window rolls. Selling is never blocked."
@@ -359,15 +388,20 @@ export function proposalItems(rows: ReadonlyArray<{ id: string; kind: string; ag
   }));
 }
 
-/** One item when alert messages to the owner's Telegram died in the lookback. */
+/**
+ * One item when alert messages to the owner's Telegram died in the lookback.
+ * The newest failure's code says whose it is: the owner's chat, bot or
+ * switches, or a Telegram or Merrymen failure no setting can clear.
+ */
 export function deliveryItems(dead: { count: number; first: number; lastErrorCode: string | null } | null, links: AttentionLinks): AttentionItem[] {
   if (!dead || dead.count <= 0) return [];
   const why = dead.lastErrorCode ? DELIVERY_ERROR_TEXT[dead.lastErrorCode] ?? null : null;
+  const owners = dead.lastErrorCode !== null && OWNER_DELIVERY_CODES.has(dead.lastErrorCode);
   return [{
-    key: `alerts-failing:-:${dead.first}`, severity: "fyi", kind: "alerts-failing", agent: null,
+    key: "alerts-failing:-:on", severity: "fyi", kind: "alerts-failing", agent: null,
     title: "Telegram alerts are not being delivered",
-    detail: `${dead.count} alert message(s) in the last 24 hours could not be delivered${why ? `: ${why}` : "."}`,
-    owner_can_fix: true, what_to_do: "Check the Telegram link in Merrymen Settings.", link: links.settings,
+    detail: `${dead.count} alert message(s) in the last 24 hours could not be delivered${why ? `: ${why}` : "."}${owners ? "" : " This is not something a setting can fix."}`,
+    owner_can_fix: owners, what_to_do: owners ? "Check the Telegram link and bot in Merrymen Settings." : null, link: owners ? links.settings : null,
     started_at: dead.first, ends_at: null,
   }];
 }
