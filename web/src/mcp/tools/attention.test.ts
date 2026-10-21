@@ -12,6 +12,7 @@ import { afterEach, test } from "node:test";
 import { getAddress } from "viem";
 import { ATTENTION_EVENTS_MAX, conditionOfKey, runStart } from "@/lib/services/attention";
 import { settingsArmRefusal } from "../../../../worker/src/settings";
+import { FLEET_RECOVERY_SCHEMA } from "../../../../worker/src/fleet-recovery";
 import { MAX_OPEN_PROPOSALS, proposalRow } from "@/lib/services/proposals";
 import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
@@ -492,6 +493,28 @@ test("a breaker hidden behind more newer warnings than one read takes is not rep
   assert.deepEqual(r.items.filter((i) => i.kind === "breaker"), [], "out of the page");
   assert.deepEqual(r.resolved_keys, [], "but its absence was not established");
   assert.ok(r.not_checked.some((n) => n.part === `older warnings of agent ${SLUG_A}` && n.scope === null), "no scope grants a longer read");
+});
+
+test("a recovery hold is tested first: the held agent gets one item with no chore, its other keys stay unknown, and an unreadable report is judged as no hold", async () => {
+  const { d, ask } = await setup({ agentA: { expiresAt: NOW - HOUR } });
+  agentRow(d, ACCOUNT_A, { status: "armed", beat: NOW - 2 * HOUR, blocker: "no-gas" });
+  d.raw.exec(FLEET_RECOVERY_SCHEMA);
+  d.raw.prepare("INSERT INTO fleet_recovery_health VALUES (?, ?, ?, 1, 'persistent-source', ?, ?)").run(OWNER_A, ACCOUNT_A, 4663, NOW - DAY, NOW - 60);
+  const seen = [`worker-stale:${SLUG_A}:${NOW - 2 * HOUR}`, `live-blocker:${SLUG_A}:no-gas`, `permission-expired:${SLUG_A}:${NOW - HOUR}`];
+  const r = await ask({ seen_keys: seen });
+  assert.deepEqual(r.items.map((i) => [i.key, i.severity, i.owner_can_fix, i.what_to_do, i.link]), [[`recovery-hold:${SLUG_A}:on`, "today", false, null, null]]);
+  assert.match(r.items[0]!.detail, /expired at .*offered once the hold lifts/);
+  assert.deepEqual(r.resolved_keys, [], "judged on the hold alone, so nothing else is known to be fixed");
+
+  d.raw.prepare("UPDATE fleet_recovery_health SET held = 0").run();
+  const lifted = await ask({ seen_keys: [`recovery-hold:${SLUG_A}:on`] });
+  assert.deepEqual(lifted.resolved_keys, [`recovery-hold:${SLUG_A}:on`]);
+  assert.deepEqual(lifted.items.map((i) => i.kind), ["permission-expired"], "the owner's step comes back once the hold lifts");
+
+  d.raw.prepare("UPDATE fleet_recovery_health SET held = 1, cause = 'not-a-cause'").run();
+  const unread = await ask();
+  assert.ok(unread.not_checked.some((n) => n.part === `recovery hold of agent ${SLUG_A}` && n.scope === null));
+  assert.equal(only(unread, "permission-expired").severity, "act_now", "an unreadable report never becomes a hold");
 });
 
 test("another owner's agent never appears, and asking for it by id is not found", async () => {

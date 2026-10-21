@@ -35,6 +35,9 @@
  *                                                (notify.ts classifyAlertEvent)
  *   an arm failure ............................. the event the inactivity
  *                                                diagnosis reads (classifyEvent)
+ *   a recovery hold ............................ fleet-recovery.ts
+ *                                                readFleetRecoveryHold, tested
+ *                                                first, as the diagnosis does
  *   spending and trade-count caps .............. rejected trades, daily-cap / ops-cap
  *
  * NO RISK LIMIT IS OFFERED AS A FIX. A tripped breaker or a reached cap is the
@@ -53,6 +56,7 @@ import { blockerAdvice } from "../live-blocker";
 import { blockerView, freshWithin, readAgentRow } from "./agent-status";
 import { classifyEvent } from "./inactivity";
 import { SETTINGS_ARM_REFUSAL_PREFIX } from "../../../../worker/src/settings";
+import { readFleetRecoveryHold } from "../../../../worker/src/fleet-recovery";
 import type { SettingsView } from "./settings-view";
 
 export type Severity = "act_now" | "today" | "fyi";
@@ -66,7 +70,7 @@ export const SEVERITY_MEANING: Readonly<Record<Severity, string>> = Object.freez
 
 export type AttentionKind =
   | "no-permission" | "permission-expired" | "permission-expiring" | "live-blocker" | "breaker" | "worker-stale"
-  | "arm-error" | "killed" | "daily-cap" | "ops-cap" | "provider-failure" | "proposal-waiting" | "alerts-failing";
+  | "arm-error" | "killed" | "daily-cap" | "ops-cap" | "provider-failure" | "proposal-waiting" | "alerts-failing" | "recovery-hold";
 
 export interface AttentionItem {
   /** `<kind>:<agent slug or ->:<what distinguishes this occurrence>`; stable while the condition and severity hold. */
@@ -234,6 +238,9 @@ const PROVIDER_TITLE: Readonly<Record<keyof typeof PROVIDER_TEXT, string>> = {
 
 export interface AgentAttentionInput {
   slug: string;
+  /** The owner, with the current account and the grant's chain the key of a recovery hold. */
+  tenant: string;
+  chainId: number | null;
   /** The current smart account; null before the first signed permission. */
   account: string | null;
   /** Every account the agent has held (older ledger rows live under these). */
@@ -261,7 +268,18 @@ function killedItem(slug: string, links: AttentionLinks, at: number | null): Att
  * worker reports it (owner-chosen text: the caller sanitises it). THROWS when
  * the ledger cannot be read.
  */
-export async function readAgentAttention(db: Db, input: AgentAttentionInput): Promise<{ name: string | null; items: AttentionItem[]; eventsCut: boolean }> {
+export interface AgentAttention {
+  name: string | null;
+  items: AttentionItem[];
+  /** The event scan filled its page: event-read conditions may be missing. */
+  eventsCut: boolean;
+  /** Held for recovery: nothing but the hold was judged, so no other key of this agent is known to be resolved. */
+  held: boolean;
+  /** The recovery report could not be read; the agent was judged as if not held. */
+  holdUnread: boolean;
+}
+
+export async function readAgentAttention(db: Db, input: AgentAttentionInput): Promise<AgentAttention> {
   const { slug, account, now, links } = input;
   if (!account && input.accounts.length) {
     // The identity has held an account but holds no permission now: the owner
@@ -269,10 +287,12 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     // deliberate stop, not an agent that was never signed.
     const last = await readAgentRow(db, input.accounts[0]!);
     const name = last?.name ?? input.settings?.agentName ?? null;
-    if (last?.status === "killed") return { name, items: [killedItem(slug, links, null)], eventsCut: false };
+    if (last?.status === "killed") return { name, items: [killedItem(slug, links, null)], eventsCut: false, held: false, holdUnread: false };
     return {
       name,
       eventsCut: false,
+      held: false,
+      holdUnread: false,
       items: [{
         key: `no-permission:${slug}:removed`, severity: "fyi", kind: "no-permission", agent: slug,
         title: "No trading permission is active",
@@ -283,9 +303,43 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     };
   }
   const items = permissionItems(slug, account, input.expiresAt, now, links);
-  if (!account) return { name: input.settings?.agentName ?? null, items, eventsCut: false };
+  if (!account) return { name: input.settings?.agentName ?? null, items, eventsCut: false, held: false, holdUnread: false };
 
   const row = await readAgentRow(db, account);
+  // A RECOVERY HOLD IS TESTED FIRST, keyed as the diagnosis and the grants
+  // route key it (this owner, the current account, the grant's chain). A held
+  // agent's supervisor runs no trading worker for it until its saved records
+  // are verified, so its heartbeat, blockers and limits are the hold, and no
+  // step is asked of the owner: lifting it is on Merrymen's side. An expired
+  // permission is named in it and offered once the hold lifts. A report that
+  // cannot be read counts as no hold, never as one, and is said.
+  let hold: { checkedAt: number } | null = null;
+  let holdUnread = false;
+  if (input.chainId !== null) {
+    try {
+      hold = await readFleetRecoveryHold(db, { tenant: input.tenant, smartAccount: account, chainId: input.chainId });
+    } catch {
+      holdUnread = true;
+    }
+  }
+  if (hold) {
+    const exp = input.expiresAt;
+    const also = exp === null ? "" : exp <= now
+      ? ` Its trading permission also expired at ${iso(exp)}; renewing it is offered once the hold lifts.`
+      : exp - now <= 7 * DAY ? ` Its trading permission expires at ${iso(exp)}; renewing it is offered once the hold lifts.` : "";
+    return {
+      name: row?.name ?? input.settings?.agentName ?? null,
+      eventsCut: false,
+      held: true,
+      holdUnread: false,
+      items: [{
+        key: `recovery-hold:${slug}:on`, severity: "today", kind: "recovery-hold", agent: slug,
+        title: "Trading is paused for recovery",
+        detail: `Merrymen is holding this agent until its saved trading records are verified (last confirmed at ${iso(hold.checkedAt)}). A held agent does not trade, and nothing is asked of the owner: lifting the hold is on Merrymen's side.${also}`,
+        owner_can_fix: false, what_to_do: null, link: null, started_at: null, ends_at: null,
+      }],
+    };
+  }
   const status = row?.status ?? null;
   const freshWithinSec = freshWithin(input.settings?.tickSeconds);
   const beat = row?.beat_at ?? null;
@@ -440,7 +494,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       owner_can_fix: false, what_to_do: null, link: null, started_at: start, ends_at: null,
     });
   }
-  return { name: row?.name ?? input.settings?.agentName ?? null, items, eventsCut: truncated };
+  return { name: row?.name ?? input.settings?.agentName ?? null, items, eventsCut: truncated, held: false, holdUnread };
 }
 
 const PROPOSAL_TITLE: Readonly<Record<string, string>> = {

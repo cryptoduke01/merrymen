@@ -40,7 +40,7 @@ const COUNTS = z.object({ act_now: z.number(), today: z.number(), fyi: z.number(
 const ITEM = z.object({
   key: z.string().describe("Stable while the condition and its severity hold; a rise in severity is a new key"),
   severity: SEVERITY,
-  kind: z.string().describe("no-permission, permission-expired, permission-expiring, live-blocker, breaker, worker-stale, arm-error, killed, daily-cap, ops-cap, provider-failure, proposal-waiting or alerts-failing"),
+  kind: z.string().describe("no-permission, permission-expired, permission-expiring, live-blocker, breaker, worker-stale, arm-error, killed, daily-cap, ops-cap, provider-failure, proposal-waiting, alerts-failing or recovery-hold"),
   agent: z.string().nullable().describe("Agent id, or null for an item about the owner's account as a whole"),
   agent_name: z.string().nullable().describe("The agent's name (owner-chosen text)"),
   title: z.string(),
@@ -93,9 +93,17 @@ const getAttention = defineTool({
     const names = new Map<string, string | null>();
     const items: AttentionItem[] = [];
     const eventsCut = new Set<string>();
+    const held = new Set<string>();
     await ctx.ledger(async (db) => {
       for (const a of agents) {
-        const r = await readAgentAttention(db, { slug: a.slug, account: a.account, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, links });
+        const r = await readAgentAttention(db, {
+          slug: a.slug, tenant: ctx.principal.tenant, chainId: a.chainId, account: a.account, accounts: a.accounts,
+          grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, links,
+        });
+        if (r.held) held.add(a.slug);
+        if (r.holdUnread) {
+          notChecked.push({ part: `recovery hold of agent ${a.slug}`, why: "Its recovery report could not be read, so it was judged as if it were not held.", scope: null });
+        }
         names.set(a.slug, untrusted(r.name, 64));
         items.push(...r.items);
         if (r.eventsCut) {
@@ -172,6 +180,8 @@ const getAttention = defineTool({
       if (kind === "alerts-failing") return alertsChecked && (agent === "-" ? ref === undefined : slugs.has(agent));
       if (EVENT_KINDS.has(kind as AttentionKind) && eventsCut.has(agent)) return false;
       if (kind === "proposal-waiting") return !proposalsCut && kindChecked(rest.split(".")[0]!) && (agent === "-" ? ref === undefined : slugs.has(agent));
+      // A held agent was judged on its hold alone: its other conditions are unknown, not gone.
+      if (held.has(agent) && kind !== "recovery-hold") return false;
       return slugs.has(agent);
     };
     const resolved = [...seen].filter((k) => !openConditions.has(conditionOfKey(k)) && looked(k));
