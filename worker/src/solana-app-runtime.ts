@@ -505,7 +505,8 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
    *   failing) runs settings the web cannot see: that counts as differing too, so the web never takes it as agreement;
    * - the worker judges the web's once the web published it after this worker started (one from before may predate the very
    *   change this worker was deployed with). Until the web serves a Solana request after its own redeploy, the worker cannot
-   *   know of it: the runbook holds trading first ("Turning Solana on").
+   *   know of it: the runbook deploys every change to the worker first, then the web ("Turning Solana on", step 4), so the
+   *   worker runs the new settings at once and the web holds buys until it does too.
    * While they differ every live buy is held, here and there: status says so as a buys-only blocker, trade and preview refuse
    * buys as configuration, and the operator is told with an [alert] at most once a minute. Exits, revoke and withdraw never ask.
    */

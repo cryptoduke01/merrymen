@@ -435,8 +435,10 @@ reads both from its own env, so the web and the Solana worker decide alike.
   held on both (`SOLANA_LIVE_ROLLOUT_DIFFERS`, a buys-only status blocker; trade
   and preview refuse buys as configuration) with
   `[alert] solana-live-rollout differs`. The worker cannot see a web change
-  before the web serves a Solana request, so taking tenants off or lowering caps
-  starts with a hold (hosted-deploy.md, "Turning Solana on", step 4).
+  before the web serves a Solana request, so every change is deployed to the
+  worker first, then the web: the worker applies it at once, and the web holds
+  buys until it runs it too. No hold is needed, and sales and paper carry on
+  (hosted-deploy.md, "Turning Solana on", step 4).
 
 Status carries `liveAccess` (`onList`, `misconfigured` and the caps in force),
 never the list itself.
@@ -1372,7 +1374,7 @@ says where to change it. Superseded choices are listed under the current one.
 | Exits and the caps | Buys keep room for exits: a buy is refused when, after it, the whole position could not be sold inside the rolling 24-hour limits at the independent price plus the tolerance (`SOLANA_LIVE_EXIT_RESERVE`). The signed limits stay within the caps, so a day's buys stop at about half the USDG cap and a position stays within what one day can sell. Sales are never refused by it | Let the signed limits carry exit headroom beyond the caps (a separate `MERRYMEN_SOLANA_LIVE_MAX_EXIT_*`; rejected: it widens what a session key may do on chain); let the caps bound exits (rejected: an owner must always be able to exit); also reserve operations for the exit's sales (not done: the operation limit is the owner's own setting, not a platform cap) | `solanaBuyKeepsExitRoom` in `solana-trading-store.ts`, `assessRisk` in `solana-app-runtime.ts` |
 | A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |
 | A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
-| Web and worker run different list or caps | Every live buy held on both while they differ (one digest of all the settings, so a deploy that adds a tenant briefly holds everyone's buys), `[alert]` once a minute; exits continue. A web change reaches the worker only once the web serves a Solana request, so the runbook holds first | Compare per tenant; publish the web's digest at boot | `rolloutDiffers` in `solana-app-runtime.ts` |
+| Web and worker run different list or caps | Every live buy held on both while they differ (one digest of all the settings, so a deploy that adds a tenant briefly holds everyone's buys), `[alert]` once a minute; exits continue. A web change reaches the worker only once the web serves a Solana request, so the runbook deploys the worker first, then the web, and needs no hold | Compare per tenant. Publish the web's digest at boot (not done: the web has no boot hook, and during a deploy the old web container still serving requests republishes its old digest beside it). Have the worker hold buys until it sees a web digest newer than its own start (not done: it would not see a change made on the web alone either, and would hold buys after every worker restart until an owner opens the page) | `rolloutDiffers` in `solana-app-runtime.ts` |
 | Live buy previews off the list, while a cap cannot be read, or under a permission registered above caps lowered since | Refused before any quote, as the trade would be (the last by the limits kept in the session record when it was registered; a record from before they were kept is refused by the trade before signing) | Allowed | `preview`, `requireSessionWithinCaps` |
 | The page's default limits | Paper starts at 10 and 50 USDG (as before the caps; paper is never capped). Choosing live with no limits saved or typed starts at the caps in force (status's `liveAccess`, or the default caps from a server that reports none), so a first live save fits them; the SOL sold limits start at the caps beside saved paper limits too | One set of defaults at the default caps for both (rejected: it changed paper's starting limits) | `chooseMode` in `SolanaScreen.tsx` |
 

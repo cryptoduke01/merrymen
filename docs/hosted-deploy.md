@@ -763,7 +763,8 @@ it off; the full plan, settings and runbooks are in
   on both, status says so (a buys-only blocker; exits, revoke and withdraw
   continue) and `[alert] solana-live-rollout differs` pages the operator. The
   worker can only see a web change once the web has served a Solana request
-  since, so change them with the hold below. `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC`
+  since, so deploy a change to the worker first, then the web ("Turning Solana
+  on", step 4). `MERRYMEN_SOLANA_RESOLVE_THIRD_RPC`
   goes on an operator's machine only, and `MERRYMEN_SOLANA_RECOVER_RPC` only on
   an owner's own computer.
 - **Alert lines.** Once Solana is on, page on every line starting `[alert]` in
@@ -842,15 +843,24 @@ about half the USDG cap). Withdraw is never limited.
    trade, restart and outage, full exit, withdraw and revoke, expiry.
 4. **Widen.** Add tenants to the list, a few at a time, and raise the caps only
    as an owner decision. Every change to the list or the caps goes on web and
-   worker together; while they differ, live buys are held on both (above).
-   **To take tenants off the list or lower the caps,** the services apply the
-   change only once each is redeployed, so hold first: `npm run solana:hold --
-   set 0x<tenant> --reason "…"` for each tenant taken off (or `set all` for the
-   caps). A hold also pauses that tenant's sales, never its revoke or
-   withdrawals. Then change the setting on web and worker, deploy both, check
-   status shows no `[alert] solana-live-rollout differs`, and release the hold:
-   those taken off are exits-only from then on. For an incident, hold trading
-   (`npm run solana:hold -- set all --reason "…"`); never unset the web's
+   worker, **the Solana worker first, then the web**, each applying it only
+   once redeployed. The worker restarts with the new settings and judges only a
+   web digest published after it started, so it applies them at once; the web,
+   still on the old ones, sees the worker's new digest and holds every live
+   buy, for every tenant, until it is deployed too (above). So taking tenants
+   off the list or lowering the caps needs no hold: once the worker has
+   published the new ones (its first tick), no buy is made under the old ones,
+   and paper, sales, revoke and withdrawals carry on throughout. Once both are
+   deployed, check
+   status shows no `[alert] solana-live-rollout differs`; those taken off are
+   exits-only from then on. Deployed the other way round, the worker would
+   keep buying under its old settings until the web next serves a Solana
+   request (an owner opening the page). For an incident, hold trading: `npm
+   run solana:hold -- set all --reason "…"` refuses every new trade for
+   everyone, paper and live, buys and sales alike (revoke, withdrawals and
+   receipt recovery continue), and `set 0x<tenant>` holds one tenant the same
+   way; the hold CLI takes the tenant id in lowercase only, while
+   `MERRYMEN_SOLANA_LIVE_TENANTS` takes either case. Never unset the web's
    `MERRYMEN_SOLANA` alone, which also removes owners' in-app revoke and
    withdraw.
 
