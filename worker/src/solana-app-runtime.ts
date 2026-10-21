@@ -1216,8 +1216,9 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
     async preview(scope: SolanaAccountScope, input: { mode: "paper" | "live"; intent: unknown }) {
       const s = await store(scope), parsed = intent(input.intent, input.mode);
       if (input.mode === "paper") return paperService(s).preview(scope.owner, parsed);
-      // A live buy is previewed only for a tenant the live rollout admits; a sale (an exit) always is.
-      if (parsed.inputMint === SOLANA_USDG_MINT) await requireLiveOpen(s);
+      // A live buy is previewed only for a tenant the live rollout admits, and only while the caps can be read: trade() refuses it
+      // otherwise, so no paid quote is made for a buy that cannot execute. A sale (an exit) always is.
+      if (parsed.inputMint === SOLANA_USDG_MINT) { await requireLiveOpen(s); liveCaps(); }
       const cfg = config(); parseSolanaLiveIntent({ ...parsed, mode: "live", owner: scope.owner, vault: await deriveSolanaVaultAddress(cfg.programId, scope.owner) });
       const quote = await market().quote(parsed); validateSolanaQuote(quote, parsed, now());
       return { intent: { ...parsed, mode: "live" }, quote };

@@ -1318,7 +1318,7 @@ says where to change it. Superseded choices are listed under the current one.
 | Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
 | A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |
 | A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |
-| Live buy previews off the list | Refused before any quote | Allowed | `preview` |
+| Live buy previews off the list, or while a cap cannot be read | Refused before any quote, as the trade would be | Allowed. Not done: refusing the preview of a buy under a permission registered above caps lowered since (it needs a vault read, or the session's limits kept in its stored record; the trade refuses it before signing) | `preview` |
 | The page's default live limits | The default caps (25 USDG and 0.25 SOL a day; were 50 and 0.5) | — | `SolanaScreen.tsx` |
 
 **Release and infrastructure (Milla's decisions; nothing is done by default)**

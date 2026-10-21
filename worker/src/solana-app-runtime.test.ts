@@ -2684,3 +2684,21 @@ test("live rollout caps: a permission prepared before the caps were lowered is n
     assert.equal(f.controls.sends, 1);
   } finally { f.raw.close(); }
 });
+
+test("live rollout caps: a live buy preview is refused before any quote while a cap cannot be read, as the trade would be; a sale preview still quotes", async () => {
+  const f = await fixture();
+  try {
+    await readyLive(f); await cashBook(f);
+    let quotes = 0;
+    const counted: SolanaPaperMarket = { readMint: f.market.readMint, quote: async intent => { quotes++; return f.market.quote(intent); } };
+    const lines: string[] = [];
+    const app = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG: "nope" }, market: counted, log: line => lines.push(line) });
+    await assert.rejects(app.preview(f.scope, { mode: "live", intent: { ...f.trade, mode: "live" } }), rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration"));
+    await assert.rejects(app.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "unreadable-caps-buy" } }), rollout(SOLANA_LIVE_ROLLOUT_MISCONFIGURED, "configuration"));
+    assert.equal(quotes, 0, "no paid quote for a buy that cannot execute");
+    assert.equal(lines.filter(line => line.startsWith("[alert] solana-live-rollout misconfigured: MERRYMEN_SOLANA_LIVE_MAX_DAILY_USDG")).length, 1, "the operator is paged");
+    const sale = { ...f.trade, mode: "live", inputMint: SOLANA_WRAPPED_SOL_MINT, outputMint: SOLANA_USDG_MINT, amountRaw: "100000000" };
+    assert.ok((await app.preview(f.scope, { mode: "live", intent: sale })).quote);
+    assert.equal(quotes, 1);
+  } finally { f.raw.close(); }
+});
