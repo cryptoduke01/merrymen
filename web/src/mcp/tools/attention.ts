@@ -123,12 +123,16 @@ const getAttention = defineTool({
       }
     }
 
-    // Alert messages to the owner's Telegram that died in the last day.
+    // Alert messages to the owner's Telegram that died in the last day, and
+    // those skipped because no Telegram is linked (the owner asked for alerts
+    // and has nowhere to receive them). A skip because the owner switched
+    // alerts off is their choice, and a removed subscription is not asked about.
     const alertsChecked = hasCapability(ctx.principal, "notifications.manage");
     if (alertsChecked) {
       const d = await ctx.mcp();
       const reach = [...slugs];
-      const where = ["d.tenant = ?", "s.tenant = d.tenant", "d.status = 'dead'", "d.created_at >= ?",
+      const where = ["d.tenant = ?", "s.tenant = d.tenant", "s.status = 'active'",
+        "(d.status = 'dead' OR (d.status = 'skipped' AND d.last_error_code = 'no_linked_telegram'))", "d.created_at >= ?",
         ref !== undefined
           ? `s.agent_slug IN (${reach.map(() => "?").join(", ")})`
           : reach.length ? `(s.agent_slug IS NULL OR s.agent_slug IN (${reach.map(() => "?").join(", ")}))` : "s.agent_slug IS NULL"];

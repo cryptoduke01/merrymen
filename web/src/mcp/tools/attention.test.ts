@@ -203,14 +203,14 @@ test("a worker that never reported once (an armed row with no heartbeat, or no r
     const { d, ask } = await setup();
     agentRow(d, ACCOUNT_A, { beat: null });
     const item = only(await ask(), "worker-stale");
-    assert.equal(item.key, `worker-stale:${SLUG_A}:never`);
+    assert.equal(item.key, `worker-stale:${SLUG_A}:since-1700000000`);
     assert.equal(item.severity, "today");
     assert.match(item.title, /never reported/);
     reset();
   }
   {
     const { ask } = await setup();
-    assert.equal(only(await ask(), "worker-stale").key, `worker-stale:${SLUG_A}:never`, "a signed permission whose ledger row was never written");
+    assert.equal(only(await ask(), "worker-stale").key, `worker-stale:${SLUG_A}:since-1700000000`, "a signed permission whose ledger row was never written");
     reset();
   }
   const { d, ask } = await setup({ agentA: { grantedAt: NOW - 120 } });
@@ -218,17 +218,52 @@ test("a worker that never reported once (an armed row with no heartbeat, or no r
   assert.deepEqual((await ask()).items, [], "two minutes after signing is still start-up");
 });
 
-test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it)", async () => {
-  const earlier = "0x52908400098527886e0f7030069857d2e4169ee7" as const; // EIP-55's own mixed-case example
-  const { d, ask } = await setup({ agentA: { accounts: [ACCOUNT_A, earlier] } });
-  agentRow(d, ACCOUNT_A);
-  const checksummed = getAddress(earlier);
+test("a permission renewed on the same account after a kill or an expiry is pending: the old row's status is not the agent's state", async () => {
+  for (const old of ["killed", "expired", "error"]) {
+    const { d, ask } = await setup({ agentA: { grantedAt: NOW - 2 * HOUR } });
+    agentRow(d, ACCOUNT_A, { status: old, beat: NOW - 3 * HOUR, blocker: "dead-policy" });
+    event(d, ACCOUNT_A, "KILL SWITCH — grant discarded, session key destroyed; trading halted", NOW - 3 * HOUR, "err");
+    const r = await ask();
+    assert.deepEqual(r.items.map((i) => i.key), [`worker-stale:${SLUG_A}:since-${NOW - 2 * HOUR}`], `${old}: only the unreported renewal`);
+    assert.match(r.items[0]!.title, /not picked up the new permission/);
+    reset();
+  }
+  const { d, ask } = await setup({ agentA: { grantedAt: NOW - 300 } });
+  agentRow(d, ACCOUNT_A, { status: "killed", beat: NOW - 3 * HOUR });
+  assert.deepEqual((await ask()).items, [], "five minutes after renewing is still start-up, and the old kill is not reported");
+});
+
+test("events and refusals stored under the checksummed spelling are read too (the IN list is every spelling, so the index serves it); a retired account's are history", async () => {
+  const current = "0x52908400098527886e0f7030069857d2e4169ee7" as const; // EIP-55's own mixed-case example
+  const { d, ask } = await setup({ agentA: { account: current, accounts: [current, ACCOUNT_A] } });
+  agentRow(d, current);
+  const checksummed = getAddress(current);
   assert.equal(checksummed, "0x52908400098527886E0F7030069857D2E4169EE7");
   for (let at = NOW - HOUR; at <= NOW - 60; at += 240) event(d, checksummed, BREAKER, at);
   refused(d, checksummed, "daily-cap", NOW - 600);
   const r = await ask();
   assert.equal(only(r, "breaker").severity, "act_now");
   assert.equal(only(r, "daily-cap").severity, "fyi");
+
+  // The same signals from the account the agent held before a start-over do not describe it now.
+  d.raw.prepare("DELETE FROM events").run();
+  d.raw.prepare("DELETE FROM trades").run();
+  for (let at = NOW - HOUR; at <= NOW - 60; at += 240) event(d, ACCOUNT_A, BREAKER, at);
+  refused(d, ACCOUNT_A, "daily-cap", NOW - 600);
+  assert.deepEqual((await ask()).items, []);
+});
+
+test("two providers failing at once are two open items, and neither resolves while it is still failing", async () => {
+  const { d, ask } = await setup();
+  agentRow(d, ACCOUNT_A);
+  for (let at = NOW - 20 * 60; at <= NOW - 600; at += 240) event(d, ACCOUNT_A, "the market could not be read this tick: rpc timeout", at);
+  for (let at = NOW - 10 * 60; at <= NOW - 60; at += 240) event(d, ACCOUNT_A, "strategist driver failed: 400", at);
+  const r = await ask({ seen_keys: [`provider-failure:${SLUG_A}:market`] });
+  assert.deepEqual(r.items.filter((i) => i.kind === "provider-failure").map((i) => [i.key, i.new]), [
+    [`provider-failure:${SLUG_A}:model`, true],
+    [`provider-failure:${SLUG_A}:market`, false],
+  ]);
+  assert.deepEqual(r.resolved_keys, []);
 });
 
 test("kill switch, a stale worker, a provider failure and reached caps are named at their severities", async () => {
@@ -354,6 +389,26 @@ test("undelivered Telegram alerts are an fyi item under notifications:manage", a
   assert.equal(item.owner_can_fix, false);
   assert.equal(item.what_to_do, null);
   assert.equal(item.link, null);
+});
+
+test("alerts skipped because no Telegram is linked count; a skip the owner chose, or a removed subscription's failures, do not", async () => {
+  const { d, ask } = await setup({ scopes: ["agents:read", "notifications:manage", "offline_access"] });
+  agentRow(d, ACCOUNT_A);
+  const sub = (id: string, status: string) => d.raw.prepare(`INSERT INTO notify_subscriptions (id, tenant, agent_slug, channel, kind, params_json, status, connection_id, cursor_json, created_at, updated_at, last_evaluated_at)
+    VALUES (?, ?, ?, 'telegram', 'risk_halt', '{}', ?, 'c', NULL, ?, ?, NULL)`).run(id, OWNER_A, SLUG_A, status, NOW - DAY, NOW - DAY);
+  const delivery = (id: string, subId: string, status: string, code: string) => d.raw.prepare(`INSERT INTO notify_deliveries (id, subscription_id, tenant, dedupe_key, kind, channel, status, attempts, next_attempt_at, last_error_code, payload_json, created_at, sent_at)
+    VALUES (?, ?, ?, ?, 'risk_halt', 'telegram', ?, 0, 0, ?, '{}', ?, NULL)`).run(id, subId, OWNER_A, `k:${id}`, status, code, NOW - HOUR);
+  sub("sub_on", "active");
+  sub("sub_gone", "removed");
+  delivery("dl_off", "sub_on", "skipped", "owner_disabled");
+  delivery("dl_gone", "sub_gone", "dead", "network");
+  assert.deepEqual((await ask()).items, []);
+
+  delivery("dl_nolink", "sub_on", "skipped", "no_linked_telegram");
+  const item = only(await ask(), "alerts-failing");
+  assert.equal(item.owner_can_fix, true);
+  assert.match(item.detail, /^1 alert message.*No Telegram chat is linked/);
+  assert.equal(item.link, "https://app.test/settings");
 });
 
 test("another owner's agent never appears, and asking for it by id is not found", async () => {

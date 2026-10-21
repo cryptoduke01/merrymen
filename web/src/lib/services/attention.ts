@@ -268,14 +268,24 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   const status = row?.status ?? null;
   const freshWithinSec = freshWithin(input.settings?.tickSeconds);
   const beat = row?.beat_at ?? null;
+  const signedAt = input.grantedAt ?? row?.granted_at ?? null;
+  const live = input.expiresAt === null || input.expiresAt > now;
+  // A permission signed after the worker's last report (a first grant, or a
+  // renewal on the same account after a kill, an expiry or an arm error) is
+  // PENDING, as the inactivity diagnosis reads it (pendingGrant): the row's
+  // status, blocker and heartbeat all predate it, so none of them is the
+  // agent's state now. Only "has it reported since?" can be asked.
+  const pending = live && signedAt !== null && (beat === null || signedAt > beat);
   // A condition the worker restates every tick is current while its newest
   // sighting is younger than two heartbeat windows (never under half an hour),
   // and a run of sightings is one occurrence while they are no further apart
   // than an hour, or two heartbeat windows when that is longer.
   const currentSec = Math.max(30 * MINUTE, 2 * freshWithinSec);
   const gapSec = Math.max(HOUR, 2 * freshWithinSec);
-  const floor = now - ATTENTION_LOOKBACK_SEC;
-  const ids = accountSpellings(input.accounts.length ? input.accounts : [account]);
+  // Current conditions are the current permission's: events and refusals of a
+  // retired account, or from before this permission was signed, are history.
+  const floor = Math.max(now - ATTENTION_LOOKBACK_SEC, signedAt ?? 0);
+  const ids = accountSpellings([account]);
   const inList = ids.map(() => "?").join(", ");
 
   const events = ids.length ? (await db.prepare(
@@ -289,8 +299,8 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     if (kind) seen[kind].push(Number(ev.created_at));
   }
 
-  if (status === "killed") items.push(killedItem(slug, links, seen.kill[0] ?? null));
-  if (status === "error") {
+  if (!pending && status === "killed") items.push(killedItem(slug, links, seen.kill[0] ?? null));
+  if (!pending && status === "error") {
     items.push({
       key: `arm-error:${slug}:on`, severity: "today", kind: "arm-error", agent: slug,
       title: "The agent could not arm its trading key",
@@ -299,22 +309,20 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
   const running = status === "active" || status === "armed";
-  // A worker that never reported at all: the default 'armed' row with no
-  // heartbeat, or a signed permission whose ledger row was never written.
-  // Judged only while the permission is live (an expired one has its own item).
-  const signedAt = input.grantedAt ?? row?.granted_at ?? null;
+  // A pending permission the worker has not picked up after the start-up
+  // grace: the default 'armed' row with no heartbeat, a signed permission
+  // whose ledger row was never written, or a renewal the worker never reached.
   const grace = Math.max(FIRST_BEAT_GRACE_SEC, 2 * freshWithinSec);
-  const live = input.expiresAt === null || input.expiresAt > now;
-  if (beat === null && live && (row === null || running) && signedAt !== null && now - signedAt > grace) {
+  if (pending && now - signedAt! > grace) {
     items.push({
-      key: `worker-stale:${slug}:never`, severity: "today", kind: "worker-stale", agent: slug,
-      title: "The agent's worker has never reported",
-      detail: `The trading permission was signed at ${iso(signedAt)}, but the agent's worker has not reported once since, so it is not trading or running exits. Merrymen starts workers; the owner cannot fix this from here.`,
+      key: `worker-stale:${slug}:since-${signedAt}`, severity: "today", kind: "worker-stale", agent: slug,
+      title: beat === null ? "The agent's worker has never reported" : "The agent's worker has not picked up the new permission",
+      detail: `The trading permission was signed at ${iso(signedAt!)}, but the agent's worker has not reported since, so it is not trading under it or running exits. Merrymen starts workers; the owner cannot fix this from here.`,
       owner_can_fix: false, what_to_do: null, link: null,
-      started_at: signedAt + grace, ends_at: null,
+      started_at: signedAt! + grace, ends_at: null,
     });
   }
-  if (running && beat !== null && now - beat > freshWithinSec) {
+  if (!pending && running && beat !== null && now - beat > freshWithinSec) {
     items.push({
       key: `worker-stale:${slug}:${beat}`, severity: "today", kind: "worker-stale", agent: slug,
       title: "The agent's worker stopped reporting",
@@ -324,7 +332,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
 
-  const b = blockerView(row?.live_blocker ?? null);
+  const b = pending ? null : blockerView(row?.live_blocker ?? null);
   const advice = b ? blockerAdvice(b.rule) : null;
   // A deliberate state (live trading off, a key arming on the next pass) is not a fault and needs nobody.
   if (b && (advice?.fault ?? true)) {
@@ -352,11 +360,11 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
 
+  // Each provider failing now is its own open condition, newest first.
   const providers = (["market", "brain", "model"] as const)
     .filter((k) => seen[k].length && now - seen[k][0]! <= currentSec)
     .sort((x, y) => seen[y][0]! - seen[x][0]!);
-  const provider = providers[0];
-  if (provider) {
+  for (const provider of providers) {
     const start = runStart(seen[provider], gapSec, floor, truncated);
     items.push({
       key: `provider-failure:${slug}:${provider}`, severity: "fyi", kind: "provider-failure", agent: slug,
