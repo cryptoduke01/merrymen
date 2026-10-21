@@ -151,15 +151,21 @@ function accountSpellings(accounts: readonly string[]): string[] {
 }
 
 /**
- * The condition a key is about, whatever its severity: a permission is one
- * condition from its first expiry tier through its expiry, so a key replaced
- * by a more severe one for the same permission has not resolved.
+ * The condition a key is about, whatever its severity or scope: a permission
+ * is one condition from its first expiry tier through its expiry, so a key
+ * replaced by a more severe one for the same permission has not resolved; and
+ * undelivered alerts are one condition whether a read covered every agent
+ * (`-`) or one, so a wider read that still sees failures resolves neither.
  */
 export function conditionOfKey(key: string): string {
   const [kind, agent, rest = ""] = key.split(":");
   if (kind === "permission-expiring" || kind === "permission-expired") return `permission:${agent}:${rest.split("-")[0]}`;
+  if (kind === "alerts-failing") return "alerts-failing";
   return key;
 }
+
+/** Kinds read from the event scan: when a scan was cut, their absence is not established. */
+export const EVENT_KINDS: ReadonlySet<AttentionKind> = new Set(["breaker", "provider-failure", "arm-error"]);
 
 /** Permission items: none signed, expired, or inside an expiry tier. */
 export function permissionItems(slug: string, account: string | null, expiresAt: number | null, now: number, links: AttentionLinks): AttentionItem[] {
@@ -244,7 +250,7 @@ function killedItem(slug: string, links: AttentionLinks, at: number | null): Att
  * worker reports it (owner-chosen text: the caller sanitises it). THROWS when
  * the ledger cannot be read.
  */
-export async function readAgentAttention(db: Db, input: AgentAttentionInput): Promise<{ name: string | null; items: AttentionItem[] }> {
+export async function readAgentAttention(db: Db, input: AgentAttentionInput): Promise<{ name: string | null; items: AttentionItem[]; eventsCut: boolean }> {
   const { slug, account, now, links } = input;
   if (!account && input.accounts.length) {
     // The identity has held an account but holds no permission now: the owner
@@ -252,9 +258,10 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     // deliberate stop, not an agent that was never signed.
     const last = await readAgentRow(db, input.accounts[0]!);
     const name = last?.name ?? input.settings?.agentName ?? null;
-    if (last?.status === "killed") return { name, items: [killedItem(slug, links, null)] };
+    if (last?.status === "killed") return { name, items: [killedItem(slug, links, null)], eventsCut: false };
     return {
       name,
+      eventsCut: false,
       items: [{
         key: `no-permission:${slug}:removed`, severity: "fyi", kind: "no-permission", agent: slug,
         title: "No trading permission is active",
@@ -265,7 +272,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     };
   }
   const items = permissionItems(slug, account, input.expiresAt, now, links);
-  if (!account) return { name: input.settings?.agentName ?? null, items };
+  if (!account) return { name: input.settings?.agentName ?? null, items, eventsCut: false };
 
   const row = await readAgentRow(db, account);
   const status = row?.status ?? null;
@@ -406,7 +413,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       owner_can_fix: false, what_to_do: null, link: null, started_at: start, ends_at: null,
     });
   }
-  return { name: row?.name ?? input.settings?.agentName ?? null, items };
+  return { name: row?.name ?? input.settings?.agentName ?? null, items, eventsCut: truncated };
 }
 
 const PROPOSAL_TITLE: Readonly<Record<string, string>> = {
@@ -428,16 +435,17 @@ export function proposalItems(rows: ReadonlyArray<{ id: string; kind: string; ag
 }
 
 /**
- * One item when alert messages to the owner's Telegram died in the lookback.
+ * One item when alert messages to the owner's Telegram died in the lookback,
+ * keyed by the agent a read was limited to, or `-` for a read of them all.
  * The newest failure's code says whose it is: the owner's chat, bot or
  * switches, or a Telegram or Merrymen failure no setting can clear.
  */
-export function deliveryItems(dead: { count: number; first: number; lastErrorCode: string | null } | null, links: AttentionLinks): AttentionItem[] {
+export function deliveryItems(dead: { count: number; first: number; lastErrorCode: string | null } | null, links: AttentionLinks, agent: string | null = null): AttentionItem[] {
   if (!dead || dead.count <= 0) return [];
   const why = dead.lastErrorCode ? DELIVERY_ERROR_TEXT[dead.lastErrorCode] ?? null : null;
   const owners = dead.lastErrorCode !== null && OWNER_DELIVERY_CODES.has(dead.lastErrorCode);
   return [{
-    key: "alerts-failing:-:on", severity: "fyi", kind: "alerts-failing", agent: null,
+    key: `alerts-failing:${agent ?? "-"}:on`, severity: "fyi", kind: "alerts-failing", agent,
     title: "Telegram alerts are not being delivered",
     detail: `${dead.count} alert message(s) in the last 24 hours could not be delivered${why ? `: ${why}` : "."}${owners ? "" : " This is not something a setting can fix."}`,
     owner_can_fix: owners, what_to_do: owners ? "Check the Telegram link and bot in Merrymen Settings." : null, link: owners ? links.settings : null,

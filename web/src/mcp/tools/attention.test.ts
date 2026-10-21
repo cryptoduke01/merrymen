@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { getAddress } from "viem";
-import { conditionOfKey, runStart } from "@/lib/services/attention";
+import { ATTENTION_EVENTS_MAX, conditionOfKey, runStart } from "@/lib/services/attention";
 import { proposalRow } from "@/lib/services/proposals";
 import type { AgentDirectory, OwnedAgent } from "../agents";
 import type { Principal } from "../oauth/server";
@@ -421,6 +421,37 @@ test("alerts skipped because no Telegram is linked count; a skip the owner chose
   assert.equal(item.owner_can_fix, true);
   assert.match(item.detail, /^1 alert message.*No Telegram chat is linked/);
   assert.equal(item.link, "https://app.test/settings");
+});
+
+test("a read limited to one agent keys undelivered alerts by that agent, resolves them there, and a wider read still failing does not", async () => {
+  const { d, ask } = await setup({ scopes: ["agents:read", "notifications:manage", "offline_access"] });
+  agentRow(d, ACCOUNT_A);
+  d.raw.prepare(`INSERT INTO notify_subscriptions (id, tenant, agent_slug, channel, kind, params_json, status, connection_id, cursor_json, created_at, updated_at, last_evaluated_at)
+    VALUES ('sub_a', ?, ?, 'telegram', 'risk_halt', '{}', 'active', 'c', NULL, ?, ?, NULL)`).run(OWNER_A, SLUG_A, NOW - DAY, NOW - DAY);
+  d.raw.prepare(`INSERT INTO notify_deliveries (id, subscription_id, tenant, dedupe_key, kind, channel, status, attempts, next_attempt_at, last_error_code, payload_json, created_at, sent_at)
+    VALUES ('dl_a', 'sub_a', ?, 'k:dl_a', 'risk_halt', 'telegram', 'dead', 5, 0, 'network', '{}', ?, NULL)`).run(OWNER_A, NOW - HOUR);
+  const scoped = only(await ask({ agent: SLUG_A }), "alerts-failing");
+  assert.equal(scoped.key, `alerts-failing:${SLUG_A}:on`);
+  assert.equal(scoped.agent, SLUG_A);
+
+  const wide = await ask({ seen_keys: [scoped.key] });
+  assert.equal(only(wide, "alerts-failing").key, "alerts-failing:-:on");
+  assert.deepEqual(wide.resolved_keys, [], "still failing, seen through a wider read");
+
+  const later = await ask({ agent: SLUG_A, seen_keys: [scoped.key] }, undefined, NOW + 2 * DAY);
+  assert.deepEqual(later.resolved_keys, [scoped.key], "the same scoped read, after the failures aged out");
+});
+
+test("a breaker hidden behind more newer warnings than one read takes is not reported resolved, and the cut is named", async () => {
+  const { d, ask } = await setup();
+  agentRow(d, ACCOUNT_A);
+  for (let at = NOW - 25 * 60; at <= NOW - 20 * 60; at += 60) event(d, ACCOUNT_A, BREAKER, at);
+  const noise = d.raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'quote slower than usual', ?)");
+  for (let i = 0; i < ATTENTION_EVENTS_MAX; i++) noise.run(ACCOUNT_A, NOW - 19 * 60 + Math.floor(i / 2));
+  const r = await ask({ seen_keys: [`breaker:${SLUG_A}:on`] });
+  assert.deepEqual(r.items.filter((i) => i.kind === "breaker"), [], "out of the page");
+  assert.deepEqual(r.resolved_keys, [], "but its absence was not established");
+  assert.ok(r.not_checked.some((n) => n.part === `older warnings of agent ${SLUG_A}`));
 });
 
 test("another owner's agent never appears, and asking for it by id is not found", async () => {

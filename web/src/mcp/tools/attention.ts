@@ -10,7 +10,8 @@
  */
 import * as z from "zod";
 import {
-  KEY_RE, SEVERITIES, SEVERITY_MEANING, conditionOfKey, deliveryItems, proposalItems, rankItems, readAgentAttention,
+  EVENT_KINDS, KEY_RE, SEVERITIES, SEVERITY_MEANING, conditionOfKey, deliveryItems, proposalItems, rankItems, readAgentAttention,
+  type AttentionKind,
   type AttentionItem, type AttentionLinks, type Severity,
 } from "@/lib/services/attention";
 import { connectionStanding, KIND_CAPABILITY, liveAwaitingRows, MAX_OPEN_PROPOSALS, type ProposalKind } from "@/lib/services/proposals";
@@ -87,11 +88,16 @@ const getAttention = defineTool({
 
     const names = new Map<string, string | null>();
     const items: AttentionItem[] = [];
+    const eventsCut = new Set<string>();
     await ctx.ledger(async (db) => {
       for (const a of agents) {
         const r = await readAgentAttention(db, { slug: a.slug, account: a.account, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, links });
         names.set(a.slug, untrusted(r.name, 64));
         items.push(...r.items);
+        if (r.eventsCut) {
+          eventsCut.add(a.slug);
+          notChecked.push({ part: `older warnings of agent ${a.slug}`, why: "More warnings and errors were recorded in the last day than one read takes; only the newest were read, so an older breaker, provider or arm-failure sighting may be missing." });
+        }
       }
     });
 
@@ -143,7 +149,7 @@ const getAttention = defineTool({
       if (count > 0 && dead?.first != null) {
         const last = await d.db.prepare(`SELECT d.last_error_code AS code FROM notify_deliveries d JOIN notify_subscriptions s ON s.id = d.subscription_id WHERE ${where.join(" AND ")} ORDER BY d.created_at DESC LIMIT 1`)
           .get(...params) as { code: string | null } | undefined;
-        items.push(...deliveryItems({ count, first: Number(dead.first), lastErrorCode: last?.code ?? null }, links));
+        items.push(...deliveryItems({ count, first: Number(dead.first), lastErrorCode: last?.code ?? null }, links, ref !== undefined ? agents[0]!.slug : null));
       }
     } else {
       notChecked.push({ part: "alert deliveries", why: "Seeing whether alerts reached Telegram needs the notifications:manage scope." });
@@ -158,7 +164,8 @@ const getAttention = defineTool({
     const openConditions = new Set(ranked.map((i) => conditionOfKey(i.key)));
     const looked = (key: string) => {
       const [kind, agent = "", rest = ""] = key.split(":");
-      if (kind === "alerts-failing") return alertsChecked && ref === undefined;
+      if (kind === "alerts-failing") return alertsChecked && (agent === "-" ? ref === undefined : slugs.has(agent));
+      if (EVENT_KINDS.has(kind as AttentionKind) && eventsCut.has(agent)) return false;
       if (kind === "proposal-waiting") return !proposalsCut && kindChecked(rest.split(".")[0]!) && (agent === "-" ? ref === undefined : slugs.has(agent));
       return slugs.has(agent);
     };
