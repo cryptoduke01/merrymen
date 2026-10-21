@@ -20,10 +20,12 @@
  *
  * ONLY EVER STOPS NEW LIVE PERMISSIONS AND BUYS. A tenant off the list, or any
  * tenant while a setting cannot be read, cannot save live mode for the first
- * time, prepare, submit or activate a permission, or buy. Its owner can always
- * sell back to USDG within the permission already registered, revoke, withdraw,
- * record outside withdrawals, use paper and read status: a tenant taken off the
- * list after going live is exits-only, as Robinhood's exits-only level is.
+ * time, prepare or submit a permission, activate a first one, or buy. Its owner
+ * can always sell back to USDG within the permission already registered (a
+ * renewal submitted while listed is still activated once it lands), revoke,
+ * withdraw, record outside withdrawals, use paper and read status: a tenant
+ * taken off the list after going live is exits-only, as Robinhood's exits-only
+ * level is.
  *
  * Caps bound new permissions: live limits above one are refused where they are
  * saved and where the permission is prepared, so a signed on-chain session can

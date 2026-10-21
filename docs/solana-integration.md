@@ -347,10 +347,10 @@ reads both from its own env, so the web and the Solana worker decide alike.
 - **`MERRYMEN_SOLANA_LIVE_TENANTS`** names the tenants that may go live: 0x
   tenant ids, comma-separated, spaces ignored, case-insensitive. Unset or empty,
   nobody may; paper stays open to every bound tenant. A tenant it does not name
-  cannot save live mode, prepare, submit or activate a permission, preview a
-  live buy or place one (manual or autonomous); each is refused on the server
-  before any chain read (`SOLANA_LIVE_NOT_OPEN`), and the page offers no live
-  switch and says why.
+  cannot save live mode, prepare, submit or activate a first permission,
+  preview a live buy or place one (manual or autonomous); each is refused on the
+  server before any chain read (`SOLANA_LIVE_NOT_OPEN`), and the page offers no
+  live switch and says why.
 - **Exits-only.** A tenant taken off the list after going live (it has a
   registered permission or a live book) can still sell back to USDG within the
   permission it signed, revoke, withdraw USDG, wrapped SOL and native SOL,
@@ -358,8 +358,11 @@ reads both from its own env, so the web and the Solana worker decide alike.
   says "Live trading is paused for this account: exits, revoke and withdraw
   still work." as a blocker that leaves exits open, so the worker sells but never
   buys. Such an account may save live mode again, without the caps, because live
-  mode is how its exits are sold; a permission that landed after it left the list
-  is not activated (the page keeps its session key, and Revoke ends it).
+  mode is how its exits are sold. A renewal it prepared and submitted while
+  listed that lands after it left the list is still activated: on Solana it
+  already replaced the permission before it, so without it nothing could be
+  sold. It grants no buys. A first permission that lands after the tenant left
+  the list is not activated (the page keeps its session key, and Revoke ends it).
 - **Caps.** `MERRYMEN_SOLANA_LIVE_MAX_PER_TRADE_USDG` and `…_MAX_DAILY_USDG`
   (default 10 and 25 USDG), `…_MAX_PER_TRADE_WSOL` and `…_MAX_DAILY_WSOL`
   (default 0.1 and 0.25 SOL). Live limits above a cap are refused where they are
@@ -1304,7 +1307,7 @@ says where to change it. Superseded choices are listed under the current one.
 |---|---|---|---|
 | Who may go live | Nobody until named in `MERRYMEN_SOLANA_LIVE_TENANTS` | Every bound tenant; Robinhood-style levels (observe, exits-only, trade) | `MERRYMEN_SOLANA_LIVE_TENANTS` |
 | Off the list after going live | Exits-only: sales back to USDG, revoke, withdrawals and outside withdrawals; live mode may be saved again (without the caps) so exits can be sold | Refuse saving live mode too | `checkLiveSettings` in `solana-app-runtime.ts` |
-| A permission that lands after the tenant left the list | Not activated; the page keeps its session key, Revoke ends it | Activate it for exits only | `activateLive` |
+| A permission that lands after the tenant left the list | A renewal of an account that already went live is activated for exits only (it replaced the old permission on Solana, so refusing it would leave nothing to sell under; buys stay refused). A first permission is not activated; the page keeps its session key, Revoke ends it | Never activate off the list (rejected: a renewal landing after delisting would leave the account unable to sell until listed again) | `activateLive` (`requireLiveOpenOrWentLive`) |
 | Live caps | 10 and 25 USDG, 0.1 and 0.25 SOL (25 USDG a day is the Robinhood vault's cap) | Other values | `MERRYMEN_SOLANA_LIVE_MAX_*` |
 | A session registered above caps lowered since | Buys refused before signing; exits keep the signed limits | Cap sales too (rejected: an owner must always be able to exit) | `assessRisk` in `solana-app-runtime.ts` |
 | A malformed rollout setting | Configuration refusal of new permissions and buys, `[alert]` once a minute; exits continue | Refuse to start the worker | `rollout()` in `solana-app-runtime.ts` |

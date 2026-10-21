@@ -1082,3 +1082,31 @@ test("live rollout caps: under a permission registered above caps lowered since,
   const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "150000000", "exit-above-caps") });
   assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
 });
+
+test("live rollout: a renewal that landed after the tenant left the list is activated off it, and its sales back to USDG are then admitted and sent", async t => {
+  const f = await fixture(t, { cash: 50_000_000n, wsol: 1_000_000_000n, mark: "fair", build: { kind: "fair" }, env: { MERRYMEN_SOLANA_LIVE_TENANTS: "" } });
+  // The app still holds the permission the renewal replaced (epoch 0). Solana holds the renewal (epoch 1): same limits, prepared,
+  // submitted and finalized while the tenant was listed, and not yet activated when it was taken off.
+  const session = await getAddressFromPublicKey(f.sessionKeys.publicKey), sessionSeed = Buffer.alloc(32, 22);
+  const replaced = { programId: PROGRAM, vault: f.vault, session, sessionEpoch: "0", registrationSignature: key(43), registeredAtMs: NOW - 20_000 };
+  await f.db.prepare("UPDATE solana_runtime_sessions SET record_json=?,sealed_seed=? WHERE tenant=? AND owner=?").run(JSON.stringify(replaced),
+    sealSecret(`solana-session/v1 ${TENANT} ${f.scope.owner} ${PROGRAM} ${f.vault} ${session} 0\n` + sessionSeed.toString("base64"), Buffer.alloc(32, 30)), TENANT, f.scope.owner);
+  const renewal = { kind: "session", transactionBase64: "AA==", messageBase64: "AA==", blockhash: key(42), lastValidBlockHeight: "5000", programId: PROGRAM, vault: f.vault, session,
+    limits, preparedAtMs: NOW - 10_000, expiresAtMs: NOW - 9_000, signature: key(44), signedTransactionBase64: "AA==", status: "finalized",
+    priorVaultExisted: true, priorSequence: "0", priorSessionEpoch: "0" };
+  await f.db.prepare("INSERT INTO solana_runtime_setups(tenant,owner,setup_json) VALUES(?,?,?)").run(TENANT, f.scope.owner, JSON.stringify(renewal));
+  const before = await f.app.status(f.scope);
+  assert.ok(before.live.blockers.includes("Register an owner-approved live trading permission."), before.live.blockers.join(" | "));
+  assert.equal(before.live.canExit, false);
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-before-activation") }));
+  assert.equal(f.sends.length, 0, "nothing sent under the replaced permission");
+  // Activated off the list: the owner signed it while listed, and without it nothing could be sold.
+  assert.equal((await f.app.activateLive(f.scope, { signature: key(44), sessionSecretKey: sessionSeed.toString("base64") })).registered, true);
+  const after = await f.app.status(f.scope);
+  assert.deepEqual(after.live.blockers, [SOLANA_LIVE_PAUSED]); assert.equal(after.live.canExit, true);
+  await assert.rejects(f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_USDG_MINT, "10000000", "renewed-buy") }), refusedAs(SOLANA_LIVE_PAUSED, "permission"));
+  const sold = await f.app.trade(f.scope, { mode: "live", intent: manual(SOLANA_WRAPPED_SOL_MINT, "100000000", "exit-after-activation") });
+  assert.ok("status" in sold && sold.status === "pending"); assert.equal(f.sends.length, 1);
+  const [row] = await f.submissions();
+  assert.equal(row!.submission.intent.inputMint, SOLANA_WRAPPED_SOL_MINT); assert.equal(row!.submission.sessionEpoch, "1", "signed under the renewal");
+});

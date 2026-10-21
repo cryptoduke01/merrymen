@@ -2597,3 +2597,32 @@ test("live rollout: a malformed list or cap refuses new permissions and buys as 
     } finally { g.raw.close(); }
   } finally { f.raw.close(); }
 });
+
+test("live rollout: a renewal that lands after the tenant left the list is activated, so the account keeps a permission to sell under, while its buys stay refused", async () => {
+  // Off the list, or with the list unreadable: either way the account already went live.
+  for (const listed of [OTHER_TENANT, `${TENANT},`]) {
+    const f = await fixture();
+    try {
+      await readyLive(f); await cashBook(f);
+      const chain = ownerChain(f);
+      // While listed, the owner renews: the new permission is prepared and submitted ...
+      const setup = await f.app.prepareLive(f.scope, { limits, sessionPublicKey: f.session });
+      const setupSigned = await f.sign(setup.transactionBase64);
+      const registration = await f.app.submitSetup(f.scope, { signedTransactionBase64: setupSigned });
+      // ... and lands after the tenant was taken off the list, replacing the old permission on Solana (create_session moves the epoch).
+      chain.land(registration.signature, setupSigned); f.controls.epoch = 2n;
+      const off = f.runtime({ env: { ...f.env, MERRYMEN_SOLANA_LIVE_TENANTS: listed }, log: () => {} });
+      const replaced = await off.status(f.scope);
+      assert.ok(replaced.live.blockers.includes("Register an owner-approved live trading permission."), replaced.live.blockers.join(" | "));
+      assert.equal(replaced.live.canExit, false, "the permission the app holds is no longer the vault's");
+      assert.equal((await off.activateLive(f.scope, { signature: registration.signature, sessionSecretKey: f.sessionSeed.toString("base64") })).registered, true, listed);
+      assert.equal((await new SolanaTradingStore(f.db, f.scope).session())!.registrationSignature, registration.signature);
+      // Exits are open again under the permission the owner signed; buying stays paused.
+      const after = await off.status(f.scope);
+      assert.deepEqual(after.live.blockers, [listed === OTHER_TENANT ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_ROLLOUT_MISCONFIGURED]);
+      assert.equal(after.live.canExit, true); assert.equal(after.live.ready, false);
+      await assert.rejects(off.trade(f.scope, { mode: "live", intent: { ...f.trade, mode: "live", requestId: "renewed-buy" } }),
+        rollout(listed === OTHER_TENANT ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_ROLLOUT_MISCONFIGURED, listed === OTHER_TENANT ? "permission" : "configuration"));
+    } finally { f.raw.close(); }
+  }
+});

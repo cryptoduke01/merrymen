@@ -467,6 +467,22 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
   async function requireLiveOpen(s: SolanaTradingStore): Promise<void> {
     if (!liveListed(s.scope.tenant)) fail(await wentLive(s) ? SOLANA_LIVE_PAUSED : SOLANA_LIVE_NOT_OPEN, "permission");
   }
+  /**
+   * Activating a permission that already landed: as requireLiveOpen, except that
+   * an account that already went live passes, off the list or while a setting
+   * cannot be read. Its permission was prepared and submitted while the tenant was
+   * listed (both refuse otherwise), within the caps, and the owner signed it; on
+   * Solana it already replaced the one before it (create_session moves the
+   * session epoch), so refusing it would leave the account with no permission it
+   * can sell under. Activating it grants nothing new: buys stay refused (trade,
+   * preview and the status blocker). A first permission, for an account that
+   * never went live, is still refused.
+   */
+  async function requireLiveOpenOrWentLive(s: SolanaTradingStore): Promise<void> {
+    let listed: boolean;
+    try { listed = liveListed(s.scope.tenant); } catch (error) { if (await wentLive(s)) return; throw error; }
+    if (!listed && !(await wentLive(s))) fail(SOLANA_LIVE_NOT_OPEN, "permission");
+  }
   /** A registered permission's own limits, as the vault holds them, against the caps. */
   function sessionAboveCaps(state: { perTrade: bigint; daily: bigint; perTradeWsol: bigint; dailyWsol: bigint }, caps: SolanaLiveCaps): boolean {
     return solanaLiveCapsExceeded({ perTradeUsdg: state.perTrade, dailyUsdg: state.daily, perTradeWsol: state.perTradeWsol, dailyWsol: state.dailyWsol }, caps).length > 0;
@@ -1346,8 +1362,10 @@ export function createSolanaAppRuntime(options: SolanaAppRuntimeOptions = {}) {
       const s = await store(scope), cfg = config(), keyPair = await createKeyPairFromPrivateKeyBytes(seed(input.sessionSecretKey, "Invalid session seed."));
       const session = await getAddressFromPublicKey(keyPair.publicKey), previous = await s.session();
       if (previous?.registrationSignature === input.signature && previous.session === session) return { registered: true, session, vault: previous.vault };
-      // A new permission is activated only for a tenant the live rollout admits. Refused, the owner keeps the session key to finish later and can revoke it.
-      await requireLiveOpen(s);
+      // A first permission is activated only for a tenant the live rollout admits: refused, the owner keeps the session key to finish
+      // later and can revoke it. One that replaced the permission of an account that already went live is activated off the list too,
+      // so its exits can be sold (requireLiveOpenOrWentLive); its buys stay refused.
+      await requireLiveOpenOrWentLive(s);
       const setup = await s.setup();
       if (!setup || (setup.kind ?? "session") !== "session" || setup.signature !== input.signature || setup.session !== session || setup.programId !== cfg.programId) fail("The signed permission does not match this session key.");
       const status = await ownerStatus(s, setup);
