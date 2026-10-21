@@ -165,7 +165,14 @@ export function conditionOfKey(key: string): string {
 }
 
 /** Kinds read from the event scan: when a scan was cut, their absence is not established. */
-export const EVENT_KINDS: ReadonlySet<AttentionKind> = new Set(["breaker", "provider-failure", "arm-error"]);
+export const EVENT_KINDS: ReadonlySet<AttentionKind> = new Set(["breaker", "provider-failure"]);
+
+/**
+ * The prefix of the worker's arm-failure event (index.ts, "this agent CANNOT
+ * START and is not trading: …"), used only to narrow an indexed read; the
+ * inactivity diagnosis's classifyEvent still decides what the row is.
+ */
+const ARM_FAILURE_PREFIX = "this agent CANNOT START";
 
 /** Permission items: none signed, expired, or inside an expiry tier. */
 export function permissionItems(slug: string, account: string | null, expiresAt: number | null, now: number, links: AttentionLinks): AttentionItem[] {
@@ -304,18 +311,24 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
   ).all(...ids, floor)) as Array<{ message: string; created_at: number }> : [];
   const truncated = events.length >= ATTENTION_EVENTS_MAX;
   const seen: Record<"kill" | "breaker" | "market" | "brain" | "model", number[]> = { kill: [], breaker: [], market: [], brain: [], model: [] };
-  // Arm failures since the current permission was signed (the read starts there).
-  const armFailures: number[] = [];
   for (const ev of events) {
-    const message = String(ev.message ?? "");
-    const kind = classifyAlertEvent(message);
+    const kind = classifyAlertEvent(String(ev.message ?? ""));
     if (kind) seen[kind].push(Number(ev.created_at));
-    else if (classifyEvent(message) === "arm_failure") armFailures.push(Number(ev.created_at));
   }
   // 'error' is the current permission's when the worker is past it, or when it
-  // failed to arm this permission (an arm failure after signing); otherwise it
-  // is a renewal's predecessor and the permission is still pending.
-  const armError = status === "error" && (!pending || armFailures.length > 0);
+  // failed to arm this permission; otherwise it is a renewal's predecessor and
+  // the permission is still pending. The worker writes an unchanged arm
+  // failure once (lastArmFailure), so the first one since signing is looked up
+  // on its own, however long ago: the day's scan may have lost it.
+  let armFailedAt: number | null = null;
+  if (live && pending && status === "error" && ids.length) {
+    const first = await db.prepare(
+      `SELECT message, created_at FROM events WHERE agent_id IN (${inList}) AND level = 'err' AND created_at >= ? AND message LIKE ?
+        ORDER BY created_at ASC LIMIT 1`,
+    ).get(...ids, signedAt, `${ARM_FAILURE_PREFIX}%`) as { message: string; created_at: number } | undefined;
+    if (first && classifyEvent(String(first.message)) === "arm_failure") armFailedAt = Number(first.created_at);
+  }
+  const armError = live && status === "error" && (!pending || armFailedAt !== null);
 
   if (!pending && status === "killed") items.push(killedItem(slug, links, seen.kill[0] ?? null));
   if (armError) {
@@ -324,7 +337,7 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
       title: "The agent could not arm its trading key",
       detail: "The worker reports that it could not arm the trading key, so nothing is signed. This is Merrymen's to fix, not the owner's.",
       owner_can_fix: false, what_to_do: null, link: null,
-      started_at: pending ? armFailures[armFailures.length - 1]! : null, ends_at: null,
+      started_at: armFailedAt, ends_at: null,
     });
   }
   const running = status === "active" || status === "armed";
@@ -353,7 +366,10 @@ export async function readAgentAttention(db: Db, input: AgentAttentionInput): Pr
     });
   }
 
-  const b = pending ? null : blockerView(row?.live_blocker ?? null);
+  // A blocker is about trading under a live permission: after expiry the row
+  // keeps its last one (retireGrant only sets the status), and the expired
+  // item is the one to act on.
+  const b = pending || !live ? null : blockerView(row?.live_blocker ?? null);
   const advice = b ? blockerAdvice(b.rule) : null;
   // A deliberate state (live trading off, a key arming on the next pass) is not a fault and needs nobody.
   if (b && (advice?.fault ?? true)) {

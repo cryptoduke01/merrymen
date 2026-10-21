@@ -131,6 +131,12 @@ test("permission expiry rises through fyi, today and act_now, each a new key, an
   assert.match(old.key, /-old$/);
 });
 
+test("after the permission expires, the row's last blocker is not a chore: the expired item is", async () => {
+  const { d, ask } = await setup({ agentA: { expiresAt: NOW - HOUR } });
+  agentRow(d, ACCOUNT_A, { status: "expired", blocker: "no-gas", beat: NOW - 2 * HOUR });
+  assert.deepEqual((await ask()).items.map((i) => i.kind), ["permission-expired"]);
+});
+
 test("live blockers: funding and re-signing are act_now with the page that fixes them; a deliberate state is nothing; Merrymen's own fault is today with no chore", async () => {
   const { d, ask } = await setup();
   agentRow(d, ACCOUNT_A, { blocker: "no-gas" });
@@ -235,8 +241,8 @@ test("a permission renewed on the same account after a kill or an expiry is pend
   assert.deepEqual((await ask()).items, [], "five minutes after renewing is still start-up, and the old kill is not reported");
 });
 
-test("a permission that failed to arm is an arm error at once, not a worker that never reported", async () => {
-  for (const [label, grantedAt, beat] of [["first grant", NOW - 300, null], ["renewal", NOW - 2 * HOUR, NOW - 3 * HOUR]] as const) {
+test("a permission that failed to arm is an arm error at once, not a worker that never reported, however long ago the one failure event was written", async () => {
+  for (const [label, grantedAt, beat] of [["first grant", NOW - 300, null], ["renewal", NOW - 2 * HOUR, NOW - 3 * HOUR], ["three days of the same failure", NOW - 3 * DAY, null]] as const) {
     const { d, ask } = await setup({ agentA: { grantedAt } });
     agentRow(d, ACCOUNT_A, { status: "error", beat });
     event(d, ACCOUNT_A, "this agent CANNOT START and is not trading: no bundler", grantedAt + 60, "err");
