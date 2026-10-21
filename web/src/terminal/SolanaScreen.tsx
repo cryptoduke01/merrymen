@@ -188,7 +188,7 @@ function ConnectedSolana() {
   // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
   const [depositAccount, setDepositAccount] = useState<string | null>(null);
   const [mode, setMode] = useState<"paper" | "live">("paper"), [consent, setConsent] = useState(false);
-  // Paper's defaults; choosing live with nothing saved starts from the live caps instead (startingLimits).
+  // Paper's defaults; choosing live with nothing saved or typed starts from the live caps instead (chooseMode).
   const [perTrade, setPerTrade] = useState<string>(PAPER_DEFAULTS.perTrade), [daily, setDaily] = useState<string>(PAPER_DEFAULTS.daily);
   const [perTradeSol, setPerTradeSol] = useState<string>(PAPER_DEFAULTS.perTradeSol), [dailySol, setDailySol] = useState<string>(PAPER_DEFAULTS.dailySol);
   const [ops, setOps] = useState("20"), [drawdown, setDrawdown] = useState("20"), [duration, setDuration] = useState("24");
