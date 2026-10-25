@@ -429,9 +429,11 @@ export interface KillHalves {
  * judged by the same cutoff as the Robinhood one, so a Perps grant signed
  * after the kill stays. They run on every pass that finds a readable request,
  * after the conditional DELETE, so nothing on their side can keep a killed
- * Robinhood grant stored (the web's DELETE /api/grants removes it first too),
- * and each runs whatever the other did: one failing never skips the other. A
- * kill is still never reported done while a half failed: the outcome is
+ * Robinhood grant stored (the web's DELETE /api/grants removes it first too).
+ * And each runs whatever the others did, that DELETE failing included: no half
+ * failing ever skips another, so a Robinhood store that cannot be read never
+ * keeps the Perps key stored across every retry. A kill is still never
+ * reported done while a half failed: the outcome is
  * `failed`, the request stays pending (the reconcile keeps a home whose kill
  * is not carried out), and the next pass finds the grant absent and retries.
  * The ✅ is owed by the call whose DELETE removed a grant: when a half fails,
@@ -457,13 +459,18 @@ export async function honourKillRequest(
     };
   }
   const coveredSec = request.killedAt + KILL_CLOCK_SLACK_SEC;
-  let result: "removed" | "absent" | "newer";
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  // FIRST, BUT NOT ALONE. A Robinhood removal that fails (a store that cannot
+  // be read, a broken grant file) is recorded, and the other halves still run:
+  // otherwise the same fault on every retry would keep the Perps key stored and
+  // the Solana strategy on for as long as it lasted. The kill is then `failed`
+  // and stays pending, and the next pass tries every half again.
+  let result: "removed" | "absent" | "newer" | { failed: string };
   try {
     result = await store.removeUnlessNewer(tenant, coveredSec);
   } catch (e) {
-    return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
+    result = { failed: message(e) };
   }
-  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const failures: string[] = [];
   let perpsRemoved = false;
   if (halves.solana) {
@@ -472,9 +479,12 @@ export async function honourKillRequest(
   if (halves.perps) {
     try { perpsRemoved = await halves.perps(coveredSec); } catch (e) { failures.push(`the Perps wallet could not be stopped: ${message(e)}`); }
   }
-  if (failures.length > 0) {
+  if (typeof result === "object" || failures.length > 0) {
     // Owed by this call alone: the DELETE that removed a grant happens once.
     if (result === "removed" || perpsRemoved) oweKillConfirm(home, perpsRemoved);
+    if (typeof result === "object") {
+      return { outcome: "failed", request, error: [result.failed, ...failures].join(", and ") };
+    }
     const grant = result === "newer" ? "a grant signed after the kill is kept" : "the Robinhood grant is removed";
     return { outcome: "failed", request, error: `${grant}, but ${failures.join(", and ")}` };
   }

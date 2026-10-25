@@ -29,7 +29,7 @@ process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 5).toString("base64");
 
 const { honourPendingKills, childHome, setKillConfirmForTest, setSolanaKillForTest, setPerpsKillForTest } = await import("./orchestrator");
 const { getGrantStore } = await import("./grant-store");
-const { KILL_CONFIRM_OWED, KILL_DONE_PERPS_TEXT, killRequested, writeKillRequest } = await import("./kill-request");
+const { KILL_CLOCK_SLACK_SEC, KILL_CONFIRM_OWED, KILL_DONE_PERPS_TEXT, honourKillRequest, killRequested, writeKillRequest } = await import("./kill-request");
 const { stopPerpsForKill } = await import("./perps-kill");
 after(() => rmSync(FLEET, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
@@ -77,6 +77,8 @@ function telegramKill(killedAt = nowSec()) {
 }
 
 beforeEach(async () => {
+  // A test that broke the Spot grant file on purpose leaves nothing behind for the next.
+  rmSync(path.join(FLEET, "tenants", `${T}.json`), { recursive: true, force: true });
   await spotStore.remove(T);
   await perpsStore.remove(T);
   rmSync(path.join(FLEET, "tenants-perps"), { recursive: true, force: true });
@@ -163,6 +165,40 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
     telegramKill(nowSec());
     await honourPendingKills();
     assert.deepEqual(confirmed, [{ tenant: T, perps: false }]);
+  });
+
+  it("a Spot grant file that cannot be read never keeps the Perps key stored: the Perps half runs anyway, the kill stays pending", async () => {
+    await owner("two-wallet");
+    // A Robinhood grant the store cannot read: its removal throws on every pass.
+    const spotFile = path.join(FLEET, "tenants", `${T}.json`);
+    rmSync(spotFile);
+    mkdirSync(spotFile);
+    telegramKill();
+    await honourPendingKills();
+    assert.equal(await perpsStore.hasStoredGrant(T), false, "the Perps grant is revoked although the Spot removal failed");
+    assert.deepEqual(solanaStops, [T], "and the Solana half ran too");
+    assert.equal(killRequested(childHome(T)), true, "the kill stays pending: it is not done");
+    assert.deepEqual(confirmed, []);
+    assert.equal(readFileSync(path.join(childHome(T), KILL_CONFIRM_OWED), "utf8"), "perps", "the ✅ it now owes remembers the Perps grant");
+    // Repaired, the next pass finishes it and tells the owner once, Perps line included.
+    rmSync(spotFile, { recursive: true });
+    await honourPendingKills();
+    assert.deepEqual(confirmed, [{ tenant: T, perps: true }]);
+  });
+
+  it("honourKillRequest runs every half whatever the Robinhood removal did, and names each failure", async () => {
+    mkdirSync(childHome(T), { recursive: true });
+    const killedAt = nowSec() - 30;
+    writeKillRequest(childHome(T), { smartAccount: SPOT, serialized: "killed-permission" }, killedAt);
+    const ran: string[] = [];
+    const k = await honourKillRequest({ removeUnlessNewer: async () => { throw new Error("grant store unreadable"); } }, T, childHome(T), nowSec(), {
+      solana: async () => { ran.push("solana"); throw new Error("solana bindings unavailable"); },
+      perps: async (coveredSec) => { ran.push(`perps@${coveredSec - killedAt}`); return false; },
+    });
+    assert.deepEqual(ran, ["solana", `perps@${KILL_CLOCK_SLACK_SEC}`], "both halves ran, Perps with the kill's own cutoff");
+    assert.equal(k.outcome, "failed");
+    assert.equal(k.outcome === "failed" && k.error, "grant store unreadable, and the Solana strategy could not be stopped: solana bindings unavailable");
+    assert.equal(existsSync(path.join(childHome(T), KILL_CONFIRM_OWED)), false, "nothing was removed, so no ✅ is owed");
   });
 
   it("the ✅'s Perps line claims only the grant, nothing about where the money is", () => {
