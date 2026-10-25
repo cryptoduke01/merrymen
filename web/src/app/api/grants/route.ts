@@ -40,6 +40,7 @@ import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
+import { PerpsKillIncomplete, stopLocalPerpsForKill, stopPerpsForKill } from "../../../../../worker/src/perps-kill";
 import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
@@ -624,31 +625,35 @@ export async function DELETE(req: Request) {
       }
     }
     if (walletNamed) return killNamesWallet();
-    // The Solana strategy is stopped whatever happens to the Robinhood grant: a store that throws
-    // here still leaves the owner's autonomous Solana trading off.
+    // The Solana strategy and the Perps wallet are stopped whatever happens to the Robinhood
+    // grant: a store that throws here still leaves the owner's autonomous Solana trading off and
+    // their Perps grant revoked. Neither half waits on the other.
     let removal: unknown = null;
     try { await getGrantStore("spot").remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
     const solana = await solanaStopped(() => stopSolanaForKill(tenant));
+    const perps = await perpsStopped(() => stopPerpsForKill(tenant));
     if (removal !== null) throw removal;
-    return solanaKilled(solana);
+    return killed(solana, perps);
   }
   if (walletNamed) return killNamesWallet();
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
-  // The local Solana strategy is stopped first, whatever happens to the Robinhood grant: an
-  // archive it cannot write keeps grant.json (and pauses trading instead), and must never
-  // leave autonomous Solana trading running behind a "paused" answer.
+  // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
+  // the Robinhood grant: an archive it cannot write keeps grant.json (and pauses trading
+  // instead), and must never leave autonomous Solana trading or a Perps grant behind a
+  // "paused" answer.
   const solana = await solanaStopped(() => stopLocalSolanaForKill());
+  const perps = await perpsStopped(() => stopLocalPerpsForKill());
   try {
     await removeSelfHostedGrant();
   } catch (e) {
     if (e instanceof GrantArchiveError) {
-      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}`,
-        paused: e.paused, solana: solana ? "stopped" : "not-stopped" }, { status: 409 });
+      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}${perpsAfterKeptGrant(perps)}`,
+        paused: e.paused, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 409 });
     }
     throw e;
   }
-  return solanaKilled(solana);
+  return killed(solana, perps);
 }
 
 /** A `?wallet=` that names no wallet, or more than one. */
@@ -678,13 +683,38 @@ function killNamesWallet(): NextResponse {
 async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
   try { await stop(); return true; } catch { return false; }
 }
-/** A kill that could not stop the Solana strategy is reported incomplete, never as done. A retry is safe. */
-function solanaKilled(stopped: boolean): NextResponse {
-  if (!stopped) {
-    return NextResponse.json({ error: "Kill incomplete: your Robinhood Chain agent is stopped, but your Solana strategy could not be stopped yet. Try the kill again.",
-      ownerFacing: true, solana: "not-stopped" }, { status: 503 });
+/**
+ * The kill's Perps half (perps-kill.ts): `stopped` when a Perps grant was revoked,
+ * `none` when there is no Perps wallet, `not-stopped` when it could not be revoked,
+ * with the reason when it is one the owner can act on.
+ */
+async function perpsStopped(stop: () => Promise<"stopped" | "newer" | "none">): Promise<{ state: "stopped" | "none" | "not-stopped"; why?: string }> {
+  try {
+    return { state: (await stop()) === "stopped" ? "stopped" : "none" };
+  } catch (e) {
+    return { state: "not-stopped", ...(e instanceof PerpsKillIncomplete ? { why: e.message } : {}) };
   }
-  return NextResponse.json({ ok: true });
+}
+/** What the Perps half did, said after a Robinhood grant the kill had to keep. */
+function perpsAfterKeptGrant(perps: { state: "stopped" | "none" | "not-stopped" }): string {
+  if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
+  if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
+  return "";
+}
+/**
+ * A kill that could not stop the Solana strategy or revoke the Perps grant is reported
+ * incomplete, never as done. A retry is safe. An owner with neither sees exactly what
+ * they always saw.
+ */
+function killed(solana: boolean, perps: { state: "stopped" | "none" | "not-stopped"; why?: string }): NextResponse {
+  const perpsDown = perps.state === "not-stopped";
+  if (!solana || perpsDown) {
+    const what = !solana && perpsDown ? "your Solana strategy could not be stopped and your Perps wallet's grant could not be revoked yet"
+      : !solana ? "your Solana strategy could not be stopped yet" : "your Perps wallet's grant could not be revoked yet";
+    return NextResponse.json({ error: `Kill incomplete: your Robinhood Chain agent is stopped, but ${what}.${perps.why ? ` ${perps.why}` : ""} Try the kill again.`,
+      ownerFacing: true, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 503 });
+  }
+  return NextResponse.json(perps.state === "stopped" ? { ok: true, perps: "stopped" } : { ok: true });
 }
 
 /**

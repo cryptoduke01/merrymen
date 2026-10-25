@@ -24,6 +24,8 @@ let replacementError = false;
 const solanaStopped: string[] = [];
 let solanaDown = false;
 let removeDown = false;
+/** Every tenant whose Perps wallet a kill asked about: none of these owners has one. */
+const perpsAsked: string[] = [];
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grant-tenant-"));
@@ -46,6 +48,9 @@ before(async () => {
     if (replacementError) throw new Error("database unavailable");
     return replacementState;
   });
+  // The kill's Perps half (perps-kill.ts) reads the Perps grant store, which here
+  // has no database either. Stood in like the Spot one: a Spot-only owner.
+  mock.method(grants.getGrantStore("perps"), "revokeForKill", async (tenant: string) => { perpsAsked.push(tenant); return "absent" as const; });
   const solana = await import("@/lib/solana-binding-store");
   mock.method(solana.getSolanaBindingStore(), "disableForKill", async (tenant: string) => {
     if (solanaDown) throw new Error("database unavailable");
@@ -62,7 +67,7 @@ after(() => {
   }
   rmSync(home, { recursive: true, force: true });
 });
-beforeEach(() => { asked.length = 0; removed.length = 0; replacements.length = 0; replacementState = "stopped"; replacementError = false; solanaStopped.length = 0; solanaDown = false; removeDown = false; });
+beforeEach(() => { asked.length = 0; removed.length = 0; replacements.length = 0; replacementState = "stopped"; replacementError = false; solanaStopped.length = 0; solanaDown = false; removeDown = false; perpsAsked.length = 0; });
 
 it("binds an empty hosted grant response to the tenant authenticated by the cookie", async () => {
   for (const tenant of [A, B]) {
@@ -94,6 +99,7 @@ it("a stop cannot remove a different tenant after a login switches", async () =>
   assert.equal((await DELETE(request(B))).status, 200);
   assert.deepEqual(removed, [B]);
   assert.deepEqual(solanaStopped, [B], "kill all agents stops the same tenant's Solana strategy");
+  assert.deepEqual(perpsAsked, [B], "and reaches the same tenant's Perps wallet, and no other");
 });
 
 it("kill all agents stops the Solana strategy even when the Robinhood grant cannot be removed", async () => {
@@ -104,6 +110,7 @@ it("kill all agents stops the Solana strategy even when the Robinhood grant cann
   removeDown = true;
   await assert.rejects(DELETE(request), /database unavailable/, "the Robinhood failure is still an error");
   assert.deepEqual(removed, []); assert.deepEqual(solanaStopped, [A], "but the Solana strategy is off");
+  assert.deepEqual(perpsAsked, [A], "and the Perps wallet is reached too");
 });
 
 it("kill all agents is reported incomplete, never done, while the Solana strategy could not be stopped", async () => {
@@ -140,7 +147,7 @@ it("an oversized stop body is refused with 413 before it is parsed, and nothing 
   const response = await DELETE(replacementRequest(big));
   assert.equal(response.status, 413);
   assert.match(((await response.json()) as { error: string }).error, /too large\. Nothing was deleted/);
-  assert.deepEqual(removed, []); assert.deepEqual(replacements, []); assert.deepEqual(solanaStopped, []);
+  assert.deepEqual(removed, []); assert.deepEqual(replacements, []); assert.deepEqual(solanaStopped, []); assert.deepEqual(perpsAsked, []);
   // Just under the limit is an ordinary stop.
   const fits = { expectedTenant: A, purpose: "delete-agent", pad: "" };
   fits.pad = "x".repeat(8 * 1024 - JSON.stringify(fits).length);

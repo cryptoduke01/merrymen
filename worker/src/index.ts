@@ -611,6 +611,7 @@ import { quoteDecimalsOf, readCurveReserves, readCurveThreshold } from "./venues
 import { decodeClassLog, foldClassEvents, readClassLog } from "./venues/class-log";
 import { reconcileClassBook, scoutCostOf } from "./class-reconcile";
 import { selfHostedSolanaKill } from "./solana-kill";
+import { selfHostedPerpsKill } from "./perps-kill";
 import type { KillResult } from "./telegram/kill-confirm";
 
 const BREAKER_ABI = parseAbi(["function isTripped(address account) view returns (bool)"]);
@@ -15181,13 +15182,16 @@ async function main() {
     fomoTailCapSpent: (userId) => (fomoOff ? Promise.resolve(null) : fomoTailNotifier.capSpent(userId)),
     fomoTailsState,
     kill: async () => {
-      // SELF-HOSTED, the local Solana strategy is stopped first, whatever happens to the grant
-      // below (an archive it cannot write keeps the grant and pauses instead), as the web's
-      // "Kill all agents" does. Hosted, the orchestrator stops the tenant's (kill-request.ts).
+      // SELF-HOSTED, the local Solana strategy and the local Perps wallet are stopped first,
+      // whatever happens to the grant below (an archive it cannot write keeps the grant and
+      // pauses instead), as the web's "Kill all agents" does. Hosted, the orchestrator stops
+      // the tenant's (kill-request.ts).
       const solana = isHostedMode() ? null : await selfHostedSolanaKill();
       if (solana === "not-stopped") console.log("[kill] the local Solana strategy could not be stopped; the owner is told to /kill again");
+      const perps = isHostedMode() ? null : await selfHostedPerpsKill();
+      if (perps === "not-stopped") console.log("[kill] the local Perps wallet's grant could not be revoked; the owner is told to /kill again");
       const result = robinhoodKill();
-      return solana ? { ...result, solana } : result;
+      return { ...result, ...(solana ? { solana } : {}), ...(perps ? { perps } : {}) };
     },
   });
   /** The Robinhood Chain half of the Telegram kill switch. */

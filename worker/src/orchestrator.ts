@@ -86,8 +86,9 @@ import {
   type DrainHook, type DrainLimits, type FinalPassOutcome,
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
-import { KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
+import { KILL_DONE_PERPS_TEXT, KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
 import { stopSolanaForKill } from "./solana-kill";
+import { stopPerpsForKill } from "./perps-kill";
 import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
@@ -6011,7 +6012,7 @@ export { standDownLostLeasesNow as standDownLostLeasesForTest };
  * Best effort: a confirmation that fails to send is logged. The owner was
  * told what to do if none arrives.
  */
-let confirmKillDone = async (tenant: `0x${string}`): Promise<void> => {
+let confirmKillDone = async (tenant: `0x${string}`, done: { perps: boolean } = { perps: false }): Promise<void> => {
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -6020,7 +6021,9 @@ let confirmKillDone = async (tenant: `0x${string}`): Promise<void> => {
       log(`${tenant}: Telegram kill done, but there is no linked owner chat to confirm it to`);
       return;
     }
-    const sent = await telegramSend()(to.botToken, to.chatId, KILL_DONE_TEXT);
+    // The Perps line only when this kill revoked a Perps grant: an owner with
+    // no Perps wallet is told nothing about one.
+    const sent = await telegramSend()(to.botToken, to.chatId, done.perps ? `${KILL_DONE_TEXT}\n${KILL_DONE_PERPS_TEXT}` : KILL_DONE_TEXT);
     if (!sent.ok) log(`${tenant}: Telegram kill done, but the confirmation did not send — ${sent.reason ?? "unknown"}`);
   } catch (e) {
     log(`${tenant}: Telegram kill done, but the confirmation did not send — ${e instanceof Error ? e.message : String(e)}`);
@@ -6028,7 +6031,7 @@ let confirmKillDone = async (tenant: `0x${string}`): Promise<void> => {
 };
 
 /** Test seam: capture the confirmation instead of sending it. */
-export function setKillConfirmForTest(fn: (tenant: `0x${string}`) => Promise<void>): void {
+export function setKillConfirmForTest(fn: (tenant: `0x${string}`, done?: { perps: boolean }) => Promise<void>): void {
   confirmKillDone = fn;
 }
 
@@ -6045,18 +6048,38 @@ export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unkn
 }
 
 /**
+ * A Telegram kill revokes the tenant's Perps grant too (perps-kill.ts), by the
+ * same cutoff as the Robinhood grant: one signed after the kill stays. True
+ * when this call revoked one. Throws when it could not, and the kill stays
+ * pending until a later pass gets through, exactly as the Solana stop does.
+ */
+let stopPerps: (tenant: `0x${string}`, coveredSec: number) => Promise<boolean> = async (tenant, coveredSec) => {
+  const perps = await stopPerpsForKill(tenant, { coveredSec });
+  if (perps === "newer") log(`${tenant}: a Perps grant signed after the Telegram kill is kept`);
+  return perps === "stopped";
+};
+/** Test seam: replace the Perps stop. */
+export function setPerpsKillForTest(fn: (tenant: `0x${string}`, coveredSec: number) => Promise<boolean>): void {
+  stopPerps = fn;
+}
+
+/**
  * Carry out one tenant's pending Telegram kill, if it has one. Called from
  * reconcile, from the three-second order ferry and on shutdown. They can
  * overlap, which is safe: the DELETE is conditional and atomic, so exactly
- * one call sees `removed` and confirms to the owner (or, when its Solana stop
+ * one call sees `removed` and confirms to the owner (or, when another half
  * failed, the call that finishes it: honourKillRequest). The Robinhood grant
- * goes first; the Solana stop runs after it on every pass and is idempotent.
+ * goes first; the Solana stop and the Perps revocation run after it on every
+ * pass, and both are idempotent.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
-  const k = await honourKillRequest(getGrantStore("spot"), tenant, childHome(tenant), nowSec, () => stopSolana(tenant));
+  const k = await honourKillRequest(getGrantStore("spot"), tenant, childHome(tenant), nowSec, {
+    solana: () => stopSolana(tenant),
+    perps: (coveredSec) => stopPerps(tenant, coveredSec),
+  });
   if (k.outcome === "revoked" && k.removed) {
-    log(`${tenant}: Telegram kill honoured — grant removed from the store`);
-    void confirmKillDone(tenant);
+    log(`${tenant}: Telegram kill honoured — grant${k.perps ? "s (Spot and Perps)" : ""} removed from the store`);
+    void confirmKillDone(tenant, { perps: k.perps });
     // AND ITS STORED GROUP MEMORY, now rather than when a reconcile next
     // finds its child here: the kill may be carried out by the order ferry or
     // on shutdown, with no child here to stand down. Only the one call whose
@@ -6064,7 +6087,7 @@ async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOu
     // republishes before it is stood down goes on the next pass (sweepTgGroups).
     await forgetTgGroups(tenant);
   }
-  if (k.outcome === "superseded") log(`${tenant}: a grant signed after the Telegram kill replaces it — arming that one`);
+  if (k.outcome === "superseded") log(`${tenant}: a grant signed after the Telegram kill replaces it — arming that one${k.perps ? "; the Perps grant the kill covered is revoked" : ""}`);
   if (k.outcome === "failed") log(`${tenant}: Telegram kill pending, not carried out yet (${k.error}) — nothing arms meanwhile`);
   return k;
 }
