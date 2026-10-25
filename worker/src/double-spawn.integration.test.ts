@@ -145,14 +145,14 @@ function closeGate() {
   gate = g;
   return g;
 }
-const realSettings = getSettingsStore();
+const realSettings = getSettingsStore("spot");
 const gated = Object.create(realSettings) as typeof realSettings;
 gated.get = async (t) => {
   const g = gate;
   if (g) await g.wait();
   return realSettings.get(t);
 };
-useSettingsStoreForTest(gated);
+useSettingsStoreForTest(gated, "spot");
 
 /** What the orchestrator said, so a test can tell a scheduled restart from none. */
 const said: string[] = [];
@@ -165,7 +165,7 @@ after(() => {
   rmSync(FLEET, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const store = getGrantStore();
+const store = getGrantStore("spot");
 /** Let pending callbacks run — an exit emitted on setImmediate, a reconcile that has nothing to wait for. */
 const settle = async (n = 20) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));

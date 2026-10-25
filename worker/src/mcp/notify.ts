@@ -1641,7 +1641,7 @@ async function settingsOf(store: SettingsGetter, tenant: string): Promise<Record
  * recipient is tenant_telegram.owner_id — the chat that proved the /link code —
  * and nothing a client supplied.
  */
-export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsStore()): NotifyDeps["recipient"] {
+export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsStore("spot")): NotifyDeps["recipient"] {
   return async (tenant) => {
     const link = await readTenantTelegram(shared, tenant);
     if (!link || link.ownerId === null) return null;
@@ -1653,7 +1653,7 @@ export function hostedRecipient(shared: Db, store: SettingsGetter = getSettingsS
 }
 
 /** The tick the orchestrator runs the tenant's child at: its own setting, else the fleet's. */
-export function hostedTickSeconds(store: SettingsGetter = getSettingsStore()): NonNullable<NotifyDeps["tickSeconds"]> {
+export function hostedTickSeconds(store: SettingsGetter = getSettingsStore("spot")): NonNullable<NotifyDeps["tickSeconds"]> {
   return async (tenant) => {
     const s = await settingsOf(store, tenant);
     if (typeof s?.tickSeconds === "number" && s.tickSeconds > 0) return s.tickSeconds;
@@ -1703,7 +1703,7 @@ export function chainlinkPriceReader(client: FeedClient): PriceReader {
 
 /** Everything the orchestrator needs for runNotifyPass on the hosted fleet. */
 export function hostedNotifyDeps(shared: Db, o: { store?: SettingsGetter; price?: PriceReader; fetchFn?: FetchLike; log?: (line: string) => void; maxMs?: number } = {}): NotifyDeps {
-  const store = o.store ?? getSettingsStore();
+  const store = o.store ?? getSettingsStore("spot");
   return {
     now: () => Math.floor(Date.now() / 1000),
     send: telegramSend({ fetchFn: o.fetchFn }),

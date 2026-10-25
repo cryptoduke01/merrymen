@@ -311,7 +311,7 @@ describe("a stood-down tenant's access is cleared while its original source stay
     // Asked again after the await: a spawn that started meanwhile keeps its home.
     const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;", firstAwait);
     assert.ok(recheck > firstAwait && recheck < clear, "and it excludes every active writer again before clearing access");
-    assert.match(loop, /const retained = \(await getGrantStore\(\)\.listTenants\(\)\)\.some/);
+    assert.match(loop, /const retained = \(await getGrantStore\("spot"\)\.listTenants\(\)\)\.some/);
     assert.match(loop, /if \(retained \|\| localMemoryWriterPresent\(tenant\)\) continue;/);
     assert.match(loop, /if \(current \|\| localMemoryWriterPresent\(tenant\)\) continue;/);
     const keepBook = loop.indexOf('if (existsSync(path.join(home, "merrymen.db")))');

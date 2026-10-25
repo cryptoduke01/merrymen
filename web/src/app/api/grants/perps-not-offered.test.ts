@@ -150,11 +150,11 @@ describe("hosted: the refusal lands before the nonce, the ownership read and the
     });
     grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
     grants.resetGrantStoreForTest();
-    mock.method(grants.getGrantStore(), "tenantForAccount", async () => {
+    mock.method(grants.getGrantStore("spot"), "tenantForAccount", async () => {
       ownershipReads += 1;
       throw new Error("Connection terminated unexpectedly");
     });
-    mock.method(grants.getGrantStore(), "put", async () => {
+    mock.method(grants.getGrantStore("spot"), "put", async () => {
       writes += 1;
     });
   });

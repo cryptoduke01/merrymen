@@ -55,7 +55,7 @@ before(async () => {
   mock.method(SqlNonceStore.prototype, "consume", async () => true);
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "tenantForAccount", async () => {
+  mock.method(grants.getGrantStore("spot"), "tenantForAccount", async () => {
     throw new Error("Connection terminated unexpectedly");
   });
   ({ POST } = await import("./route"));
@@ -120,7 +120,7 @@ it("and the shell shows the owner that sentence, not a bare status", async () =>
 
 it("a full replacement history is an owner-facing 409 that explains the support path", async t => {
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
-  const store = grants.getGrantStore();
+  const store = grants.getGrantStore("spot");
   t.mock.method(store, "tenantForAccount", async () => null);
   t.mock.method(store, "put", async () => { throw new grants.GrantReplacementConflict(); });
   // The real derivation still runs, but its EntryPoint view call is answered

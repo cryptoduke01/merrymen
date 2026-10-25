@@ -82,7 +82,7 @@ test("Postgres: a kill without the Solana table creates nothing, waits on no Sol
       const { PgGrantStore } = await import("../../../worker/src/grant-store");
       const key = `0x${"19".repeat(32)}` as const;
       const now = Math.floor(Date.now() / 1000);
-      await new PgGrantStore(scoped("seed")).put(TENANT, {
+      await new PgGrantStore(scoped("seed"), "spot").put(TENANT, {
         smartAccount: `0x${"22".repeat(20)}`, owner: TENANT, chainId: 4663,
         sessionKeyAddress: privateKeyToAccount(key).address,
         serialized: Buffer.from(JSON.stringify({ privateKey: key })).toString("base64"),

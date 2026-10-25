@@ -87,7 +87,7 @@ test("a freshly fetched newer PgGrantStore authority preserves even an older exp
   const { demoSessionPrivateKey, ...publicGrant } = newer;
   let selects = 0;
   // Exercise the real PgGrantStore decoder with a stand-in connection, never a live database.
-  const store = new PgGrantStore("test-only-no-network", async () => ({
+  const store = new PgGrantStore("test-only-no-network", "spot", async () => ({
     query: async (sql: string, params?: unknown[]) => {
       if (/^CREATE TABLE/.test(sql.trim())) return { rows: [] };
       assert.match(sql, /^SELECT tenant, chain_id, grant_json, sealed_session_key, updated_at FROM grants/);

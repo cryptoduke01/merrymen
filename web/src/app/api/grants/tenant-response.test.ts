@@ -36,12 +36,12 @@ before(async () => {
   auth = await import("@/lib/auth");
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "get", async (tenant: `0x${string}`) => {
+  mock.method(grants.getGrantStore("spot"), "get", async (tenant: `0x${string}`) => {
     asked.push(tenant);
     return null;
   });
-  mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { if (removeDown) throw new Error("database unavailable"); removed.push(tenant); });
-  mock.method(grants.getGrantStore(), "stopForReplacement", async (...args: unknown[]) => {
+  mock.method(grants.getGrantStore("spot"), "remove", async (tenant: string) => { if (removeDown) throw new Error("database unavailable"); removed.push(tenant); });
+  mock.method(grants.getGrantStore("spot"), "stopForReplacement", async (...args: unknown[]) => {
     replacements.push(args);
     if (replacementError) throw new Error("database unavailable");
     return replacementState;

@@ -30,7 +30,7 @@ after(() => { rmSync(root, { recursive: true, force: true }); });
 test("real supervisor derives no-child/spawn/lease/volume authority; pending shared audit blocks mirror before any local marker", async () => {
   const f = await receiptFixture();
   process.env.MERRYMEN_HOME = f.options.volume.homeRoot;
-  const store = getGrantStore(); await store.put(TEST_TENANT, grant);
+  const store = getGrantStore("spot"); await store.put(TEST_TENANT, grant);
   setPersistentHomeVerifierForTest(() => f.options.volume);
   const options = { tenant: TEST_TENANT, smartAccount: TEST_ACCOUNT, shared: f.shared, rpc: f.rpc, dialect: "sqlite" as const };
   try {

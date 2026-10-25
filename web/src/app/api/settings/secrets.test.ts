@@ -77,7 +77,7 @@ describe("GET /api/settings never returns a secret in clear", () => {
 
   it("hosted: a tenant blob holding every secret (however it got there) comes back masked", async () => {
     process.env.MERRYMEN_HOSTED = "1";
-    await getSettingsStore().put(TENANT, { strategy: "trencher", ...SECRETS });
+    await getSettingsStore("spot").put(TENANT, { strategy: "trencher", ...SECRETS });
     const { text, body } = await get(`mm_session=${mintSession(TENANT)}`);
     assertNoSecretEchoed(text, body);
     assert.equal(body.values.strategy, "trencher");

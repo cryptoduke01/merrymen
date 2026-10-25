@@ -50,7 +50,7 @@ before(async () => {
   const require = createRequire(import.meta.url);
   grants = require("../../../../../worker/src/grant-store.ts") as typeof grants;
   grants.resetGrantStoreForTest();
-  const store = grants.getGrantStore();
+  const store = grants.getGrantStore("spot");
   mock.method(store, "get", async (tenant: string) => { grantReads.push(tenant); return current[tenant] ?? null; });
   for (const method of ["put", "remove", "stopForReplacement"] as const) {
     mock.method(store, method, async () => { grantWrites++; throw new Error("GET cannot change a grant."); });

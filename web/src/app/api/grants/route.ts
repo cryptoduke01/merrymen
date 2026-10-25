@@ -441,7 +441,7 @@ export async function POST(req: Request) {
     // not a security boundary so much as a collision guard, and it fails safe:
     // an unreadable store refuses rather than allowing a possible collision.
     try {
-      const holder = await getGrantStore().tenantForAccount(grant.smartAccount);
+      const holder = await getGrantStore("spot").tenantForAccount(grant.smartAccount);
       if (holder && holder !== tenant) {
         return NextResponse.json(
           { error: "this agent account is already linked to a different login" },
@@ -496,7 +496,7 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
     try {
-      await getGrantStore().put(tenant, grant);
+      await getGrantStore("spot").put(tenant, grant);
     } catch (e) {
       if (e instanceof GrantReplacementConflict) return NextResponse.json({ error: e.message, ownerFacing: true }, { status: 409 });
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
@@ -529,8 +529,8 @@ export async function POST(req: Request) {
       account: grant.smartAccount,
       identities: () => getIdentityStore(),
       settings: {
-        get: () => getSettingsStore().get(tenant),
-        put: (s) => getSettingsStore().put(tenant, s),
+        get: () => getSettingsStore("spot").get(tenant),
+        put: (s) => getSettingsStore("spot").put(tenant, s),
       },
       ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
     });
@@ -586,7 +586,7 @@ export async function DELETE(req: Request) {
         return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
       }
       try {
-        const state = await getGrantStore().stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
+        const state = await getGrantStore("spot").stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
         if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
         return NextResponse.json({ ok: true, replacement: true, state });
       } catch {
@@ -596,7 +596,7 @@ export async function DELETE(req: Request) {
     // The Solana strategy is stopped whatever happens to the Robinhood grant: a store that throws
     // here still leaves the owner's autonomous Solana trading off.
     let removal: unknown = null;
-    try { await getGrantStore().remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
+    try { await getGrantStore("spot").remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
     const solana = await solanaStopped(() => stopSolanaForKill(tenant));
     if (removal !== null) throw removal;
     return solanaKilled(solana);
@@ -649,7 +649,7 @@ function solanaKilled(stopped: boolean): NextResponse {
  */
 async function tickSecondsFor(hostedTenant: `0x${string}` | null | undefined): Promise<number | null> {
   try {
-    const tick = hostedTenant ? (await getSettingsStore().get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
+    const tick = hostedTenant ? (await getSettingsStore("spot").get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
     return typeof tick === "number" && Number.isFinite(tick) && tick > 0 ? tick : null;
   } catch {
     return null;
@@ -661,7 +661,7 @@ export async function GET(req: Request) {
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
   if (hostedTenant !== undefined) {
     if (!hostedTenant) return NextResponse.json({ exists: false, tenant: null } satisfies AgentStatus);
-    const g = await getGrantStore().get(hostedTenant);
+    const g = await getGrantStore("spot").get(hostedTenant);
     if (!g) return NextResponse.json({ exists: false, tenant: hostedTenant } satisfies AgentStatus);
     grant = g;
   } else {

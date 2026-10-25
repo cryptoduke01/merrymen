@@ -143,7 +143,7 @@ export async function readLeaderboard(
   readDb = withReadDb,
   identities = () => getIdentityStore().all(),
   nowSec = () => Math.floor(Date.now() / 1000),
-  readSettings: (tenant: `0x${string}`) => Promise<{ publicBook?: boolean } | null> = (tenant) => getSettingsStore().get(tenant),
+  readSettings: (tenant: `0x${string}`) => Promise<{ publicBook?: boolean } | null> = (tenant) => getSettingsStore("spot").get(tenant),
 ): Promise<LeaderboardRead> {
   return readDb(async (db): Promise<LeaderboardRead> => {
     if (!db) return { source: "none", agents: [], retired: null, retiredAgents: [] };

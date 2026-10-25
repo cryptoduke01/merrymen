@@ -182,7 +182,7 @@ after(() => {
   rmSync(FLEET, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const settle = async (n = 20) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
 };
@@ -266,7 +266,7 @@ beforeEach(async () => {
   await settle();
   rmSync(childHome(TENANT), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   rmSync(childHome(OTHER), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-  await getSettingsStore().put(TENANT, paperWithBot as never);
+  await getSettingsStore("spot").put(TENANT, paperWithBot as never);
   restoreSays = { ok: false, reason: NEWER };
   ledger = null;
   setHeldResetDbForTest(null);
@@ -306,7 +306,7 @@ describe("a paper book that will not restore holds the tenant", () => {
   });
 
   it("A TENANT WITH NO BOT IS HELD TOO, WITH NO PROCESS, AND STILL NOT RETRIED EVERY PASS", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
@@ -319,7 +319,7 @@ describe("a paper book that will not restore holds the tenant", () => {
       assert.equal(restores, 1);
       assert.equal(notices.length, 1, "the notice is tried even with no hold process");
       // The owner switches Telegram on: the next pass answers the bot.
-      await getSettingsStore().put(TENANT, paperWithBot as never);
+      await getSettingsStore("spot").put(TENANT, paperWithBot as never);
       await reconcile();
       assert.equal(holds().length, 1, `the hold process starts from the refresh:\n${said.join("\n")}`);
       assert.equal(restores, 1, "without another restore");
@@ -327,7 +327,7 @@ describe("a paper book that will not restore holds the tenant", () => {
   });
 
   it("A LIVE OR UNFLAGGED BOOK IS NOT HELD: THE WORKER STARTS AS IT ALWAYS DID", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await reconcile();
     assert.equal(workers().length, 1);
@@ -479,7 +479,7 @@ describe("when the restore takes, trading comes back", () => {
       hold.slowExit = true;
       // The restore still fails: the book is as broken as it was. What changed
       // is that the gate no longer holds a tenant for it.
-      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
       mock.timers.tick(15_000);
       const pass = reconcile();
       await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
@@ -635,7 +635,7 @@ describe("when the restore takes, trading comes back", () => {
       const hold = holds()[0]!;
       hold.deaf = true;
       // The restore still fails; the gate no longer holds a live owner for it.
-      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
       mock.timers.tick(15_000);
       const pass = reconcile();
       await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
@@ -742,7 +742,7 @@ describe("a held tenant is stood down like any other", () => {
 
   it("A HELD TENANT'S BOT IS STILL ITS OWN: THE DE-DUPLICATION SEES IT, AND FIRST", async () => {
     // The same bot saved under a second, trading login: the incident's shape.
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await reconcile();
@@ -754,8 +754,8 @@ describe("a held tenant is stood down like any other", () => {
   });
 
   it("A HELD TENANT WITH TELEGRAM OFF CLAIMS NO BOT: A TRADING LOGIN ON THE SAME TOKEN KEEPS IT", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false, telegramBotToken: "111:a" } as never);
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await reconcile();
@@ -768,12 +768,12 @@ describe("a held tenant is stood down like any other", () => {
   });
 
   it("A HELD TENANT REVOKED IN THE PASS ITS OWNER SWITCHES TELEGRAM ON GETS NO HOLD PROCESS", async () => {
-    await getSettingsStore().put(TENANT, { paperTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await reconcile();
     assert.ok(isHeldForTest(TENANT));
     const retained = await seedRetainedHome();
-    await getSettingsStore().put(TENANT, paperWithBot as never);
+    await getSettingsStore("spot").put(TENANT, paperWithBot as never);
     await store.remove(TENANT);
     await reconcile();
     await settle();
@@ -907,7 +907,7 @@ describe("a held tenant is stood down like any other", () => {
   it("A STOOD-DOWN HOLD PROCESS THAT WILL NOT EXIT STILL COUNTS FOR ITS BOT: ANOTHER LOGIN ON THE SAME TOKEN IS NOT HANDED IT MEANWHILE", async () => {
     // The incident's shape: the same bot under a second, trading login. No
     // claims can be read here, so the pass's own record is the only guard.
-    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await getSettingsStore("spot").put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
     await store.put(TENANT, grant());
     await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
     await withClock(async () => {
@@ -1080,7 +1080,7 @@ describe("a practice reset its owner asks for while held", () => {
 
   it("A LIVE OWNER'S RESET IS NOT HONOURED, AND ONE PRESS BRINGS ONE RETRY FORWARD, NOT ONE EVERY PASS", async () => {
     const db = await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
@@ -1129,7 +1129,7 @@ describe("a practice reset its owner asks for while held", () => {
 
   it("A LIVE OWNER'S RESET WAITING AT SPAWN IS LOOKED AT THERE, AND NOT AGAIN LATER IN THE SAME PASS", async () => {
     const db = await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await ask(db, "r1", Date.now() - 60 * 60_000);
     await store.put(TENANT, grant());
     await withClock(async () => {
@@ -1202,14 +1202,14 @@ describe("a practice reset its owner asks for while held", () => {
 
   it("THE RESET IS OFFERED ONLY WHERE IT WOULD BE HONOURED, AND THE OFFER FOLLOWS THE SETTINGS", async () => {
     await useLedger();
-    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await getSettingsStore("spot").put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
     await store.put(TENANT, grant());
     await withClock(async () => {
       await reconcile();
       assert.ok(isHeldForTest(TENANT));
       assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, false, "live switched on beside practice: it would be refused");
       assert.deepEqual(offered, [false], "and the notice does not send them round the loop either");
-      await getSettingsStore().put(TENANT, paperWithBot as never);
+      await getSettingsStore("spot").put(TENANT, paperWithBot as never);
       mock.timers.tick(15_000);
       await reconcile();
       assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, true, "switched off: the hold process offers it from the next reply");

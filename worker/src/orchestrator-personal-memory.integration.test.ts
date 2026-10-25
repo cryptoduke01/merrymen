@@ -63,7 +63,7 @@ async function seed(tenant: string): Promise<void> {
   assert.equal(await publishPersonalMemory({ tenant, home, shared, dek, seen: new Map(), log: () => {} }), "published");
 }
 async function cleanup(tenant: `0x${string}`): Promise<void> {
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   spawned.at(-1)?.exit();
   setPersonalMemoryStoreForTest(null);
@@ -86,7 +86,7 @@ it("a failed read starts no worker or holder, then restores the same notes and D
   };
   setPersonalMemoryStoreForTest({ shared: failing, dek, dialect: "sqlite" });
   setPaperRestoreForTest(async () => { bookAttempts++; return { ok: true, line: null }; });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const before = spawned.length;
   await reconcile();
   assert.equal(spawned.length, before);
@@ -117,7 +117,7 @@ it("tenant-bound unreadable ciphertext preserves surviving local notes and start
   mkdirSync(path.join(home, "soul"), { recursive: true });
   writeFileSync(path.join(home, "soul", "OWNER.md"), "surviving local owner memory");
   setPersonalMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const before = spawned.length;
   await reconcile();
   assert.equal(spawned.length, before);
@@ -134,7 +134,7 @@ it("missing DEK defers startup until an encrypted restore is available", async (
   const tenant = address(0xa31), account = address(0xa32);
   await seed(tenant);
   setPersonalMemoryStoreForTest({ shared, dek: null, dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const before = spawned.length;
   await reconcile();
   assert.equal(spawned.length, before);

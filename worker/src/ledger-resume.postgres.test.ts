@@ -71,7 +71,7 @@ test("Postgres: attested-gap registration, its approvals, and the owner-control 
     },
   });
   const shared = wrap(main); await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL); await shared.exec(PAPER_CHECKPOINT_SCHEMA);
-  const grants = new PgGrantStore(scoped.toString(), async () => connect());
+  const grants = new PgGrantStore(scoped.toString(), "spot", async () => connect());
   const raws: DatabaseSync[] = [];
   t.after(async () => {
     for (const raw of raws) raw.close();

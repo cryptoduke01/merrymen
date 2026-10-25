@@ -127,7 +127,7 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
   try {
     const shared = await makePgDb(scoped("orchestrator"));
     const other = await makePgDb(scoped("web"));
-    const store = (who: string) => new PgSettingsStore(scoped(who), connect);
+    const store = (who: string) => new PgSettingsStore(scoped(who), "spot", connect);
     const now = Date.now();
     const nowSec = Math.floor(now / 1000);
 

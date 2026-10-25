@@ -108,7 +108,7 @@ async function orderTtlFor(req: Request): Promise<number> {
   if (isHostedMode()) {
     const tenant = tenantOf(req);
     try {
-      const own = tenant ? (await getSettingsStore().get(tenant))?.tickSeconds : undefined;
+      const own = tenant ? (await getSettingsStore("spot").get(tenant))?.tickSeconds : undefined;
       if (typeof own === "number" && Number.isFinite(own) && own > 0) tickSeconds = own;
     } catch {
       /* the container's own tick is the safe fallback */

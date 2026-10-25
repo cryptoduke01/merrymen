@@ -84,14 +84,14 @@ beforeEach(() => { forks.length = 0; confirmed.length = 0; next += 1; });
 
 it("a /kill confirmed while held removes the stored grant before any key reaches the home, and nothing spawns", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const at = nowSec() + 30; // confirmed after the grant was stored
   control(tenant, account, { update: 1, kind: "kill-request", at: at - 20, expires: (at + 60) * 1000 });
   control(tenant, account, { update: 2, kind: "kill-confirm", request: 1, at });
   const before = spawned.length;
   await reconcile();
   assert.equal(spawned.length, before, "no worker");
-  assert.equal(await getGrantStore().get(tenant), null, "the stored grant is gone");
+  assert.equal(await getGrantStore("spot").get(tenant), null, "the stored grant is gone");
   assert.equal(existsSync(path.join(childHome(tenant), "grant.json")), false, "and its key never reached the home");
   assert.deepEqual(confirmed, [tenant], "the ✅ is the existing kill's own");
   const receipt = raw.prepare("SELECT kind FROM recovery_reply_control_receipts WHERE tenant = ?").all(tenant) as Array<{ kind: string }>;
@@ -102,12 +102,12 @@ it("a /kill confirmed while held removes the stored grant before any key reaches
 
 it("a kill request that cannot be carried out keeps the spawn refused until honourKill gets through", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const at = nowSec() + 30;
   control(tenant, account, { update: 1, kind: "kill-request", at: at - 20, expires: (at + 60) * 1000 });
   control(tenant, account, { update: 2, kind: "kill-confirm", request: 1, at });
   // The store refuses the delete this pass.
-  const store = getGrantStore() as unknown as { removeUnlessNewer: (...a: unknown[]) => Promise<unknown> };
+  const store = getGrantStore("spot") as unknown as { removeUnlessNewer: (...a: unknown[]) => Promise<unknown> };
   const real = store.removeUnlessNewer.bind(store);
   store.removeUnlessNewer = async () => { throw new Error("store briefly unavailable"); };
   try {
@@ -120,14 +120,14 @@ it("a kill request that cannot be carried out keeps the spawn refused until hono
       "no receipt before honourKill returns");
   } finally { store.removeUnlessNewer = real; }
   await reconcile();
-  assert.equal(await getGrantStore().get(tenant), null, "carried out on the next pass");
+  assert.equal(await getGrantStore("spot").get(tenant), null, "carried out on the next pass");
   await reconcile();
 });
 
 it("a /pause recorded while held is in the home when the worker forks, once; the owner's /resume stands across a respawn", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
   control(tenant, account, { update: 3, kind: "pause", at: nowSec() - 60 });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   await reconcile();
   assert.equal(forksOf(tenant).length, 1);
   assert.deepEqual({ paused: forksOf(tenant)[0]!.paused, grant: forksOf(tenant)[0]!.grant }, { paused: true, grant: true });
@@ -143,13 +143,13 @@ it("a /pause recorded while held is in the home when the worker forks, once; the
   assert.equal(forksOf(tenant).length, 2, "respawned");
   assert.equal(forksOf(tenant)[1]!.paused, false, "the /resume was not undone");
   assert.equal((raw.prepare("SELECT count(*) AS n FROM events WHERE agent_id = ?").get(account) as { n: number }).n, 1, "nothing applied twice");
-  await getGrantStore().remove(tenant); await reconcile();
+  await getGrantStore("spot").remove(tenant); await reconcile();
 });
 
 it("the owner's /resume, mirrored, stands when the home is then lost with no respawn in between", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
   control(tenant, account, { update: 3, kind: "pause", at: nowSec() - 60 });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   await reconcile();
   assert.equal(forksOf(tenant).length, 1);
   assert.equal(forksOf(tenant)[0]!.paused, true);
@@ -167,7 +167,7 @@ it("the owner's /resume, mirrored, stands when the home is then lost with no res
   assert.equal(forksOf(tenant).length, 2, "respawned into the rebuilt home");
   assert.equal(forksOf(tenant)[1]!.paused, false, "the mirrored /resume was not undone");
   assert.equal((raw.prepare("SELECT paused_at FROM tenant_telegram WHERE tenant = ?").get(tenant) as { paused_at: unknown }).paused_at, null, "and the stamp is lifted");
-  await getGrantStore().remove(tenant); await reconcile();
+  await getGrantStore("spot").remove(tenant); await reconcile();
 });
 
 it("a kill superseded by a grant signed after it keeps that grant, and the worker forks paused", async () => {
@@ -175,22 +175,22 @@ it("a kill superseded by a grant signed after it keeps that grant, and the worke
   const at = nowSec() - 600; // confirmed well before the grant now in the store
   control(tenant, account, { update: 1, kind: "kill-request", at: at - 20, expires: (at + 60) * 1000 });
   control(tenant, account, { update: 2, kind: "kill-confirm", request: 1, at });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   await reconcile();
-  assert.ok(await getGrantStore().get(tenant), "the newer grant is kept");
+  assert.ok(await getGrantStore("spot").get(tenant), "the newer grant is kept");
   assert.equal(forksOf(tenant).length, 1);
   assert.equal(forksOf(tenant)[0]!.paused, true);
   assert.equal(killRequested(childHome(tenant)), false, "the superseded request latches nothing");
-  await getGrantStore().remove(tenant); await reconcile();
+  await getGrantStore("spot").remove(tenant); await reconcile();
 });
 
 it("a malformed journal holds the tenant: no key, no worker", async () => {
   const tenant = addr(0xd100 + next), account = addr(0xe100 + next)
   control(tenant, account, { update: 2, kind: "kill-confirm", request: 1, at: nowSec() - 10 });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const before = spawned.length;
   await reconcile();
   assert.equal(spawned.length, before);
   assert.equal(existsSync(path.join(childHome(tenant), "grant.json")), false);
-  await getGrantStore().remove(tenant); await reconcile();
+  await getGrantStore("spot").remove(tenant); await reconcile();
 });

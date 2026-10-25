@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     }
     const paperReset = await startOver({
       account: () => hostedAgentFor(req),
-      remove: () => getGrantStore().remove(tenant),
+      remove: () => getGrantStore("spot").remove(tenant),
       queueReset: async (account) => (await queuePaperReset(true, account)).ok,
     });
     return NextResponse.json({ ok: true, paperReset });

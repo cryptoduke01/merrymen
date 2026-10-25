@@ -46,7 +46,7 @@ setSpawnForTest((_command, args, options) => {
 });
 setSpawnPacingForTest(0, 0);
 setPaperRestoreForTest(async () => ({ ok: true, line: "isolated test restore" }));
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const settle = async () => { for (let i = 0; i < 30; i++) await new Promise<void>((resolve) => setImmediate(resolve)); };
 const output: string[] = [];
 const originalLog = console.log;
@@ -70,7 +70,7 @@ after(() => { console.log = originalLog; rmSync(fleet, { recursive: true, force:
 it("mixed roster: only the named tenant stays absent, including a second reconcile", async () => {
   await store.put(TENANT, grant());
   await store.put(OTHER, grant(OTHER));
-  await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
+  await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
   const before = await store.get(TENANT);
   process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = TENANT;
   await reconcile();
@@ -132,7 +132,7 @@ it("a restart scheduled before maintenance cannot start the target afterward", a
 
 it("maintenance introduced during spawn preparation blocks the holder path", async () => {
   await store.put(TENANT, grant());
-  await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
+  await getSettingsStore("spot").put(TENANT, { paperTradingEnabled: true, telegramEnabled: false } as never);
   setPaperRestoreForTest(async () => {
     process.env.MERRYMEN_ACCOUNTING_HOLD_TENANTS = TENANT;
     return { ok: false, reason: "paper fills are newer than the recoverable valuation" };

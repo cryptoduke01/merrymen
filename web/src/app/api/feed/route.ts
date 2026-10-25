@@ -27,7 +27,7 @@ import type { FeedMeasured } from "@/lib/feed-pnl";
  */
 const IDENTITY_SOURCES: IdentitySources = {
   hosted: isHostedMode,
-  settingsOf: (tenant) => getSettingsStore().get(tenant),
+  settingsOf: (tenant) => getSettingsStore("spot").get(tenant),
   settingsFile: () => readFileSync(homePaths.settings(), "utf8"),
   slugOf: async (tenant) => (await getIdentityStore().get(tenant))?.slug ?? null,
 };

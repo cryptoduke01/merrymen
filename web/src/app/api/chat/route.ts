@@ -56,7 +56,7 @@ export async function POST(req: Request) {
   let grant: StoredGrant | null = null;
   let recovery: FleetRecoveryView | null = null;
   try {
-    grant = hosted && tenant ? await getGrantStore().get(tenant) : null;
+    grant = hosted && tenant ? await getGrantStore("spot").get(tenant) : null;
     if (tenant && grant) {
       const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
       recovery = await withReadDb(db => {
@@ -107,7 +107,7 @@ export async function POST(req: Request) {
   const fomoSettings = fomoEnabledFor(hosted);
   let agentBrief: string | undefined;
   try {
-    const saved = hosted ? await getSettingsStore().get(tenant!) : resolveConfig();
+    const saved = hosted ? await getSettingsStore("spot").get(tenant!) : resolveConfig();
     agentBrief = normalizeAgentBrief(saved?.agentBrief);
   } catch { /* Missing preferences do not change account or recovery authority. */ }
   // `hosted` so a failed model call can say whether it ran on the house's key

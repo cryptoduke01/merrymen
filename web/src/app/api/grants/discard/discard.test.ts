@@ -180,7 +180,7 @@ describe("POST /api/grants/discard", () => {
   it("HOSTED: THE ACCOUNT IS READ FROM THE GRANT, THE GRANT REMOVED, AND A LEDGER OUT OF REACH COSTS ONLY THE RESET", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     grants.resetGrantStoreForTest();
-    const store = grants.getGrantStore();
+    const store = grants.getGrantStore("spot");
     const wallet = "0x00000000000000000000000000000000000000e7" as const;
     await store.put(wallet, grant());
     const steps: string[] = [];
@@ -211,16 +211,16 @@ describe("POST /api/grants/discard", () => {
     process.env.MERRYMEN_HOSTED = "1";
     grants.resetGrantStoreForTest();
     const wallet = "0x00000000000000000000000000000000000000e8" as const;
-    await grants.getGrantStore().put(wallet, grant());
+    await grants.getGrantStore("spot").put(wallet, grant());
     const res = await POST(new Request("https://app.merrymen.dev/api/grants/discard", { method: "POST" }));
     assert.equal(res.status, 401);
-    assert.ok(await grants.getGrantStore().get(wallet), "still stored");
+    assert.ok(await grants.getGrantStore("spot").get(wallet), "still stored");
   });
 
   it("HOSTED START OVER: A STALE OR MISSING EXPECTED TENANT DOES NOT READ OR REMOVE A GRANT", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     grants.resetGrantStoreForTest();
-    const store = grants.getGrantStore();
+    const store = grants.getGrantStore("spot");
     const wallet = "0x00000000000000000000000000000000000000e9" as const;
     const other = "0x00000000000000000000000000000000000000ea" as const;
     await store.put(wallet, grant());

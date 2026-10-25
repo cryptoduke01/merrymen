@@ -107,7 +107,7 @@ const realLog = console.log;
 console.log = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
 const saidOf = (re: RegExp) => said.filter((l) => re.test(l));
 const settle = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const granted: `0x${string}`[] = [];
 const put = async (tenant: `0x${string}`, account: `0x${string}`) => { granted.push(tenant); await store.put(tenant, grant(account)); };
 const children = path.join(fleet, "children");

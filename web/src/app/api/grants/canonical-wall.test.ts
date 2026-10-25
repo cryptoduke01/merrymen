@@ -58,7 +58,7 @@ before(async () => {
   });
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "tenantForAccount", async () => {
+  mock.method(grants.getGrantStore("spot"), "tenantForAccount", async () => {
     ownershipReads += 1;
     throw new Error("Connection terminated unexpectedly");
   });

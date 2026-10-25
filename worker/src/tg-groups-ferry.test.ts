@@ -1462,13 +1462,13 @@ describe("the group files leave a home whose grant is gone while no child runs t
       grantTokens: [],
       demoSessionPrivateKey: `0x${"ab".repeat(32)}`,
     } as unknown as Parameters<ReturnType<typeof getGrantStore>["put"]>[1];
-    await getGrantStore().put(B as `0x${string}`, grant);
+    await getGrantStore("spot").put(B as `0x${string}`, grant);
     const killed = childHome(B);
     mkdirSync(killed, { recursive: true });
     put(killed, memory());
     writeKillRequest(killed, grant, nowSec);
     await honourPendingKills();
-    assert.equal(await getGrantStore().get(B as `0x${string}`), null, "the grant is removed");
+    assert.equal(await getGrantStore("spot").get(B as `0x${string}`), null, "the grant is removed");
     assert.equal(existsSync(path.join(killed, TG_GROUPS_FILE_NAME)), false, "and its group memory with it, before any reconcile");
   });
 });

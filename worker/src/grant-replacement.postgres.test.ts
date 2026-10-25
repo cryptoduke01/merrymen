@@ -58,8 +58,8 @@ test("Postgres: durable replacement stop, fresh-key fencing and concurrent grant
       on: client.on.bind(client), end: client.end.bind(client),
     };
   };
-  const one = new PgGrantStore(scoped.toString(), connect);
-  const two = new PgGrantStore(scoped.toString(), connect);
+  const one = new PgGrantStore(scoped.toString(), "spot", connect);
+  const two = new PgGrantStore(scoped.toString(), "spot", connect);
   t.after(async () => {
     pauseStop = null;
     try { await admin.query(`DROP SCHEMA ${schema} CASCADE`); }

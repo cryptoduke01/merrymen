@@ -34,7 +34,7 @@ const grant = (account: `0x${string}`, key = OLD_KEY) => ({
 }) as unknown as StoredGrant;
 
 describe("FileGrantStore durable permission replacement stop", () => {
-  const store = new FileGrantStore();
+  const store = new FileGrantStore("spot");
   const file = (tenant: string) => path.join(home, "tenants", `${tenant}.json`);
 
   it("retains roster/account ownership, erases both key copies and returns no usable grant across restart", async () => {
@@ -50,7 +50,7 @@ describe("FileGrantStore durable permission replacement stop", () => {
     assert.equal(record.grant.expiresAt, 0);
     assert.equal(record.updatedAt, stamp, "a stop does not supersede a pending explicit /kill");
     assert.ok(!raw.includes(OLD_KEY) && !raw.includes(original.serialized));
-    const restarted = new FileGrantStore();
+    const restarted = new FileGrantStore("spot");
     assert.equal(await restarted.get(tenant), null);
     assert.ok((await restarted.listTenants()).includes(tenant));
     assert.equal((await restarted.listTenantExpiries()).find(row => row.tenant === tenant)?.expiresAt, 0);

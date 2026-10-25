@@ -256,7 +256,7 @@ it("A MIRROR PASS WITH ITS TENANT IN HAND IS WAITED FOR: its older memory read i
   const owner = path.join(home, "soul", "OWNER.md");
   mkdirSync(path.dirname(owner), { recursive: true });
   writeFileSync(owner, "read by the pass in hand");
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   // A newer note, the worker's last write before it ended: only the final pass can carry it.
   const proc = new FakeProc(81_007, { lastWrite: () => writeFileSync(owner, "written last") });
   watched = [proc];
@@ -298,7 +298,7 @@ it("A MIRROR PASS WITH ITS TENANT IN HAND IS WAITED FOR: its older memory read i
   assert.equal(readFileSync(path.join(restored, "soul", "OWNER.md"), "utf8"), "written last", "the final pass's read is the one stored last");
   assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
   assert.equal(receipt().clean, true);
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
 });
 
 it("A HOLDER HOME GETS FORGET-ONLY MEMORY HANDLING, and its book is never copied", async () => {
@@ -319,7 +319,7 @@ it("A HOLDER HOME GETS FORGET-ONLY MEMORY HANDLING, and its book is never copied
   await applyLedgerSchema(wrapSqlite(staleRaw));
   staleRaw.prepare(`INSERT INTO trades (id,agent_id,kind,target,amount_usdg,status,created_at)
     VALUES (1,?,'swap','fixture',1,'rejected',?)`).run(account, nowSec());
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const proc = new FakeProc(81_002);
   watched = [proc];
   await adoptHolderForTest(tenant, account, proc as unknown as ChildProcess);
@@ -338,13 +338,13 @@ it("A HOLDER HOME GETS FORGET-ONLY MEMORY HANDLING, and its book is never copied
   assert.equal(existsSync(marker(home)), false);
   assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
   assert.deepEqual(exits, [0]);
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
 });
 
 it("THE ORDER: hooks before any signal, the kill a child leaves in its home carried out after it exits, the receipt before the leases, exit last — and once", async () => {
   const tenant = address(0xd31), account = address(0xd32), released = { n: 0 } as { n: number; receiptThen?: boolean };
   const { home } = await book(tenant, account);
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const confirmed: string[] = [];
   setKillConfirmForTest(async (t) => { confirmed.push(t); timeline.push("kill-confirmed"); });
   // The worker's /kill lands just before it ends: the request is in its home when it exits.
@@ -361,7 +361,7 @@ it("THE ORDER: hooks before any signal, the kill a child leaves in its home carr
   assert.deepEqual(timeline, ["hook", "SIGTERM:81003", "kill-confirmed", `release:${tenant.slice(-2)}`, "exit:0"]);
   assert.equal(hookRuns, 1);
   assert.deepEqual(confirmed, [tenant]);
-  assert.equal(await getGrantStore().get(tenant), null, "the pending kill reached the store before the leases went");
+  assert.equal(await getGrantStore("spot").get(tenant), null, "the pending kill reached the store before the leases went");
   assert.equal(released.receiptThen, true);
   assert.equal(said.filter((l) => /stopping on SIGTERM — calling the whole fleet home/.test(l)).length, 1);
   assert.ok(said.some((l) => /SIGINT again — the fleet is already being called home/.test(l)));
@@ -586,7 +586,7 @@ it("UNDER FLEET_HALT THE DRAIN COPIES NOTHING: no ledger batch, no memory row, a
   writeFileSync(path.join(home, "tg-groups.json"), groups("stored before the halt"));
   await publishTgGroups({ tenant, home, shared, dek, seen: new Map(), log: () => {} });
   writeFileSync(path.join(home, "tg-groups.json"), groups("written while the halt was on"));
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const proc = new FakeProc(81_041);
   watched = [proc];
   adoptChildForTest(tenant, account, proc, lease(tenant, released));
@@ -608,7 +608,7 @@ it("UNDER FLEET_HALT THE DRAIN COPIES NOTHING: no ledger batch, no memory row, a
     assert.deepEqual(exits, [0]);
   } finally {
     rmSync(halt, { force: true });
-    await getGrantStore().remove(tenant);
+    await getGrantStore("spot").remove(tenant);
   }
 });
 
@@ -721,7 +721,7 @@ it("A WORKER HOME STILL MARKED restore-blocked IS NEVER MIRRORED by the final pa
   await publishTgGroups({ tenant, home, shared, dek, seen: new Map(), log: () => {} });
   writeFileSync(path.join(home, "tg-groups.json"), groups("unrestored worker memory must not win"));
   writeRestoreBlocked(home, { reason: "paper fills are newer than the checkpoint", class: "trades newer than the last valuation", since: nowSec() - 60 });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const proc = new FakeProc(81_081);
   watched = [proc];
   adoptChildForTest(tenant, account, proc, lease(tenant, released));
@@ -735,7 +735,7 @@ it("A WORKER HOME STILL MARKED restore-blocked IS NEVER MIRRORED by the final pa
     assert.deepEqual(receipt().finalPass, { homes: 1, saved: 1, retained: 0, skipped: 0, outOfTime: 0 });
     assert.equal(released.n, 1);
   } finally {
-    await getGrantStore().remove(tenant);
+    await getGrantStore("spot").remove(tenant);
   }
 });
 

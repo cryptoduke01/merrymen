@@ -146,7 +146,7 @@ type StoredRead = { ok: true; settings: MerrymenSettings } | { ok: false; why: s
 async function readStoredStrict(tenant?: `0x${string}` | null): Promise<StoredRead> {
   // Hosted: a tenant's settings live in the per-tenant store, not the global
   // settings.json (which the child workers each have their own copy of).
-  if (tenant) return { ok: true, settings: (await getSettingsStore().get(tenant)) ?? {} };
+  if (tenant) return { ok: true, settings: (await getSettingsStore("spot").get(tenant)) ?? {} };
   let raw: string;
   try {
     raw = await readFile(SETTINGS_FILE, "utf8");
@@ -960,7 +960,7 @@ async function saveSettings(
     touched: touched.has("telegramBotToken"),
     next,
     moveBot,
-    settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+    settings: { before: stored, read: (t) => getSettingsStore("spot").get(t) },
     claims,
   });
   if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
@@ -970,7 +970,7 @@ async function saveSettings(
     // rest), and the orchestrator hands the child worker a settings.json from it
     // within a reconcile tick.
     try {
-      await getSettingsStore().put(tenant, next);
+      await getSettingsStore("spot").put(tenant, next);
     } catch (e) {
       await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
       throw e;

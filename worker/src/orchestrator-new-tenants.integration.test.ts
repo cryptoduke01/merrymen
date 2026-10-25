@@ -122,7 +122,7 @@ const realLog = console.log;
 console.log = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
 const settle = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 const pass = async () => { await reconcile(); await settle(); };
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const used: `0x${string}`[] = [];
 let n = 0x300;
 /** A tenant and its account, with a grant stored. */

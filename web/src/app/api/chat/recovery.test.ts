@@ -36,7 +36,7 @@ before(() => {
   process.env.MERRYMEN_LLM_PROVIDER_MODEL = "test-model";
   resetGrantStoreForTest();
   mock.method(Date, "now", () => NOW * 1000);
-  mock.method(getGrantStore(), "get", async (tenant: string) => {
+  mock.method(getGrantStore("spot"), "get", async (tenant: string) => {
     grantReads.push(tenant);
     // The browser's declared account and agents.owner_address are never consulted.
     return { smartAccount: tenant === TENANT_A ? ACCOUNT_A : ACCOUNT_B, chainId: 4663 } as StoredGrant;

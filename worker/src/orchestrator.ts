@@ -610,7 +610,7 @@ interface NewTenantPass {
 
 /** THE SCOPE OF ONE TENANT'S PROOF: its grant's addresses, every path its home could have, every archive root. Throws when the grant or the volume cannot be read. */
 async function newTenantScope(tenant: `0x${string}`): Promise<NewTenantScope | null> {
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore("spot").get(tenant);
   if (!grant) return null;
   const homes = new Set([childHome(tenant)]);
   const archiveRoots = new Set([path.join(merrymenHome(), "archive")]);
@@ -1458,7 +1458,7 @@ export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOpt
   "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint">): Promise<ReceiptAttestationReport> {
   const tenant = o.tenant.toLowerCase() as `0x${string}`, lease = leases.get(tenant), volume = persistentFleetHome();
   if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore("spot").get(tenant);
   if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
   const assertQuiescent = () => {
     if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
@@ -1681,7 +1681,7 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
     // A heuristic, and logged as one, because it recovers a recipient rather
     // than reading one.
     if (!ownerId) {
-      const stored = await getSettingsStore().get(tenant);
+      const stored = await getSettingsStore("spot").get(tenant);
       const list = Array.isArray(stored?.telegramAllowlist) ? stored.telegramAllowlist : [];
       const dm = list.filter((c) => typeof c === "number" && c > 0).sort((a, b) => a - b)[0];
       if (dm !== undefined) {
@@ -1829,12 +1829,12 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childStat
     }
     const { due, record } = linksToPromote(tg.linkedChats, tg.linkedChatAt, promoted);
     if (due.length === 0) return;
-    const stored = (await getSettingsStore().get(tenant)) ?? {};
+    const stored = (await getSettingsStore("spot").get(tenant)) ?? {};
     const have = new Set(Array.isArray(stored.telegramAllowlist) ? stored.telegramAllowlist : []);
     const missing = due.filter((c) => !have.has(c));
     if (missing.length > 0) {
       for (const c of missing) have.add(c);
-      await getSettingsStore().put(tenant, { ...stored, telegramAllowlist: [...have] });
+      await getSettingsStore("spot").put(tenant, { ...stored, telegramAllowlist: [...have] });
       log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
     }
     // AFTER the put, and only once it has landed: a failed put leaves these
@@ -1918,10 +1918,10 @@ function livenessPublished(tenant: string, failed: unknown): void {
 async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | null): Promise<void> {
   if (!chat) return;
   try {
-    const stored = (await getSettingsStore().get(tenant)) ?? {};
+    const stored = (await getSettingsStore("spot").get(tenant)) ?? {};
     const next = promotedSettings(stored, chat);
     if (!next) return;
-    await getSettingsStore().put(tenant, next);
+    await getSettingsStore("spot").put(tenant, next);
     const names = Object.keys(chat.patch).filter((k) => CHAT_SETTABLE.has(k));
     log(
       names.length
@@ -2162,7 +2162,7 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
 async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount: `0x${string}`; expiresAt: number; grant: StoredGrant } | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
   if (killRequested(childHome(tenant))) return null;
-  const grant = await getGrantStore().get(tenant);
+  const grant = await getGrantStore("spot").get(tenant);
   if (!grant) return null;
 
   // BACKFILL THE PUBLIC ID.
@@ -2242,7 +2242,7 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
   if (killRequested(childHome(tenant))) return;
   let grant;
   try {
-    grant = await getGrantStore().get(tenant);
+    grant = await getGrantStore("spot").get(tenant);
   } catch {
     // An unreadable store is not a revoked grant. Leave the child with the wall
     // it has; the kill switch below is what stands an agent down.
@@ -2317,7 +2317,7 @@ type HolderClaimsRead = ReadonlyMap<string, string> | null;
  */
 async function readHolderClaims(): Promise<HolderClaimsRead> {
   try {
-    return await getSettingsStore().holderClaims();
+    return await getSettingsStore("spot").holderClaims();
   } catch (e) {
     log(`holder claims unreadable — each child keeps the holder wallet last written: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -2573,7 +2573,7 @@ async function writeSettingsForChild(
   botClaimsRead?: BotClaimsRead,
 ): Promise<MerrymenSettings | null> {
   try {
-    let settings = await getSettingsStore().get(tenant);
+    let settings = await getSettingsStore("spot").get(tenant);
     // THE UNIVERSE IS RECORDED EVEN WHEN NOTHING WAS SAVED, and that is the fix.
     //
     // This used to be set below, AFTER the early return — so a tenant who never
@@ -3221,7 +3221,7 @@ async function reportFleetSource(tenant: `0x${string}`, grant: StoredGrant, leas
   const owned = () => leases.get(tenant) === lease && lease.healthy() && !children.has(tenant)
     && (cause ? holders.get(tenant) === observedHolder : !holders.has(tenant));
   try {
-    const latest = await getGrantStore().get(tenant);
+    const latest = await getGrantStore("spot").get(tenant);
     if (!owned() || !latest || JSON.stringify(latest) !== JSON.stringify(grant)) return false;
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
     const scope = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
@@ -3293,7 +3293,7 @@ async function reportPausedFleetSources(tenants: readonly `0x${string}`[]): Prom
         lease = acquired; leases.set(tenant, lease); temporary = true;
       }
       if (!lease.healthy()) continue;
-      const grant = await getGrantStore().get(tenant);
+      const grant = await getGrantStore("spot").get(tenant);
       if (!grant) continue;
       const cause = await pausedSourceCause(tenant);
       if (cause) await reportFleetSource(tenant, grant, lease, cause);
@@ -3824,7 +3824,7 @@ async function drainContinuousBook(tenant: `0x${string}`, lease: TenantLease, sh
  */
 async function resumeLiveIntent(tenant: `0x${string}`): Promise<boolean | null> {
   if (!liveConsentEnforced()) return true;
-  try { return (await getSettingsStore().get(tenant))?.liveTradingEnabled === true; }
+  try { return (await getSettingsStore("spot").get(tenant))?.liveTradingEnabled === true; }
   catch { return null; }
 }
 
@@ -4548,13 +4548,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // The root fence runs before grant.json or any seed is written. Publish
       // the pause from the stored identity even when that fence prevents a child home.
       try {
-        const blockedGrant = await getGrantStore().get(tenant);
+        const blockedGrant = await getGrantStore("spot").get(tenant);
         if (blockedGrant) await reportFleetSource(tenant, blockedGrant, lease, "persistent-source");
       } catch { /* keep the original refusal even when the status store is unavailable */ }
       log(`[alert] ${tenant}: persistent storage is unconfirmed — retaining its data without starting a worker`);
       return;
     }
-    const storedGrant = await getGrantStore().get(tenant);
+    const storedGrant = await getGrantStore("spot").get(tenant);
     if (storedGrant && (!Number.isFinite(storedGrant.expiresAt) || storedGrant.expiresAt <= Math.floor(Date.now() / 1000))) {
       const cause = await pausedSourceCause(tenant);
       if (cause) await reportFleetSource(tenant, storedGrant, lease, cause);
@@ -4581,7 +4581,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // Only actual removal forgets its groups. An unreadable roster preserves
       // the memory and still refuses to start a worker.
       try {
-        const retained = (await getGrantStore().listTenants()).some((t) => t.toLowerCase() === tenant.toLowerCase());
+        const retained = (await getGrantStore("spot").listTenants()).some((t) => t.toLowerCase() === tenant.toLowerCase());
         if (!retained) await forgetTgGroups(tenant);
       } catch (error) {
         log(`${tenant}: grant presence unreadable — preserving group memory without spawning: ${error instanceof Error ? error.message : String(error)}`);
@@ -4736,7 +4736,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // its actual session key. Public account/session metadata alone cannot prove
     // that the key is unchanged. Nothing from either grant is logged.
     try {
-      const latest = await getGrantStore().get(tenant);
+      const latest = await getGrantStore("spot").get(tenant);
       if (!latest || JSON.stringify(latest) !== JSON.stringify(grantForChild.grant)) {
         log(`${tenant}: signed grant stopped or changed during worker preparation — not spawning`);
         return;
@@ -4979,12 +4979,12 @@ async function honourHeldPaperReset(
   try {
     const db = await heldResetDb();
     if (!db) return { applied: false, looked: null, transient: false };
-    const grant = await getGrantStore().get(tenant);
+    const grant = await getGrantStore("spot").get(tenant);
     if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase())
       return { applied: false, looked: null, transient: true };
     out = await applyHeldReset(db, smartAccount, {
       now: Date.now(),
-      readSettings: () => getSettingsStore().get(tenant),
+      readSettings: () => getSettingsStore("spot").get(tenant),
       consentEnforced: liveConsentEnforced(),
       commandRefused: cmd => originalSourceRefused(tenant) || recoveryCommandRefused(childHome(tenant),
         { smartAccount, chainId: grant.chainId }, cmd),
@@ -5100,7 +5100,7 @@ async function spawnHolder(
     // with no process, a later refresh would start one with no handoff at all.
     // So no hold process and no worker; the next pass prepares the hold again.
     try {
-      const grant = await getGrantStore().get(tenant);
+      const grant = await getGrantStore("spot").get(tenant);
       if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) return;
       const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL);
       // An earlier build's restored link, given its offset just before the
@@ -5170,7 +5170,7 @@ async function startHolderProcess(held: Holder): Promise<void> {
   const tenant = held.tenant;
   await waitForSpawnSlot();
   try {
-    const latest = await getGrantStore().get(tenant);
+    const latest = await getGrantStore("spot").get(tenant);
     if (!latest || !Number.isFinite(latest.expiresAt) || latest.expiresAt <= Math.floor(Date.now() / 1000)
         || latest.smartAccount.toLowerCase() !== held.smartAccount.toLowerCase()) {
       log(`${tenant}: signed grant stopped, expired or changed before the held bot's fork — not starting it`);
@@ -5382,7 +5382,7 @@ async function retryHold(held: Holder): Promise<boolean> {
   // report schema must obey the root and original-source gates before trying it.
   const cause = await pausedSourceCause(tenant);
   if (cause) {
-    const lease = leases.get(tenant), grant = await getGrantStore().get(tenant);
+    const lease = leases.get(tenant), grant = await getGrantStore("spot").get(tenant);
     if (lease && grant && holders.get(tenant) === held)
       await reportFleetSource(tenant, grant, lease, cause);
     scheduleHoldRetry(held, UNCLASSIFIED_BLOCK);
@@ -5655,7 +5655,7 @@ let sendHoldNotice = async (tenant: `0x${string}`, cls: string, resettable: bool
         db: shared,
         recipient: hostedRecipient(shared),
         allowlist: async (t) => {
-          const stored = await getSettingsStore().get(t);
+          const stored = await getSettingsStore("spot").get(t);
           return Array.isArray(stored?.telegramAllowlist) ? stored.telegramAllowlist : [];
         },
         send: telegramSend(),
@@ -5887,7 +5887,7 @@ async function retiredWorkerPass(
 async function scrubInactiveGrantForChild(tenant: `0x${string}`, nowSec: number): Promise<void> {
   if (localMemoryWriterPresent(tenant)) return;
   try {
-    const current = await getGrantStore().get(tenant);
+    const current = await getGrantStore("spot").get(tenant);
     // No await between the fresh authority read and the synchronous identity
     // checks/unlink. Only grant.json is removed; memory and the book remain.
     scrubHostedGrantCache(childHome(tenant), current, {
@@ -5921,7 +5921,7 @@ async function retireExpiredGrants(
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.
     try {
-      const latest = (await getGrantStore().get(lc))?.expiresAt;
+      const latest = (await getGrantStore("spot").get(lc))?.expiresAt;
       if (typeof latest === "number" && Number.isFinite(latest) && latest > nowSec) {
         expiries.set(lc, latest);
         continue;
@@ -6053,7 +6053,7 @@ export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unkn
  * goes first; the Solana stop runs after it on every pass and is idempotent.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
-  const k = await honourKillRequest(getGrantStore(), tenant, childHome(tenant), nowSec, () => stopSolana(tenant));
+  const k = await honourKillRequest(getGrantStore("spot"), tenant, childHome(tenant), nowSec, () => stopSolana(tenant));
   if (k.outcome === "revoked" && k.removed) {
     log(`${tenant}: Telegram kill honoured — grant removed from the store`);
     void confirmKillDone(tenant);
@@ -6341,7 +6341,7 @@ async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
   const restoreBlocked = readRestoreBlocked(dir) !== null;
   let authorityGone: boolean;
   try {
-    authorityGone = !(await getGrantStore().get(tenant as `0x${string}`)) || killRequested(dir);
+    authorityGone = !(await getGrantStore("spot").get(tenant as `0x${string}`)) || killRequested(dir);
   } catch {
     // Unconfirmed is not present: never publish on it.
     authorityGone = true;
@@ -6442,7 +6442,7 @@ export async function reconcile(): Promise<void> {
   // a child whose lease was lost alive indefinitely.
   standDownLostLeasesNow();
   const accountingHolds = accountingHoldTenants(process.env);
-  const store = getGrantStore();
+  const store = getGrantStore("spot");
   let tenants: `0x${string}`[];
   let expiresAtByTenant: Map<string, number | null>;
   /** Each grant row as the re-sign watch tells one signature from the next (ledger-resume.ts grantRowKey). */
@@ -6947,9 +6947,9 @@ export async function reconcile(): Promise<void> {
     try {
       // The earlier roster can be stale after the final mirror's awaits.
       // Never erase a renewal/re-grant's retained home on that old snapshot.
-      const retained = (await getGrantStore().listTenants()).some(t => t.toLowerCase() === tenant);
+      const retained = (await getGrantStore("spot").listTenants()).some(t => t.toLowerCase() === tenant);
       if (retained || localMemoryWriterPresent(tenant)) continue;
-      const current = await getGrantStore().get(tenant as `0x${string}`);
+      const current = await getGrantStore("spot").get(tenant as `0x${string}`);
       if (current || localMemoryWriterPresent(tenant)) continue;
       const home = childHome(tenant);
       // A TELEGRAM KILL NOT CARRIED OUT YET KEEPS ITS HOME. Its grant is removed
@@ -8307,7 +8307,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
 
     // ── the roster, from the grant store ─────────────────────────────────
     const roster: { tenant: string; account: string; vaults: readonly string[]; capBps: number | null }[] = [];
-    const gs = getGrantStore();
+    const gs = getGrantStore("spot");
     for (const tenant of await gs.listTenants()) {
       const g = await gs.get(tenant);
       const acct = g?.smartAccount ? String(g.smartAccount) : null;
@@ -8559,7 +8559,7 @@ async function runResumeClassEntriesIfAsked(): Promise<void> {
   try {
     const { HALT_MUST_PRESERVE, mergeResumeEntries } = await import("./enable-class");
     const { getSettingsStore } = await import("./settings-store");
-    const store = getSettingsStore();
+    const store = getSettingsStore("spot");
     const current = (await store.get(want as `0x${string}`)) as unknown as Record<string, unknown> | null;
     const before = Object.fromEntries(HALT_MUST_PRESERVE.map((k) => [k, current?.[k]]));
     log(`resume-entries: classSnipeEnabled ${JSON.stringify(current?.classSnipeEnabled)} -> true for ${want}`);
@@ -8658,7 +8658,7 @@ async function runClassPnlRepairIfAsked(): Promise<void> {
       return j.result ?? null;
     };
 
-    const gs = getGrantStore();
+    const gs = getGrantStore("spot");
     const plans: Awaited<ReturnType<typeof planClassPnlRepair>>[] = [];
     const targets: { plan: (typeof plans)[number]; account: string }[] = [];
 
@@ -8882,7 +8882,7 @@ async function runEnableClassIfAsked(): Promise<void> {
       PONS_CLASS_VAULT_FACTORY_V2,
       PONS_CLASS_VAULT_FACTORY_ABI,
     } = await import("../../packages/core/src/index");
-    const store = getSettingsStore();
+    const store = getSettingsStore("spot");
 
     // WHICH CONFIGURATION. Named per tenant rather than one set for everyone:
     // the numbers were agreed per owner, and `scoutBudgetUsdg` differs between
@@ -8913,7 +8913,7 @@ async function runEnableClassIfAsked(): Promise<void> {
     let sealedVault: string | null = null;
     let derivedVault: string | null = null;
     try {
-      const g = await getGrantStore().get(want as `0x${string}`);
+      const g = await getGrantStore("spot").get(want as `0x${string}`);
       sealedVault = (grantPonsClassVault(g as never) as string | null) ?? null;
       const acct = g && g.smartAccount ? String(g.smartAccount) : null;
       const chainId = Number(g && g.chainId ? g.chainId : 4663);
@@ -9043,7 +9043,7 @@ async function runHaltClassEntriesIfAsked(): Promise<void> {
   try {
     const { HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries } = await import("./enable-class");
     const { getSettingsStore } = await import("./settings-store");
-    const store = getSettingsStore();
+    const store = getSettingsStore("spot");
 
     const current = (await store.get(want as `0x${string}`)) as unknown as Record<
       string,
@@ -9570,7 +9570,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
     let settingsError: string | null = null;
     let s: Record<string, unknown> = {};
     try {
-      const got = (await getSettingsStore().get(want as `0x${string}`)) as unknown as Record<
+      const got = (await getSettingsStore("spot").get(want as `0x${string}`)) as unknown as Record<
         string,
         unknown
       > | null;
@@ -9711,7 +9711,7 @@ async function runHolderClaimsBackfill(): Promise<void> {
     return;
   }
   try {
-    const out = await backfillHolderClaims(getSettingsStore(), log);
+    const out = await backfillHolderClaims(getSettingsStore("spot"), log);
     if (out.done) holderClaimsBackfilled = true;
     else holderBackfillRetryAt = Date.now() + HOLDER_BACKFILL_RETRY_MS;
     if (!out.alreadyDone) {
@@ -9780,7 +9780,7 @@ async function runLiveIntentBackfillIfAsked(): Promise<void> {
       }
       log(`live-intent backfill: ${ids.size} tenant(s) have a grant with an account`);
 
-      const store = getSettingsStore();
+      const store = getSettingsStore("spot");
       const plan = await planLiveIntentBackfill({
         settings: store as never,
         db: client,
@@ -10067,7 +10067,7 @@ async function runReceiptAttestationIfAsked(): Promise<void> {
   const request = receiptAttestationRequest(process.env);
   if (!request) return;
   if (!process.env.DATABASE_URL || !persistentFleetHome()) throw new Error("Receipt attestation requires shared Postgres and the verified original persistent home.");
-  const store = getGrantStore(), roster: Array<{ tenant: string; account: string }> = [];
+  const store = getGrantStore("spot"), roster: Array<{ tenant: string; account: string }> = [];
   for (const tenant of await store.listTenants()) {
     const grant = await store.get(tenant);
     if (grant) roster.push({ tenant, account: grant.smartAccount });
@@ -10142,7 +10142,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     let rosterOnly = 0;
     let rosterRead = true;
     try {
-      const gs = getGrantStore();
+      const gs = getGrantStore("spot");
       for (const tenant of await gs.listTenants()) {
         const g = await gs.get(tenant);
         const acct = g?.smartAccount ? String(g.smartAccount) : null;
@@ -11071,7 +11071,7 @@ async function mirrorLedgers(): Promise<void> {
     await writePeersFor(tenant as `0x${string}`, shared);
     try {
       await materializeOwnOutcomeLearning({ db: shared, home: childHome(tenant),
-        readGrant: () => getGrantStore().get(tenant as `0x${string}`), nowSec: Math.floor(Date.now() / 1000) });
+        readGrant: () => getGrantStore("spot").get(tenant as `0x${string}`), nowSec: Math.floor(Date.now() / 1000) });
     } catch {
       // Optional derived evidence expires quickly; never disrupt the mirror.
       log(`own-learning: ${tenant} could not refresh its outcome evidence`);
@@ -11401,7 +11401,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
           socialProfile: async (tenant) => {
             try {
               const key = tenant.toLowerCase() as `0x${string}`;
-              const settings = await getSettingsStore().get(key);
+              const settings = await getSettingsStore("spot").get(key);
               const profile: XSocialProfile = {
                 xVoice: settings?.xVoice === "dry" ? "dry" : "default", publicWallet: null, currentAgent: null,
                 xTokenAddresses: settings?.xTokenAddresses === true, xTradeResults: settings?.xTradeResults === true,
@@ -11409,7 +11409,7 @@ async function runXPostPass(boot: XPostSetup): Promise<void> {
               };
               if (!settings?.xPublicWalletIntro && !profile.xTokenAddresses && !profile.xTradeResults) return profile;
               // Fresh send-time authority, not the child settings snapshot.
-              const grant = await getGrantStore().get(key);
+              const grant = await getGrantStore("spot").get(key);
               const child = children.get(key);
               const held = leases.get(key);
               if (grant && child && held?.healthy() && !killRequested(childHome(key)) && grant.smartAccount.toLowerCase() === child.smartAccount.toLowerCase()) {
@@ -11633,7 +11633,7 @@ function fomoBootNow(): FomoBoot {
 
 /** A tenant's Fomo permissions from its sealed settings, with the catalogue's defaults for an owner who never set them. */
 async function fomoAccessFor(tenant: string): Promise<FomoAccess> {
-  const s = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+  const s = await getSettingsStore("spot").get(tenant.toLowerCase() as `0x${string}`);
   return {
     dataAccess: s?.fomoDataAccess ?? true,
     monitoring: s?.fomoMonitoringEnabled ?? false,
@@ -12241,7 +12241,7 @@ async function runRecoveryReportOnly(): Promise<void> {
  */
 const PREVIEW_LINE_GAP_MS = 25;
 async function runResumePreview(shared: Db, scope: ResumePreviewScope): Promise<void> {
-  const roster = (await getGrantStore().listTenants()).map((t) => t.toLowerCase());
+  const roster = (await getGrantStore("spot").listTenants()).map((t) => t.toLowerCase());
   const tenants = scope.scope === "all" ? roster : [...scope.tenants];
   const nowSec = Math.floor(Date.now() / 1000);
   const entries: PreviewEntry[] = [];
@@ -12301,7 +12301,7 @@ async function previewEntryFor(shared: Db, tenant: string, nowSec: number): Prom
     suggestedLevel: null, anchor: null, riskPeriod: null, home: null, lastMirrorAt: null,
     holdsPositions: null, startsPaused: null, grantExpiresAt: null, book: null, evidence: null };
   try {
-    const grant = await getGrantStore().get(tenant as `0x${string}`);
+    const grant = await getGrantStore("spot").get(tenant as `0x${string}`);
     if (!grant) return { entry: { ...blank, refusals: ["no stored grant"] }, unreadable: false };
     const scopeOf = { tenant, smartAccount: grant.smartAccount, chainId: grant.chainId };
     const controls = await readControlsEvidence(shared, scopeOf, Date.now());
