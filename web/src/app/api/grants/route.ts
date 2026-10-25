@@ -476,7 +476,7 @@ export async function POST(req: Request) {
     // derivation before any equality is computed. See packages/core/derivation.
     let derived: Derivation;
     try {
-      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
+      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId, "spot");
     } catch (e) {
       // A live eth_call: its error is viem's, and names the RPC URL with its key.
       derived = derivationUnreachable(errorText(e));
