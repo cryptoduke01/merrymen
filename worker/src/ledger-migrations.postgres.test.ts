@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { makePgDb, type Db } from "./db";
-import { PERP_EQUITY_ALTERS, applyLedgerSchema } from "./store";
+import { PERP_EQUITY_ALTERS, PERP_LEDGER_ALTERS, applyLedgerSchema } from "./store";
 import { applyLedgerMigrations } from "./ledger-migrations";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
@@ -130,6 +130,12 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
       assert.equal(tables.length, 8, JSON.stringify(tables));
       const row = await db.prepare("SELECT perp_collateral_micro, cash_read_block FROM equity WHERE agent_id = '0xa'").get() as Record<string, unknown>;
       assert.deepEqual({ ...row }, { perp_collateral_micro: null, cash_read_block: null }, "an old row predates the question: NULL, never 0");
+      // A perp_positions an earlier build made, without the recorded-stop columns: they are added.
+      for (const ddl of PERP_LEDGER_ALTERS) await db.exec(`ALTER TABLE perp_positions DROP COLUMN ${/ADD COLUMN (\w+)/.exec(ddl)![1]}`);
+      await Promise.all([applyLedgerSchema(db), applyLedgerSchema(other)]);
+      const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'perp_positions' AND column_name LIKE 'recorded_stop_%' ORDER BY column_name`).all() as { column_name: string }[];
+      assert.deepEqual(cols.map((c) => c.column_name), ["recorded_stop_price", "recorded_stop_trigger"]);
       await db.prepare("DELETE FROM equity WHERE agent_id = '0xa'").run();
     });
 

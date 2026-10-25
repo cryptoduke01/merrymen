@@ -662,6 +662,21 @@ describe("the migration, over a ledger that already has rows", () => {
     assert.equal(Number((r.prepare("SELECT COUNT(*) AS n FROM trades").get() as { n: number }).n), 1);
   });
 
+  it("a perp_positions an earlier build made gains the recorded-stop columns, its rows kept", async () => {
+    const r = new DatabaseSync(":memory:");
+    others.push(r);
+    const db = wrapSqlite(r);
+    await store.applyLedgerSchema(db);
+    const added = store.PERP_LEDGER_ALTERS.map((d) => /ADD COLUMN (\w+)/.exec(d)![1]!);
+    assert.deepEqual(added, ["recorded_stop_trigger", "recorded_stop_price"]);
+    for (const c of added) r.exec(`ALTER TABLE perp_positions DROP COLUMN ${c}`);
+    r.exec("INSERT INTO perp_positions (agent_id, mode, market_id, side, base, allocated_margin_micro, stop_trigger, stop_price, source) VALUES ('0xa', 'paper', 1, 'long', '30', '12450000', '788500', '772730', 'paper')");
+    await store.applyLedgerSchema(db);
+    await store.applyLedgerSchema(db);
+    const row = r.prepare("SELECT base, stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions").get() as Record<string, unknown>;
+    assert.deepEqual({ ...row }, { base: "30", stop_trigger: "788500", recorded_stop_trigger: null, recorded_stop_price: null }, "an old row reads as protected at its resting stop (view.ts)");
+  });
+
   it("a perp table that fails to build stops setup: every worker's budget readers read them, Spot's included", async () => {
     const r = new DatabaseSync(":memory:");
     others.push(r);
@@ -674,7 +689,7 @@ describe("the migration, over a ledger that already has rows", () => {
   });
 
   it("translates every statement for Postgres, with nothing sqlite-only left in it", () => {
-    for (const ddl of [...store.PERP_LEDGER_DDL, ...store.PERP_EQUITY_ALTERS]) {
+    for (const ddl of [...store.PERP_LEDGER_DDL, ...store.PERP_EQUITY_ALTERS, ...store.PERP_LEDGER_ALTERS]) {
       const pg = translateSchema(ddl);
       assert.doesNotMatch(pg, /unixepoch|AUTOINCREMENT|\bREAL\b|\bINTEGER\b/, pg);
       assert.doesNotMatch(pg, /\bCHECK\b/, "no CHECK on a table the mirror copies");

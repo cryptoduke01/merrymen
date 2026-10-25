@@ -66,6 +66,7 @@ function long(over: Partial<PaperPerpPosition> = {}): PaperPerpPosition {
     realizedMicro: 0n,
     fundingMicro: 0n,
     stop: { trigger: 760_000n, price: 744_800n },
+    recordedStop: { trigger: 760_000n, price: 744_800n },
     take: null,
     openedAtSec: Math.floor(NOW / 1000),
     fundingHourApplied: hourOf(Math.floor(NOW / 1000)),
@@ -365,6 +366,7 @@ describe("stops and take-profits fire on mark into the book", () => {
     const after = r.book.positions.get(1);
     assert.equal(after?.baseAmount, 20n, "still open");
     assert.equal(after?.stop, null, "without its stop — the protective loop puts one back");
+    assert.deepEqual(after?.recordedStop, pos.recordedStop, "at the level it was protected at, not a wider one");
     assert.equal(after?.allocatedMarginMicro, pos.allocatedMarginMicro);
     assert.equal(r.book.cashMicro, 92_000_000n);
   });

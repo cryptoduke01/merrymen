@@ -566,6 +566,8 @@ describe("tick: funding, resting children and liquidation", () => {
 
   it("a stop that gaps past its bound is spent and leaves the position open, as the venue does", async () => {
     const { id, ex } = await holding();
+    const opened = position(id)!;
+    assert.deepEqual([opened.recorded_stop_trigger, opened.recorded_stop_price], [opened.stop_trigger, opened.stop_price], "the open records its stop's level");
     clock += 5_000;
     venue.mark = 750_000n;
     venue.bids = [[740_000, 1_000]];
@@ -574,6 +576,7 @@ describe("tick: funding, resting children and liquidation", () => {
     const pos = position(id)!;
     assert.equal(pos.base, "20", "still open");
     assert.equal(pos.stop_trigger, null, "and without its stop");
+    assert.deepEqual([pos.recorded_stop_trigger, pos.recorded_stop_price], [opened.stop_trigger, opened.stop_price], "but still protected at its level");
     assert.equal(pos.allocated_margin_micro, "8000000");
     const sl = rows("SELECT status, venue_status FROM perp_order_legs WHERE agent_id = ? AND role = 'sl'", id.toLowerCase())[0];
     assert.deepEqual({ ...sl }, { status: "cancelled", venue_status: "paper-gapped" });

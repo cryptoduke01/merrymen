@@ -262,6 +262,32 @@ export interface ProtectInput {
 }
 
 /**
+ * P4's yardstick: what the position's OWN stop risked at open — size × the
+ * distance from entry to its recorded trigger — never the owner's stop-loss
+ * setting, which is only a ceiling (a tight trend stop sits well inside it)
+ * and can change after the open. The setting stands in only when no stop is
+ * recorded, or the recorded one is not on the losing side of entry. 0n when
+ * neither can be computed: P4's paid-share test then waits, and the rate test
+ * still runs.
+ */
+export function initialStopRiskMicro(
+  pos: { side: PerpSide; baseAmount: bigint; entryPrice: bigint },
+  recordedStop: { trigger: bigint } | null,
+  d: PerpPositionFacts["decimals"],
+  settings: Pick<ProtectSettings, "perpsStopLossPct">,
+): bigint {
+  try {
+    if (recordedStop !== null) {
+      const gap = pos.side === "long" ? pos.entryPrice - recordedStop.trigger : recordedStop.trigger - pos.entryPrice;
+      if (gap > 0n) return notionalMicro(pos.baseAmount, gap, d, "floor");
+    }
+    return (notionalMicro(pos.baseAmount, pos.entryPrice, d, "floor") * BigInt(perpsPctToBps(settings.perpsStopLossPct))) / BP;
+  } catch {
+    return 0n;
+  }
+}
+
+/**
  * One protective pass over the view: the actions to take, and the memory the
  * next pass needs. PURE — no clock, no I/O, no randomness; the same input is
  * the same answer, which is what lets every priority be tested alone.
@@ -424,12 +450,7 @@ export function evaluateProtection(input: ProtectInput): { actions: ProtectActio
     // ── P4 funding bleed ────────────────────────────────────────────────────
     if (close === null && mf) {
       const paid = pos.fundingMicro < 0n ? -pos.fundingMicro : 0n;
-      let risk = 0n;
-      try {
-        risk = (notionalMicro(pos.baseAmount, pos.entryPrice, d, "floor") * BigInt(perpsPctToBps(settings.perpsStopLossPct))) / BP;
-      } catch {
-        risk = 0n;
-      }
+      const risk = initialStopRiskMicro(pos, f.recordedStop, d, settings);
       if (risk > 0n && paid * BP >= risk * BigInt(t.fundingPaidShareBps)) {
         close = { rule: "P4", cause: "funding-bleed" };
       } else if (f.held.fresh && f.held.fundingPpmPerHour !== null) {

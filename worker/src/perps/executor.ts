@@ -225,9 +225,14 @@ interface LoadedBook {
 function positionOf(r: PerpPositionRow): PaperPerpPosition {
   const where = `paper position in market ${r.marketId}`;
   if (r.side === null || r.entryPrice === null || r.entryPrice <= 0n || r.imfBp === null) throw new Error(`${where} is unreadable: no side, entry or IMF`);
-  if ((r.stopTrigger === null) !== (r.stopPrice === null) || (r.takeTrigger === null) !== (r.takePrice === null)) {
+  if (
+    (r.stopTrigger === null) !== (r.stopPrice === null) ||
+    (r.takeTrigger === null) !== (r.takePrice === null) ||
+    (r.recordedStopTrigger === null) !== (r.recordedStopPrice === null)
+  ) {
     throw new Error(`${where} is unreadable: a child with a trigger and no bound`);
   }
+  const stop = r.stopTrigger !== null && r.stopPrice !== null ? { trigger: r.stopTrigger, price: r.stopPrice } : null;
   return {
     marketId: r.marketId,
     side: r.side,
@@ -239,7 +244,11 @@ function positionOf(r: PerpPositionRow): PaperPerpPosition {
     // checkpoint may carry them NULL, which is "none booked since open".
     realizedMicro: r.realizedMicro ?? 0n,
     fundingMicro: r.fundingMicro ?? 0n,
-    stop: r.stopTrigger !== null && r.stopPrice !== null ? { trigger: r.stopTrigger, price: r.stopPrice } : null,
+    stop,
+    // A row with no recorded level is one written before it was kept: its
+    // resting stop is the level it was protected at.
+    recordedStop:
+      r.recordedStopTrigger !== null && r.recordedStopPrice !== null ? { trigger: r.recordedStopTrigger, price: r.recordedStopPrice } : stop,
     take: r.takeTrigger !== null && r.takePrice !== null ? { trigger: r.takeTrigger, price: r.takePrice } : null,
     openedAtSec: r.openedAt ?? 0,
     fundingHourApplied: r.fundingHourApplied,
@@ -281,6 +290,8 @@ function positionWrite(marketId: number, p: PaperPerpPosition | null, imfBp: num
       fundingMicro: null,
       stopTrigger: null,
       stopPrice: null,
+      recordedStopTrigger: null,
+      recordedStopPrice: null,
       takeTrigger: null,
       takePrice: null,
       fundingHourApplied: null,
@@ -299,6 +310,8 @@ function positionWrite(marketId: number, p: PaperPerpPosition | null, imfBp: num
     fundingMicro: p.fundingMicro,
     stopTrigger: p.stop?.trigger ?? null,
     stopPrice: p.stop?.price ?? null,
+    recordedStopTrigger: p.recordedStop?.trigger ?? null,
+    recordedStopPrice: p.recordedStop?.price ?? null,
     takeTrigger: p.take?.trigger ?? null,
     takePrice: p.take?.price ?? null,
     fundingHourApplied: p.fundingHourApplied,
@@ -687,7 +700,7 @@ export function createPaperPerpExecutor(opts: {
           `a ${held.side} stop at ${trigger} (bound ${bound}) is not on the losing side of the mark ${fresh.mark}`,
         );
       }
-      const after: PaperPerpPosition = { ...held, stop: { trigger, price: bound } };
+      const after: PaperPerpPosition = { ...held, stop: { trigger, price: bound }, recordedStop: { trigger, price: bound } };
       const imf = loaded.rows.get(marketId)?.imfBp ?? held.imfBp;
       const out = await store.bookPaperPerp({
         agentId,

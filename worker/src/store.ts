@@ -728,6 +728,12 @@ export const PERP_LEDGER_DDL: readonly string[] = [
      funding_micro TEXT,
      stop_trigger TEXT,
      stop_price TEXT,
+     -- stop_* above is the RESTING stop child; this is the level the
+     -- position is protected at, kept when that child ends without closing
+     -- it (paper.ts PaperPerpPosition.recordedStop). NULL with no stop
+     -- recorded. Also in PERP_LEDGER_ALTERS, for a book built before it.
+     recorded_stop_trigger TEXT,
+     recorded_stop_price TEXT,
      take_trigger TEXT,
      take_price TEXT,
      funding_hour_applied INTEGER,
@@ -779,6 +785,20 @@ export const PERP_LEDGER_DDL: readonly string[] = [
      PRIMARY KEY (agent_id, mode, epoch, market_id)
    )`,
   "CREATE INDEX IF NOT EXISTS perp_carries_created ON perp_carries (created_at)",
+];
+
+/**
+ * COLUMNS A PERP TABLE GAINED AFTER ITS FIRST BUILD, applied after
+ * PERP_LEDGER_DDL (applyLedgerSchema; initSqlite). A book an earlier build
+ * made — the perps branch's paper runs — has the table without them, and
+ * CREATE TABLE IF NOT EXISTS never adds a column to a table that is there; on
+ * a fresh book the table already has them and the runner skips each. Required
+ * like the tables: a failure stops setup.
+ */
+export const PERP_LEDGER_ALTERS: readonly string[] = [
+  // The level a paper position is protected at (paper.ts PaperPerpPosition.recordedStop).
+  "ALTER TABLE perp_positions ADD COLUMN recorded_stop_trigger TEXT",
+  "ALTER TABLE perp_positions ADD COLUMN recorded_stop_price TEXT",
 ];
 
 /**
@@ -1526,7 +1546,13 @@ function initSqlite(): Db {
   }
   // Unlike ADD COLUMN compatibility, a failed build must not be swallowed:
   // the perp tables (execPerpLedger) and the read indexes alike.
-  try { for (const ddl of [...PERP_LEDGER_DDL, ...LEDGER_READ_INDEXES]) db.exec(ddl); }
+  try {
+    for (const ddl of [...PERP_LEDGER_DDL, ...LEDGER_READ_INDEXES]) db.exec(ddl);
+    for (const ddl of PERP_LEDGER_ALTERS) {
+      try { db.exec(ddl); }
+      catch (error) { if (!/duplicate column name/i.test((error as Error)?.message ?? "")) throw error; }
+    }
+  }
   catch (error) { db.close(); throw error; }
   // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
   // and a diagnostic line landing in the middle of it corrupts the file. A log
@@ -1555,6 +1581,7 @@ export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
   await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execPerpLedger(db);
+  await applyLedgerMigrations(db, PERP_LEDGER_ALTERS);
   await execReadIndexes(db);
 }
 
@@ -7625,6 +7652,9 @@ export interface PerpPositionInput {
   fundingMicro?: bigint | null;
   stopTrigger?: bigint | null;
   stopPrice?: bigint | null;
+  /** The level the position is protected at; survives its resting stop ending without closing it. */
+  recordedStopTrigger?: bigint | null;
+  recordedStopPrice?: bigint | null;
   takeTrigger?: bigint | null;
   takePrice?: bigint | null;
   /** Paper: the last funding hour charged, unix seconds. */
@@ -7649,6 +7679,8 @@ export interface PerpPositionRow {
   fundingMicro: bigint | null;
   stopTrigger: bigint | null;
   stopPrice: bigint | null;
+  recordedStopTrigger: bigint | null;
+  recordedStopPrice: bigint | null;
   takeTrigger: bigint | null;
   takePrice: bigint | null;
   fundingHourApplied: number | null;
@@ -7676,12 +7708,15 @@ export async function putPerpPosition(db: Db, p: PerpPositionInput): Promise<voi
   const margin = intText(p.allocatedMarginMicro, "allocated margin", { min: 0n });
   const imf = optSafeInt(p.imfBp, "imf (bp)", 1, 10_000);
   const marginMode = p.marginMode === null || p.marginMode === undefined ? null : oneOf(p.marginMode, ["isolated", "cross"] as const, "margin mode");
+  const recordedTrigger = optInt(p.recordedStopTrigger, "recorded stop trigger", { min: 0n });
+  const recordedPrice = optInt(p.recordedStopPrice, "recorded stop price", { min: 0n });
+  if ((recordedTrigger === null) !== (recordedPrice === null)) throw new RangeError("perp ledger: a recorded stop has a trigger exactly when it has a bound");
   await db
     .prepare(
       `INSERT INTO perp_positions (agent_id, mode, market_id, side, base, entry_price, allocated_margin_micro, imf_bp, margin_mode,
                                    realized_micro, funding_micro, stop_trigger, stop_price, take_trigger, take_price,
-                                   funding_hour_applied, opened_at, updated_at, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?)
+                                   funding_hour_applied, opened_at, updated_at, source, recorded_stop_trigger, recorded_stop_price)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), ?, ?, ?)
        ON CONFLICT(agent_id, mode, market_id) DO UPDATE SET
          side = excluded.side, base = excluded.base, entry_price = excluded.entry_price,
          allocated_margin_micro = excluded.allocated_margin_micro, imf_bp = excluded.imf_bp,
@@ -7689,13 +7724,15 @@ export async function putPerpPosition(db: Db, p: PerpPositionInput): Promise<voi
          funding_micro = excluded.funding_micro, stop_trigger = excluded.stop_trigger,
          stop_price = excluded.stop_price, take_trigger = excluded.take_trigger, take_price = excluded.take_price,
          funding_hour_applied = excluded.funding_hour_applied, opened_at = excluded.opened_at,
-         updated_at = excluded.updated_at, source = excluded.source`,
+         updated_at = excluded.updated_at, source = excluded.source,
+         recorded_stop_trigger = excluded.recorded_stop_trigger, recorded_stop_price = excluded.recorded_stop_price`,
     )
     .run(agent, mode, marketId, side, base, optInt(p.entryPrice, "entry price", { min: 0n }), margin, imf, marginMode,
       optInt(p.realizedMicro, "position realized"), optInt(p.fundingMicro, "position funding"),
       optInt(p.stopTrigger, "stop trigger", { min: 0n }), optInt(p.stopPrice, "stop price", { min: 0n }),
       optInt(p.takeTrigger, "take trigger", { min: 0n }), optInt(p.takePrice, "take price", { min: 0n }),
-      optSafeInt(p.fundingHourApplied, "funding hour applied"), optSafeInt(p.openedAt, "opened at"), source);
+      optSafeInt(p.fundingHourApplied, "funding hour applied"), optSafeInt(p.openedAt, "opened at"), source,
+      recordedTrigger, recordedPrice);
 }
 
 /** Write one position row. Throws on a failed or malformed write. */
@@ -7730,6 +7767,7 @@ export async function setPerpPositions(
       .prepare(
         `UPDATE perp_positions SET side = NULL, base = '0', allocated_margin_micro = '0', entry_price = NULL,
                 stop_trigger = NULL, stop_price = NULL, take_trigger = NULL, take_price = NULL,
+                recorded_stop_trigger = NULL, recorded_stop_price = NULL,
                 opened_at = NULL, updated_at = unixepoch()
           WHERE agent_id = ? AND mode = ? AND base <> '0'${held.length ? ` AND market_id NOT IN (${held.map(() => "?").join(", ")})` : ""}`,
       )
@@ -7756,6 +7794,8 @@ function positionRowOf(r: Record<string, unknown>): PerpPositionRow {
     fundingMicro: opt(r.funding_micro),
     stopTrigger: opt(r.stop_trigger),
     stopPrice: opt(r.stop_price),
+    recordedStopTrigger: opt(r.recorded_stop_trigger),
+    recordedStopPrice: opt(r.recorded_stop_price),
     takeTrigger: opt(r.take_trigger),
     takePrice: opt(r.take_price),
     fundingHourApplied: nullableNum(r.funding_hour_applied),

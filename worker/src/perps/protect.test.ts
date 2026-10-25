@@ -16,6 +16,7 @@ import {
   createPerpLaneLock,
   emptyProtectMemory,
   evaluateProtection,
+  initialStopRiskMicro,
   protectCadenceMs,
   protectCloseSlipBps,
   startProtectLoop,
@@ -365,6 +366,38 @@ describe("P4 funding bleed", () => {
     assert.deepEqual(kinds(run(mkView([pos({ fundingMicro: -622_500n })])).actions), ["close:funding-bleed"]);
     assert.deepEqual(run(mkView([pos({ fundingMicro: -622_499n })])).actions, []);
     assert.deepEqual(run(mkView([pos({ fundingMicro: 5_000_000n })])).actions, [], "funding received is not a bleed");
+  });
+
+  it("the yardstick is the position's OWN stop: a 2% stop bleeds out at half of 2%, whatever the setting says now", () => {
+    // 30 base × (83,000.0 − 81,340.0) = 0.498 USDG at risk; half is 0.249.
+    const tight = stopPrices({ side: "long", entryRefPrice: MARK, stopLossBps: 200, stopSlipBps: 200 });
+    const at = (fundingMicro: bigint, perpsStopLossPct = SETTINGS.perpsStopLossPct) =>
+      kinds(
+        evaluateProtection({
+          view: mkView([pos({ fundingMicro, stop: { ...tight, expiresAtSec: NOW + 20 * DAY, resting: true } }, { recordedStop: { ...tight } })], { readAtSec: NOW - 2 }),
+          nowSec: NOW,
+          settings: { ...SETTINGS, perpsStopLossPct },
+          prior: emptyProtectMemory(),
+          feedFresh: true,
+        }).actions,
+      );
+    assert.deepEqual(at(-249_000n), ["close:funding-bleed"]);
+    assert.deepEqual(at(-248_999n), []);
+    // A setting changed after the open moves nothing.
+    assert.deepEqual(at(-249_000n, 25), ["close:funding-bleed"]);
+    assert.deepEqual(at(-248_999n, 1), []);
+  });
+
+  it("the setting stands in only with no recorded stop, or one not on the losing side of entry", () => {
+    const d = { sizeDecimals: BTC.sizeDecimals, priceDecimals: BTC.priceDecimals };
+    const at = { baseAmount: 30n, entryPrice: MARK };
+    assert.equal(initialStopRiskMicro({ side: "short", ...at }, { trigger: 846_600n }, d, SETTINGS), 498_000n, "a short's risk runs upward");
+    assert.equal(initialStopRiskMicro({ side: "long", ...at }, null, d, SETTINGS), 1_245_000n);
+    assert.equal(initialStopRiskMicro({ side: "long", ...at }, { trigger: MARK }, d, SETTINGS), 1_245_000n);
+    assert.equal(initialStopRiskMicro({ side: "short", ...at }, { trigger: MARK - 1n }, d, SETTINGS), 1_245_000n);
+    const bare = (fundingMicro: bigint) => pos({ fundingMicro }, { recordedStop: null, stopState: "unread" });
+    assert.deepEqual(kinds(run(mkView([bare(-622_500n)])).actions), ["close:funding-bleed"]);
+    assert.deepEqual(run(mkView([bare(-622_499n)])).actions, []);
   });
 
   it("a current rate against the side of ≥ 0.05%/h closes; for the side does not", () => {

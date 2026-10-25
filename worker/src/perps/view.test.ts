@@ -26,6 +26,7 @@ import {
 import { checkPolicy, type AgentLimits, type PerpOpenIntent } from "../policy";
 import { parseLighterFeed, specToJson, type LighterFeedFileMarket, type LighterFeedRead } from "./feed-reader";
 import { parseAccount, parseOrderBookDetails, type PerpAccountRead, type VenueOrder } from "./markets";
+import { PROTECT_THRESHOLDS, emptyProtectMemory, evaluateProtection } from "./protect";
 import {
   PERP_BLOCKER_PRIORITY,
   buildPerpBookTerm,
@@ -321,6 +322,40 @@ describe("paper: the ledger is the book, marked at the feed", () => {
     const s = mustView(input({ ledger: ledger({ positions: [paperBtc({ stopTrigger: null, stopPrice: null })] }) }));
     assert.equal(s.positions.get("BTC-PERP")!.stop, null);
     assert.equal(s.facts.positions.get("BTC-PERP")!.stopState, "missing");
+  });
+
+  // The stop child gapped (or part-filled) without closing the position: the
+  // child is gone, the level it protected stays on the row.
+  const gapped = () => paperBtc({ stopTrigger: null, stopPrice: null, recordedStopTrigger: PAPER_STOP.trigger, recordedStopPrice: PAPER_STOP.price });
+
+  it("a stop child that ended without closing: the recorded level stays, no stop rests", () => {
+    const s = mustView(input({ ledger: ledger({ positions: [gapped()] }) }));
+    const f = s.facts.positions.get("BTC-PERP")!;
+    assert.deepEqual(f.recordedStop, { trigger: PAPER_STOP.trigger, price: PAPER_STOP.price });
+    assert.equal(f.stopState, "missing");
+    assert.deepEqual(s.positions.get("BTC-PERP")!.stop, { trigger: PAPER_STOP.trigger, price: PAPER_STOP.price, expiresAtSec: null, resting: false });
+  });
+
+  it("the protective loop puts a gapped stop back at its recorded level, never the wider ceiling", () => {
+    // Mark not past the trigger: one placement, at the position's own level.
+    const s = mustView(input({ ledger: ledger({ positions: [gapped()] }) }));
+    const placed = evaluateProtection({ view: s, nowSec: NOW, settings: SETTINGS, prior: emptyProtectMemory(), feedFresh: true }).actions.filter((a) => a.kind === "replace-stop");
+    assert.deepEqual(
+      placed.map((a) => [a.trigger, a.price, a.reason]),
+      [[PAPER_STOP.trigger, PAPER_STOP.price, "missing"]],
+    );
+  });
+
+  it("with the mark already past the recorded trigger, no stop is placed and P2 closes once confirmed", () => {
+    const past = mustView(input({ feed: feed({ "0": feedMarket(0), "1": feedMarket(1, { mark: (PAPER_STOP.trigger - 8_500n).toString() }) }), ledger: ledger({ positions: [gapped()] }) }));
+    const first = evaluateProtection({ view: past, nowSec: NOW, settings: SETTINGS, prior: emptyProtectMemory(), feedFresh: true });
+    assert.deepEqual(first.actions.filter((a) => a.kind !== "alert"), [], "a stop placed past the mark is a close by another name, and a wider one is no stop at all");
+    const later = NOW + PROTECT_THRESHOLDS.breachConfirmSec;
+    const second = evaluateProtection({ view: { ...past, readAtSec: later - 1 }, nowSec: later, settings: SETTINGS, prior: first.memory, feedFresh: true });
+    assert.deepEqual(
+      second.actions.flatMap((a) => (a.kind === "close" ? [`${a.rule}:${a.cause}`] : a.kind === "replace-stop" ? ["replace"] : [])),
+      ["P2:stop-breached"],
+    );
   });
 });
 

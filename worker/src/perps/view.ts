@@ -114,7 +114,9 @@ export type PerpsViewLedgerRow = Pick<
   | "takeTrigger"
   | "takePrice"
   | "openedAt"
->;
+> &
+  // The recorded stop level (paper): absent on a row from before it was kept, read as its resting stop.
+  Partial<Pick<PerpPositionRow, "recordedStopTrigger" | "recordedStopPrice">>;
 
 /** What the ledger says, read once for this build. Every set and map is keyed as the ledger keys it. */
 export interface PerpsViewLedger {
@@ -589,7 +591,17 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
       // "no positive liquidation price" (a 1x long); a row it cannot judge
       // throws — an unknown liquidation is never reported as none.
       const liq = isolatedLiqPrice({ side: r.side, entryPrice: r.entryPrice, baseAmount: r.base, allocatedMarginMicro: r.allocatedMarginMicro, mmfBp: spec.mmfBp, spec });
-      const recorded = r.stopTrigger !== null && r.stopPrice !== null ? { trigger: r.stopTrigger, price: r.stopPrice } : null;
+      // THE LEVEL AND THE CHILD, APART. The resting stop is the engine's own
+      // child; the recorded level is what the position is protected at, and it
+      // outlives a child that gapped or part-filled without closing it — so the
+      // protective loop judges the breach against it and puts back no wider
+      // stop (paper.ts PaperPerpPosition.recordedStop). A row with no recorded
+      // level is protected at its resting stop.
+      const resting = r.stopTrigger !== null && r.stopPrice !== null ? { trigger: r.stopTrigger, price: r.stopPrice } : null;
+      const recorded =
+        r.recordedStopTrigger !== null && r.recordedStopTrigger !== undefined && r.recordedStopPrice !== null && r.recordedStopPrice !== undefined
+          ? { trigger: r.recordedStopTrigger, price: r.recordedStopPrice }
+          : resting;
       const expires = ledger.stopExpiresAtSec?.get(r.marketId) ?? null;
       positions.set(listed.key, {
         key: listed.key,
@@ -603,9 +615,9 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
         allocatedMarginMicro: r.allocatedMarginMicro,
         imfBp: r.imfBp,
         liqPrice: liq,
-        // On paper the book's own stop IS the resting stop: the paper engine
-        // fires it on the feed's mark, so recorded and resting are one row.
-        stop: recorded === null ? null : { ...recorded, expiresAtSec: expires, resting: true },
+        // On paper the book's own stop child IS the resting stop: the paper
+        // engine fires it on the feed's mark.
+        stop: recorded === null ? null : { ...recorded, expiresAtSec: expires, resting: resting !== null },
         take:
           r.takeTrigger !== null && r.takePrice !== null
             ? { trigger: r.takeTrigger, price: r.takePrice, expiresAtSec: null, resting: true }
@@ -621,7 +633,7 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
         markSource: "feed",
         markFresh: fresh,
         recordedStop: recorded,
-        stopState: recorded === null ? "missing" : "resting",
+        stopState: resting === null ? "missing" : "resting",
         stopExpiresAtSec: expires,
         restingStopOrder: null,
         otherStopOrders: [],

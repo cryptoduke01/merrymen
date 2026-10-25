@@ -288,7 +288,17 @@ export interface PaperPerpPosition {
   imfBp: number;
   realizedMicro: bigint;
   fundingMicro: bigint;
+  /** The RESTING stop child: null once it has ended (filled, gapped, cancelled). */
   stop: PaperTrigger | null;
+  /**
+   * THE STOP THIS POSITION IS PROTECTED AT, kept when the resting child ends
+   * without closing it (a gap past its bound, a partial fill). The protective
+   * loop judges a breach and places any replacement against THIS, never
+   * against the owner's wider stop-loss ceiling: a stop that failed must not
+   * come back looser than the one the open was sized on. Set with every stop
+   * placed (the open, setStop).
+   */
+  recordedStop: PaperTrigger | null;
   take: PaperTrigger | null;
   openedAtSec: number;
   /** The last funding hour charged (unix seconds, on the hour) — the idempotency key. */
@@ -440,6 +450,7 @@ export function applyPaperOpen(args: {
     realizedMicro: 0n,
     fundingMicro: 0n,
     stop: { trigger: args.stop.trigger, price: args.stop.price },
+    recordedStop: { trigger: args.stop.trigger, price: args.stop.price },
     take: take === null ? null : { trigger: take.trigger, price: take.price },
     openedAtSec: nowSec,
     // Funding is paid by positions held AT the hour: the hour already begun
@@ -800,7 +811,8 @@ function fireChild(
   });
   if (fill.filledBase === 0n) {
     // The venue's triggered IOC found nothing inside its bound and was
-    // cancelled: the child is gone and the position is still open.
+    // cancelled: the child is gone and the position is still open. Its
+    // recorded level stays (recordedStop): the breach is judged against it.
     const after: PaperPerpPosition = { ...pos, stop: kind === "sl" ? null : pos.stop, take: kind === "tp" ? null : pos.take };
     return {
       kind,
