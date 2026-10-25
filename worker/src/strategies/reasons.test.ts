@@ -281,4 +281,3 @@ describe("the perp reasons", () => {
     assert.equal(publishesIdle({ code: "breaker-tripped", limitBps: 1_000 }), false);
   });
 });
-
