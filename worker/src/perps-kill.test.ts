@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { PerpsKillIncomplete, selfHostedPerpsKill, stopLocalPerpsForKill, stopPerpsForKill } from "./perps-kill";
+import { PerpsKillIncomplete, PerpsPaperNotStopped, selfHostedPerpsKill, stopLocalPerpsForKill, stopPerpsForKill } from "./perps-kill";
 import { selfHostedSolanaKill } from "./solana-kill";
 import { killDoneText } from "./telegram/kill-confirm";
 
@@ -84,7 +84,7 @@ test("the Telegram answer has a Perps line after the Solana one, and none for an
   assert.match(killDoneText({ ok: true, archived: null, perps: "not-stopped" }), /Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign\. \/kill again\.$/);
   // The grant went, the paper strategy could not be switched off: incomplete, and never said to be a live grant.
   const paper = killDoneText({ ok: true, archived: null, perps: "paper-not-stopped" });
-  assert.match(paper, /Kill incomplete: your Perps wallet's grant is revoked, so nothing trades on it, but its practice perpetuals could not be switched off\./);
+  assert.match(paper, /Kill incomplete: your Perps wallet has no grant left, so nothing trades on it, but its practice perpetuals could not be switched off\./);
   assert.doesNotMatch(paper, /may still sign/);
   assert.doesNotMatch(killDoneText({ ok: true, archived: null, solana: "stopped" }), /Perps/);
 });
@@ -123,9 +123,14 @@ test("the hosted half answers from the store, and refuses to guess", async () =>
       store: { revokeForKill: async () => { revoked = true; return "removed"; } },
       paper: async () => { throw new Error("settings unavailable"); },
     }),
-    /settings unavailable/,
+    /practice perpetuals could NOT be switched off/,
   );
   assert.equal(revoked, true, "the grant first");
+  // The store's own words (a driver's host and port) are the operator's, never the owner's.
+  await assert.rejects(
+    stopPerpsForKill(T, { store: store("removed"), paper: async () => { throw new Error("connect ECONNREFUSED 10.0.0.7:5432"); } }),
+    (e: unknown) => e instanceof PerpsPaperNotStopped && e.perpsRemoved && !/ECONNREFUSED|10\.0\.0\.7/.test(e.message) && /its settings could not be read or written just now/.test(e.message),
+  );
   const saved = process.env.MERRYMEN_HOSTED;
   process.env.MERRYMEN_HOSTED = "1";
   try { await assert.rejects(stopLocalPerpsForKill(), /hosted kill names its tenant/); }

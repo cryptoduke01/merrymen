@@ -46,6 +46,7 @@ import { writeFileAtomicSync } from "./atomic-write";
 import { getGrantStore, type GrantStore } from "./grant-store";
 import { archiveGrantFile } from "./grant";
 import { liftKillPause, pauseForKeptGrant, purposeHome } from "./home";
+import { errorText } from "./redact-urls";
 import { readSettingsFileAt } from "./settings";
 import { disablePaperPerpsForKill } from "./settings-store";
 
@@ -83,7 +84,10 @@ export async function stopPerpsForKill(
   try {
     await (opts.paper ?? ((t) => disablePaperPerpsForKill(t)))(tenant);
   } catch (e) {
-    throw new PerpsPaperNotStopped(e instanceof Error ? e.message : String(e), result === "removed");
+    // The store's own words (a driver's host and port, a DEK or unseal
+    // failure) are the operator's, logged here; the owner is told what it means.
+    console.error(`[kill] ${tenant}: the Perps wallet's settings could not be switched off — ${errorText(e)}`);
+    throw new PerpsPaperNotStopped("its settings could not be read or written just now", result === "removed");
   }
   return result === "removed" ? "stopped" : "none";
 }
@@ -102,11 +106,11 @@ export class PerpsKillIncomplete extends Error {
 }
 
 /**
- * A self-hosted Perps wallet whose paper strategy could not be turned off
- * (its settings.json would not read or write). The grant was still revoked
- * when it could be, so nothing trades on it; the owner is told to switch
- * perps off in Settings before signing a new permission. A kill that ends
- * here is incomplete, never done.
+ * A Perps wallet whose paper strategy could not be turned off: self-hosted,
+ * its settings.json would not read or write; hosted, its settings store could
+ * not say. The grant was still revoked when it could be, so nothing trades on
+ * it; the owner is told to switch perps off in Settings before signing a new
+ * permission. A kill that ends here is incomplete, never done.
  */
 export class PerpsPaperNotStopped extends PerpsKillIncomplete {
   /**
@@ -120,7 +124,7 @@ export class PerpsPaperNotStopped extends PerpsKillIncomplete {
     this.perpsRemoved = revoked;
     this.message =
       `Your Perps wallet's practice perpetuals could NOT be switched off: ${why}.` +
-      (revoked ? " Its grant was revoked, so nothing trades on it now;" : "") +
+      (revoked ? " Its grant was revoked, so nothing trades on it now;" : " It has no grant, so nothing trades on it now;") +
       " switch perps off in Settings → Perpetuals before you sign a new permission for it.";
     this.name = "PerpsPaperNotStopped";
   }
@@ -165,23 +169,45 @@ export async function stopLocalPerpsWallet(): Promise<{ grant: "revoked" | "none
   } catch (e) {
     paperFailed = e instanceof Error ? e.message : String(e);
   }
+  const grant = revokeLocalPerpsGrant(home);
+  if (paperFailed !== null) throw new PerpsPaperNotStopped(paperFailed, grant === "revoked");
+  return { grant, paper };
+}
+
+/**
+ * The self-hosted Perps home's grant.json archived (owner key and all) and
+ * removed: the grant half alone. A kill runs it after turning the paper
+ * strategy off (stopLocalPerpsWallet); a Perps PERMISSION REPLACEMENT runs it
+ * alone (stopLocalPerpsGrantForRenewal), because a renewal is the owner
+ * keeping the wallet trading, never a reason to switch its perps off. "none"
+ * when there is no such file. Throws PerpsKillIncomplete when the archive
+ * cannot be written (the grant is kept and the home paused).
+ */
+function revokeLocalPerpsGrant(home: string): "revoked" | "none" {
   const file = path.join(home, "grant.json");
-  let present = true;
   try {
     statSync(file);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    present = false;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "none";
+    throw e;
   }
-  if (present) {
-    const kept = archiveGrantFile(file, path.join(home, "grants"));
-    if (kept.kind === "failed") throw new PerpsKillIncomplete(kept.why, pauseForKeptGrant(home));
-    rmSync(file, { force: true });
-    // A pause an earlier, refused kill left in this home has done its job.
-    liftKillPause(home);
-  }
-  if (paperFailed !== null) throw new PerpsPaperNotStopped(paperFailed, present);
-  return { grant: present ? "revoked" : "none", paper };
+  const kept = archiveGrantFile(file, path.join(home, "grants"));
+  if (kept.kind === "failed") throw new PerpsKillIncomplete(kept.why, pauseForKeptGrant(home));
+  rmSync(file, { force: true });
+  // A pause an earlier, refused kill left in this home has done its job.
+  liftKillPause(home);
+  return "revoked";
+}
+
+/**
+ * A self-hosted Perps permission replacement's stop (the web DELETE with
+ * `purpose: "permission-replacement"` naming `?wallet=perps`): the grant
+ * archived and removed so the renewal can be posted, and NOTHING else — its
+ * settings, paper strategy included, are the owner's and stay.
+ */
+export async function stopLocalPerpsGrantForRenewal(): Promise<"stopped" | "none"> {
+  if (isHostedMode()) throw new Error("A hosted renewal names its tenant.");
+  return revokeLocalPerpsGrant(purposeHome("perps")) === "revoked" ? "stopped" : "none";
 }
 
 /**

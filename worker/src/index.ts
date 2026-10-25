@@ -12891,7 +12891,7 @@ async function main() {
       // included), whether or not a row of ours names it yet.
       let transitHeld: boolean;
       try {
-        // A Spot wallet's worker holds no perp transfer and reads no perp table.
+        // A Spot wallet's worker holds no perp transfer, so it never looks for one.
         transitHeld =
           cfg.workerWallet === "perps" &&
           ((perpRead?.inTransitMicro ?? 0n) > 0n || (await listOpenPerpTransfers(agentId, "live")).length > 0);

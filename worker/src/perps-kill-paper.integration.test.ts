@@ -56,7 +56,7 @@ try {
 } finally {
   process.chdir(originalCwd);
 }
-const { PerpsKillIncomplete, PerpsPaperNotStopped, perpsHalf, selfHostedPerpsKill, stopLocalPerpsForKill } = await import("./perps-kill");
+const { PerpsKillIncomplete, PerpsPaperNotStopped, perpsHalf, selfHostedPerpsKill, stopLocalPerpsForKill, stopLocalPerpsGrantForRenewal } = await import("./perps-kill");
 after(() => {
   raw.close();
   store.closeStoreForTest();
@@ -281,6 +281,19 @@ describe("the other self-hosted kill paths, and a half that fails", () => {
     assert.deepEqual(await fromSpotHome(() => perpsHalf(() => stopLocalPerpsForKill())), { state: "stopped" });
     assert.equal(existsSync(GRANT), false);
     assert.equal((JSON.parse(readFileSync(SETTINGS, "utf8")) as { perpsEnabled: boolean }).perpsEnabled, false);
+  });
+
+  it("a Perps PERMISSION REPLACEMENT stops the grant alone: a renewal is the owner keeping it trading, and its perps stay on", async () => {
+    writeFileSync(GRANT, grantJson(3_500_000));
+    writeFileSync(SETTINGS, JSON.stringify(OWNER_SETTINGS, null, 2));
+    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal()), "stopped");
+    assert.equal(existsSync(GRANT), false, "the grant goes, so the renewal can be posted");
+    assert.deepEqual(JSON.parse(readFileSync(SETTINGS, "utf8")), OWNER_SETTINGS, "and the settings are the owner's, untouched");
+    // Even settings it could not read do not stop a renewal: it never reads them.
+    writeFileSync(GRANT, grantJson(3_600_000));
+    writeFileSync(SETTINGS, "{ not json");
+    assert.equal(await fromSpotHome(() => stopLocalPerpsGrantForRenewal()), "stopped");
+    writeFileSync(SETTINGS, JSON.stringify(OWNER_SETTINGS, null, 2));
   });
 
   it("settings it cannot read: the grant is still revoked, the kill says incomplete, and a retry finishes it", async () => {

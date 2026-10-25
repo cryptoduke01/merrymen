@@ -56,11 +56,14 @@ function syncFile(file: string): void {
 // Compiled names/types, not sqlite_master's arbitrary tables or a raw DB export.
 // New financial columns require review here; unknown signing/auth/chat tables never cross this boundary.
 const SPECS = {
-  agents: "smart_account:T name:T owner_address:T session_key_address:T chain_id:I caps:T granted_at:I expires_at:I status:T created_at:I hwm_usdg:R accrued_fee_usdg:R epoch:I mode:T beat_at:I sponsor_gas:I live_blocker:T energy:T x_handle:T x_verified:I contributions_known:I contributions_why:T gas_accounting:T quality_at:I hwm_withdrawn_usdg:R",
+  // `perps` is the perp lane's report (store.ts setAgentPerps), NULL for an agent with no perps.
+  agents: "smart_account:T name:T owner_address:T session_key_address:T chain_id:I caps:T granted_at:I expires_at:I status:T created_at:I hwm_usdg:R accrued_fee_usdg:R epoch:I mode:T beat_at:I sponsor_gas:I live_blocker:T energy:T x_handle:T x_verified:I contributions_known:I contributions_why:T gas_accounting:T quality_at:I hwm_withdrawn_usdg:R perps:T",
   events: "id:I agent_id:T level:T message:T created_at:I",
   posts: "id:I agent_id:T decision_id:T body:T created_at:I",
   trades: "id:I agent_id:T kind:T target:T sell_token:T buy_token:T amount_usdg:R user_op_hash:T tx_hash:T status:T reject_rule:T created_at:I sim_quote_out:T sim_min_out:T sim_fee_tier:I sim_gas:T decision_id:T fill_side:T fill_symbol:T fill_qty_raw:T fill_price_usd:R realized_pnl_usdg:R basis_source:T order_id:T settlement_status:T gas_wei:T sponsored_gas_wei:T epoch:I fill_slippage_bps:I fill_cash_usdg:R gas_usdg:R gas_units:T trade_fee_usdg:R user_op_nonce:T budget_settled_at:I",
-  equity: "id:I agent_id:T eth_wei:T cash_usdg:R vault_usdg:R equity_usdg:R at:I positions_usdg:R epoch:I mode:T flows_held:I cash_read_at:I",
+  // The venue's terms beside the total (store.ts PERP_EQUITY_ALTERS): NULL on every row of an
+  // agent with no perps. The perp_* tables themselves cross this boundary with hosted perps (slice 4).
+  equity: "id:I agent_id:T eth_wei:T cash_usdg:R vault_usdg:R equity_usdg:R at:I positions_usdg:R epoch:I mode:T flows_held:I cash_read_at:I perp_collateral_micro:T perp_isolated_margin_micro:T perp_unrealized_micro:T perp_unrealized_gain_micro:T perp_in_transit_micro:T perp_snapshot_time:I cash_read_block:I",
   flows: "id:I agent_id:T direction:T amount_usdg:R tx_hash:T block_number:I source:T at:I epoch:I log_index:I chain_id:I",
   fee_accruals: "id:I agent_id:T profit_usdg:R fee_usdg:R hwm_before_usdg:R hwm_after_usdg:R at:I epoch:I",
   journal: "seq:I agent_id:T epoch:I kind:T payload_json:T prev_hash:T hash:T at:I",

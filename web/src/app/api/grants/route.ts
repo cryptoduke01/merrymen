@@ -40,7 +40,7 @@ import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
-import { perpsHalf, stopLocalPerpsForKill, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
+import { perpsHalf, stopLocalPerpsForKill, stopLocalPerpsGrantForRenewal, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
 import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
@@ -688,7 +688,8 @@ function perpsWalletNotOffered(nothing: string): NextResponse {
  * slice 5, so no client sends this yet.)
  */
 async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
-  const perps = await perpsHalf(() => stopLocalPerpsForKill());
+  // The grant alone: a renewal keeps the wallet trading, so its paper strategy stays as the owner set it.
+  const perps = await perpsHalf(() => stopLocalPerpsGrantForRenewal());
   if (perps.state === "not-stopped") {
     return NextResponse.json(
       { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },

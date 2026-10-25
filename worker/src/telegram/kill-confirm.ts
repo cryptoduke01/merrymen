@@ -54,7 +54,7 @@ function perpsLine(r: KillResult): string {
   if (r.perps === "not-stopped") return `
 ⚠️ Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign. /kill again.`;
   if (r.perps === "paper-not-stopped") return `
-⚠️ Kill incomplete: your Perps wallet's grant is revoked, so nothing trades on it, but its practice perpetuals could not be switched off. Switch them off in Settings → Perpetuals before you sign a new permission, or /kill again.`;
+⚠️ Kill incomplete: your Perps wallet has no grant left, so nothing trades on it, but its practice perpetuals could not be switched off. Switch them off in Settings → Perpetuals before you sign a new permission, or /kill again.`;
   if (r.perps === "stopped") return `
 Your Perps wallet's grant is revoked too: it can no longer sign anything.`;
   return "";

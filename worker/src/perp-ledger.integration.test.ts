@@ -662,6 +662,17 @@ describe("the migration, over a ledger that already has rows", () => {
     assert.equal(Number((r.prepare("SELECT COUNT(*) AS n FROM trades").get() as { n: number }).n), 1);
   });
 
+  it("a perp table that fails to build stops setup: every worker's budget readers read them, Spot's included", async () => {
+    const r = new DatabaseSync(":memory:");
+    others.push(r);
+    const real = wrapSqlite(r);
+    const failing: Db = { ...real, prepare: (sql) => real.prepare(sql), tx: (fn) => real.tx(fn), exec: async (sql) => {
+      if (/CREATE TABLE IF NOT EXISTS perp_fills/.test(sql)) throw new Error("disk I/O error");
+      return real.exec(sql);
+    } };
+    await assert.rejects(store.applyLedgerSchema(failing), /disk I\/O error/, "never skipped with a warning");
+  });
+
   it("translates every statement for Postgres, with nothing sqlite-only left in it", () => {
     for (const ddl of [...store.PERP_LEDGER_DDL, ...store.PERP_EQUITY_ALTERS]) {
       const pg = translateSchema(ddl);

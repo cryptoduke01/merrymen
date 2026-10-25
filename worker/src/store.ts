@@ -492,11 +492,11 @@ function ledgerTxHash(raw: string): string {
 }
 
 /**
- * THE PERP LEDGER'S SCHEMA (docs/perps.md, "Ledger"), applied as part of
- * SQLITE_ALTERS — each statement on its own, in order, each index after its
- * table. Exported so a test can run every statement through translateSchema:
- * a DDL error on Postgres is swallowed by the same catch that makes a re-run
- * a no-op, so "it translated" is something to prove, not assume.
+ * THE PERP LEDGER'S SCHEMA (docs/perps.md, "Ledger"), applied after
+ * SQLITE_ALTERS as required objects (execPerpLedger; initSqlite) — each
+ * statement on its own, in order, each index after its table. A failure stops
+ * setup rather than being skipped. Exported so a test can run every statement
+ * through translateSchema.
  */
 export const PERP_LEDGER_DDL: readonly string[] = [
   // ── PERPETUALS (docs/perps.md, "Ledger") ──────────────────────────────────
@@ -522,9 +522,8 @@ export const PERP_LEDGER_DDL: readonly string[] = [
   //     whose rows must never be refused for a vocabulary a newer child speaks.
   //   the vocabulary and its order live in perp-ledger-rules.ts.
   //
-  // In SQLITE_ALTERS rather than SQLITE_SCHEMA so each statement runs, and
-  // is swallowed if already there, on its own: the schema batch is one
-  // implicit Postgres transaction that two booting services race on
+  // Not in SQLITE_SCHEMA, so each statement runs on its own: the schema batch
+  // is one implicit Postgres transaction that two booting services race on
   // (execSchemaBatch). Each index follows its table.
   //
   // ONE ROW PER SIGNED VENUE TX (rule 9: persist before send). Written
@@ -1453,9 +1452,8 @@ const SQLITE_ALTERS: string[] = [
   // strictly weaker constraint), so the new index has already built by the
   // time this runs; and IF EXISTS makes it a no-op everywhere else.
   "DROP INDEX IF EXISTS owner_operations_identity",
-  // THE PERP LEDGER — its own lists so the migration test can translate every
-  // statement of them for Postgres; see PERP_LEDGER_DDL and PERP_EQUITY_ALTERS.
-  ...PERP_LEDGER_DDL,
+  // THE VENUE'S COLUMNS ON EQUITY (PERP_EQUITY_ALTERS); the perp tables are
+  // required objects, built after these (execPerpLedger), not best-effort.
   ...PERP_EQUITY_ALTERS,
 ];
 
@@ -1469,6 +1467,27 @@ const LEDGER_READ_INDEXES = [
   "CREATE INDEX IF NOT EXISTS flows_agent_run_normalized ON flows (LOWER(agent_id), epoch, at, id)",
   "CREATE INDEX IF NOT EXISTS trades_agent_run_normalized ON trades (LOWER(agent_id), epoch, created_at, id)",
 ];
+
+/**
+ * THE PERP TABLES ARE REQUIRED, NOT BEST-EFFORT. Every worker's budget readers
+ * (getOpsToday, getSpentTodayUsdg) and its paper reset read them, Spot's
+ * included, so a table that failed to build must stop setup, as a missing
+ * read index does, rather than be skipped with a warning and fail every tick
+ * after. Each statement on its own: IF NOT EXISTS makes a re-run nothing, and
+ * a second process building the same table at once (23505, 42P07, 42710 on
+ * Postgres) is retried until it reads as there.
+ */
+async function execPerpLedger(db: Db): Promise<void> {
+  for (const ddl of PERP_LEDGER_DDL) {
+    for (let run = 1; ; run++) {
+      try { await db.exec(ddl); break; }
+      catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (run >= 3 || (code !== "23505" && code !== "42P07" && code !== "42710")) throw error;
+      }
+    }
+  }
+}
 
 /** Each index is a standalone build; catalog races retry, other errors surface. */
 async function execReadIndexes(db: Db): Promise<void> {
@@ -1505,8 +1524,9 @@ function initSqlite(): Db {
       // column already exists
     }
   }
-  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed.
-  try { for (const ddl of LEDGER_READ_INDEXES) db.exec(ddl); }
+  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed:
+  // the perp tables (execPerpLedger) and the read indexes alike.
+  try { for (const ddl of [...PERP_LEDGER_DDL, ...LEDGER_READ_INDEXES]) db.exec(ddl); }
   catch (error) { db.close(); throw error; }
   // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
   // and a diagnostic line landing in the middle of it corrupts the file. A log
@@ -1534,6 +1554,7 @@ function initSqlite(): Db {
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
   await applyLedgerMigrations(db, SQLITE_ALTERS);
+  await execPerpLedger(db);
   await execReadIndexes(db);
 }
 

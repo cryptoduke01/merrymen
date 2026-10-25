@@ -44,9 +44,10 @@ executor), reconciled with main. A worker serves one wallet: whatever starts a
 Perps wallet's worker sets `MERRYMEN_WALLET_PURPOSE=perps` (slices 4 and 5;
 unset is Spot), and the worker refuses a grant whose signed `purpose` is the
 other wallet's. Only a Perps worker arms the perp lane, and it runs no spot
-producer (`perps-only`). A Spot worker never starts the lane, reads no perp
-table and shows its strategist no perps. Nothing on main starts a Perps worker
-yet. There is no live executor, reconciler or on-chain leg in this build:
+producer (`perps-only`). A Spot worker never starts the lane or its feed and
+shows its strategist no perps; its budget readers and paper reset touch the
+perp tables, which hold nothing for it, so they add nothing. Nothing on main
+starts a Perps worker yet. There is no live executor, reconciler or on-chain leg in this build:
 `MERRYMEN_PERPS=live` is off, and a live account with perps on is refused
 `perp-live-not-yet`. The signer is vendored and hash-checked but loaded only by
 its own tests. The hosted checkpoint of paper perp state and the mirror of the
