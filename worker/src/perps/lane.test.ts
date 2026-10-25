@@ -497,6 +497,19 @@ describe("the wiring in index.ts", () => {
     assert.doesNotMatch(before, /executor\.|sendUserOperation|recordTrade\(\{/, "nothing EVM-shaped runs for a perp intent before the branch");
   });
 
+  it("ONLY A PERPS WALLET'S WORKER ARMS THE LANE, and a grant for the other wallet never arms", () => {
+    // The lane's agent is the armed one only on a Perps worker (settings.ts workerWalletOf).
+    assert.match(CODE, /armed: \(\) =>\s*active && cfg\.workerWallet === "perps"\s*\?/);
+    // syncGrant judges the grant's own signed purpose against the worker's, before the unchanged short-circuit.
+    const sync = fn("syncGrant");
+    const judged = sync.indexOf("if (grantWallet !== cfg.workerWallet) {");
+    assert.ok(judged > 0 && judged < sync.indexOf("const unchanged ="), "the wallet is judged before anything is built from the grant");
+    assert.match(sync.slice(judged, judged + 900), /active = null;\s*return false;/);
+    // A Spot worker never starts the lane's loop, and its strategist is never shown perps.
+    assert.match(CODE, /if \(cfg\.workerWallet === "perps"\) await perpLane\.armed\(\)/);
+    assert.match(CODE, /\.\.\.\(c\.workerWallet === "perps"\s*\?\s*\{\s*perps: \{/);
+  });
+
   it("every paper_book read-modify-write runs under the lane's lock, and the tick reads cash with the perp term", () => {
     const writes = [...CODE.matchAll(/setPaperBook\(/g)].map((m) => m.index ?? 0);
     assert.ok(writes.length >= 2);

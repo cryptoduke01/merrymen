@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { connectionKey, mergeSettings, perpsCeilingFor, perpsCeilingNote, perpsKey, strategyKey, telegramKey, stripHouseKeys, type ResolvedConfig } from "./settings";
+import { connectionKey, mergeSettings, perpsCeilingFor, perpsCeilingNote, perpsKey, workerWalletOf, strategyKey, telegramKey, stripHouseKeys, type ResolvedConfig } from "./settings";
 import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
   HOUSE_KEY_FIELDS,
@@ -836,5 +836,42 @@ describe("perps fingerprints", () => {
       assert.equal(strategyKey(mergeSettings(patch as MerrymenSettings, {})), strategyKey(base), JSON.stringify(patch));
     }
     assert.equal(connectionKey(mergeSettings({ perpsEnabled: true, perpsMaxLeverage: 3 }, {})), connectionKey(base));
+  });
+});
+
+describe("which wallet this worker serves (MERRYMEN_WALLET_PURPOSE)", () => {
+  it("unset is Spot, perps is Perps, and anything else refuses to resolve", () => {
+    assert.equal(workerWalletOf({}), "spot");
+    assert.equal(workerWalletOf({ MERRYMEN_WALLET_PURPOSE: " " }), "spot");
+    assert.equal(workerWalletOf({ MERRYMEN_WALLET_PURPOSE: "spot" }), "spot");
+    assert.equal(workerWalletOf({ MERRYMEN_WALLET_PURPOSE: "perps" }), "perps");
+    for (const bad of ["Perps", "perp", "both", "1"]) assert.throws(() => workerWalletOf({ MERRYMEN_WALLET_PURPOSE: bad }), /must be spot or perps/, bad);
+  });
+
+  it("a Perps wallet's worker runs no spot producer, whatever its settings file says", () => {
+    const file = {
+      strategy: "steady-basket",
+      discoveryEnabled: true,
+      officialCoinsEnabled: true,
+      classSnipeEnabled: true,
+      scoutEnabled: true,
+      trencherLiveEnabled: true,
+      trencherFastEnabled: true,
+      fomoFollowEnabled: true,
+      perpsEnabled: true,
+    } as MerrymenSettings;
+    const perps = mergeSettings(file, { MERRYMEN_WALLET_PURPOSE: "perps" });
+    assert.equal(perps.workerWallet, "perps");
+    assert.equal(perps.strategy, "perps-only");
+    for (const k of ["discoveryEnabled", "officialCoinsEnabled", "classSnipeEnabled", "scoutEnabled", "trencherLiveEnabled", "trencherFastEnabled", "fomoFollowEnabled"] as const) {
+      assert.equal(perps[k], false, k);
+    }
+    assert.equal(perps.perpsEnabled, true, "its perps are its owner's");
+    // A Spot worker resolves exactly as it always did.
+    const spot = mergeSettings(file, {});
+    assert.equal(spot.workerWallet, "spot");
+    assert.equal(spot.strategy, "steady-basket");
+    assert.equal(spot.discoveryEnabled, true);
+    assert.equal(spot.classSnipeEnabled, true);
   });
 });
