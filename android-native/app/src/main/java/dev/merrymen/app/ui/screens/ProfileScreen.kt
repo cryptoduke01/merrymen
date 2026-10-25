@@ -66,6 +66,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.accountControlsOf
+import dev.merrymen.app.ui.stopArmedNote
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
@@ -309,7 +310,7 @@ fun ProfileScreen(nav: NavHostController) {
       // THE KILL SWITCH, for whoever this server acts for: a signed-in owner
       // hosted, or the one operator of a self-hosted box (which has no session
       // at all, and whose DELETE /api/grants needs none). See accountControlsOf.
-      if (controls.stop) StopControl()
+      if (controls.stop) StopControl(signedIn)
 
       // SIGN OUT ONLY WHERE THERE IS A SESSION TO END. `.profile-session-actions
       // button` — polish.css:75-76: #f47777, min-height 44px, 15px.
@@ -341,9 +342,12 @@ fun ProfileScreen(nav: NavHostController) {
  * A LOST ANSWER IS NOT "it didn't stop". The grant may be gone. So the status
  * route is asked, and the owner is told what it says — stopped, or still
  * armed and theirs to stop again — rather than a failure that may be false.
+ *
+ * [signedIn] is the wallet this page shows, sent as the stop's expected
+ * tenant: hosted refuses (409) to stop a different one that signed in since.
  */
 @Composable
-private fun StopControl() {
+private fun StopControl(signedIn: String?) {
   val c = LocalContainer.current
   val scope = rememberCoroutineScope()
   var armed by remember { mutableStateOf(false) }
@@ -355,12 +359,12 @@ private fun StopControl() {
         .clickable(role = Role.Button) {
           if (!armed) {
             armed = true
-            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+            stopNote = stopArmedNote(signedIn)
           } else {
             armed = false
             // The stop goes to the server this page shows, or nowhere (ServerBound).
             scope.launch(c.api.boundHere()) {
-              stopNote = when (val r = c.api.revokeGrant()) {
+              stopNote = when (val r = c.api.revokeGrant(expectedTenant = signedIn)) {
                 is ApiResult.Ok ->
                   "Stopped. Your agent will not trade again until you re-sign its permission."
                 is ApiResult.Refused ->
