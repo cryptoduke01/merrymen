@@ -75,7 +75,7 @@ async function readJson<T>(file: string): Promise<T | null> {
  * sealed store; self-hosted it is the one file on disk.
  */
 async function settingsFor(tenant: `0x${string}` | null): Promise<MerrymenSettings> {
-  if (isHostedMode()) return tenant ? ((await getSettingsStore().get(tenant)) ?? {}) : {};
+  if (isHostedMode()) return tenant ? ((await getSettingsStore("spot").get(tenant)) ?? {}) : {};
   return (await readJson<MerrymenSettings>(SETTINGS_FILE)) ?? {};
 }
 

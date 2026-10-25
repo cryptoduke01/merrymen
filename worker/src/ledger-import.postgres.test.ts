@@ -57,7 +57,7 @@ test("Postgres: original source import, actual grant deletion locks and durable 
     },
   });
   const shared = wrap(main); await applyLedgerSchema(shared); await shared.exec(MIRROR_STATE_DDL);
-  const grants = new PgGrantStore(scoped.toString(), async () => connect());
+  const grants = new PgGrantStore(scoped.toString(), "spot", async () => connect());
   t.after(async () => {
     for (const raw of raws) raw.close();
     await Promise.allSettled(clients.map(c => c.end()));

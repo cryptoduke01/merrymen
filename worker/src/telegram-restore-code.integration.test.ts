@@ -48,9 +48,9 @@ const { offsetRestoredLink } = await import("./ledger-resume");
 const { loadTelegramState } = await import("./telegram/state");
 
 const allowlists = new Map<string, number[]>();
-const stub = Object.create(getSettingsStore()) as ReturnType<typeof getSettingsStore>;
+const stub = Object.create(getSettingsStore("spot")) as ReturnType<typeof getSettingsStore>;
 stub.get = async (t) => (allowlists.has(t) ? ({ telegramAllowlist: allowlists.get(t) } as never) : null);
-useSettingsStoreForTest(stub);
+useSettingsStoreForTest(stub, "spot");
 
 const said: string[] = [];
 const realLog = console.log;

@@ -99,7 +99,7 @@ export interface FomoOwnerReader {
  */
 export const grantStoreOwnerReader: FomoOwnerReader = {
   async hasAgent(tenant) {
-    const grant = await getGrantStore().get(tenant);
+    const grant = await getGrantStore("spot").get(tenant);
     const account = grant?.smartAccount;
     return typeof account === "string" && TENANT.test(account);
   },

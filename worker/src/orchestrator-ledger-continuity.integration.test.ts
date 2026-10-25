@@ -160,7 +160,7 @@ it("cold startup checks the rebuilt ledger created during restore before the wor
   let restored = 0;
   setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   setPaperRestoreForTest(async (t,a) => { if (t === tenant) {restored++; await book(t,a);} return {ok:true,line:null}; });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   const before = spawned.length; await reconcile();
   assert.equal(restored, 1, "the file was absent at entry and created by the actual preparation path");
   assert.equal(spawned.length, before); await assertProtected(tenant,account);
@@ -168,13 +168,13 @@ it("cold startup checks the rebuilt ledger created during restore before the wor
   assert.equal(recovery?.tradingPaused, true);
   assert.equal(recovery?.history, "unknown", "no stored trade/post/flow is not an empty original source");
   assert.equal(hasLeaseForTest(tenant), true);
-  await getGrantStore().remove(tenant); await reconcile();
+  await getGrantStore("spot").remove(tenant); await reconcile();
   setRetirementMemoryStoreForTest(null); setPaperRestoreForTest(null);
 });
 
 it("an unverified persistent root publishes the pause before writing a session key or any replacement book", async () => {
   const tenant=address(0xcd1), account=address(0xcd2);
-  await getGrantStore().put(tenant,grant(account)); setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
+  await getGrantStore("spot").put(tenant,grant(account)); setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   setPersistentHomeVerifierForTest(() => { throw new Error("unmanifested incident volume"); });
   try {
     const before=spawned.length; await reconcile(); assert.equal(spawned.length,before);
@@ -182,7 +182,7 @@ it("an unverified persistent root publishes the pause before writing a session k
     assert.equal(existsSync(path.join(childHome(tenant),"merrymen.db")),false);
     assert.equal((await readFleetRecoveryView(shared,{tenant,smartAccount:account,chainId:4663},null))?.tradingPaused,true);
   } finally {
-    await getGrantStore().remove(tenant);
+    await getGrantStore("spot").remove(tenant);
     setPersistentHomeVerifierForTest(null); setRetirementMemoryStoreForTest(null);
   }
 });
@@ -191,11 +191,11 @@ it("a fresh cold startup with no previous cursor can create its first book and f
   const tenant = address(0xc51), account = address(0xc52);
   setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   setPaperRestoreForTest(async (t,a) => { if (t === tenant) await book(t,a); return {ok:true,line:null}; });
-  await getGrantStore().put(tenant,grant(account));
+  await getGrantStore("spot").put(tenant,grant(account));
   const before = spawned.length; await reconcile();
   assert.equal(spawned.length,before+1);
   assert.equal(existsSync(path.join(childHome(tenant),"ledger-source-blocked.json")),false);
-  await getGrantStore().remove(tenant); await reconcile(); spawned.at(-1)!.exit();
+  await getGrantStore("spot").remove(tenant); await reconcile(); spawned.at(-1)!.exit();
   setRetirementMemoryStoreForTest(null); setPaperRestoreForTest(null);
 });
 
@@ -209,7 +209,7 @@ it("a transient continuity read failure stops the writer without rewriting curso
       return s.get(...args);
     }};
   }};
-  await getGrantStore().put(tenant,grant(account));
+  await getGrantStore("spot").put(tenant,grant(account));
   adoptChildForTest(tenant,account,proc,lease(tenant,releases));
   await assert.rejects(mirrorRunningLedgerForTest(tenant,unavailable),/transient/);
   await assertProtected(tenant,account);
@@ -218,7 +218,7 @@ it("a transient continuity read failure stops the writer without rewriting curso
   setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   const before=spawned.length; await reconcile(); assert.equal(spawned.length,before+1);
   await assertProtected(tenant,account);
-  await getGrantStore().remove(tenant); await reconcile(); spawned.at(-1)!.exit();
+  await getGrantStore("spot").remove(tenant); await reconcile(); spawned.at(-1)!.exit();
   setRetirementMemoryStoreForTest(null);
 });
 
@@ -232,7 +232,7 @@ it("an unlinked live ledger stops trading and keeps a durable source-loss marker
   assert.equal(existsSync(path.join(home,"ledger-source-blocked.json")),true);
   assert.equal(proc.signals[0],"SIGTERM"); assert.equal(hasLeaseForTest(tenant),true); assert.equal(releases.n,0);
   proc.exit();
-  await getGrantStore().put(tenant,grant(account)); setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
+  await getGrantStore("spot").put(tenant,grant(account)); setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   const before=spawned.length; await reconcile(); assert.equal(spawned.length,before);
   assert.equal(existsSync(path.join(home,"merrymen.db")),false,"the lost source is not silently replaced");
   setRetirementMemoryStoreForTest(null);
@@ -272,8 +272,8 @@ it("a missing retirement source retains sealed DM history and its lease while a 
   const tenant=address(0xca1),account=address(0xca2),proc=new FakeProc(76_010),releases={n:0};
   await protectedShared(tenant,account); const {home,localRaw}=await book(tenant,account,100); await seedDm(tenant,localRaw,home);
   const original=(await shared.prepare("SELECT sealed FROM tenant_personal_memory WHERE tenant=?").get(tenant) as {sealed:string}).sealed;
-  await getGrantStore().put(tenant,grant(account)); adoptChildForTest(tenant,account,proc,lease(tenant,releases));
-  setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"}); await getGrantStore().stopForReplacement(tenant,account);
+  await getGrantStore("spot").put(tenant,grant(account)); adoptChildForTest(tenant,account,proc,lease(tenant,releases));
+  setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"}); await getGrantStore("spot").stopForReplacement(tenant,account);
   await reconcile(); proc.exit(); rmSync(path.join(home,"merrymen.db")); await reconcile();
   assert.equal((await shared.prepare("SELECT sealed FROM tenant_personal_memory WHERE tenant=?").get(tenant) as {sealed:string}).sealed,original);
   assert.deepEqual((await restoredChats(tenant)).map(t=>t.chat_id),[42,43]);
@@ -288,7 +288,7 @@ it("a missing retirement source retains sealed DM history and its lease while a 
 it("expired tenants report absent original books before renewal without writing keys, sources or anchors", async () => {
   const tenant=address(0xce1),account=address(0xce2);
   await protectedShared(tenant,account);
-  await getGrantStore().put(tenant,{...grant(account),expiresAt:Math.floor(Date.now()/1000)-60});
+  await getGrantStore("spot").put(tenant,{...grant(account),expiresAt:Math.floor(Date.now()/1000)-60});
   setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   try {
     const before=spawned.length; await reconcile();
@@ -298,7 +298,7 @@ it("expired tenants report absent original books before renewal without writing 
     assert.equal(recovery?.tradingPaused,true);
     assert.equal(hasLeaseForTest(tenant),false,"status-only acquisition does not retain an execution lease");
     await assertProtected(tenant,account);
-  } finally { await getGrantStore().remove(tenant); setRetirementMemoryStoreForTest(null); }
+  } finally { await getGrantStore("spot").remove(tenant); setRetirementMemoryStoreForTest(null); }
 });
 
 it("verified original startup publishes the private cutoff before fork and preserves refused local intents", async () => {
@@ -315,7 +315,7 @@ it("verified original startup publishes the private cutoff before fork and prese
   const old={id:"old-local",kind:"trade",at:(now-60)*1000,expiresAt:(now+120)*1000};
   writeCommand(home,old); markRunning(home,"in-flight");
   const oldBytes=readFileSync(path.join(commandDir(home),"old-local.json"));
-  await getGrantStore().put(tenant,grant(account));
+  await getGrantStore("spot").put(tenant,grant(account));
   setRetirementMemoryStoreForTest({shared,dek,dialect:"sqlite"});
   setPaperRestoreForTest(async()=>({ok:true,line:null}));
   let sawBarrier=false;
@@ -341,7 +341,7 @@ it("verified original startup publishes the private cutoff before fork and prese
     assert.equal(existsSync(path.join(commandDir(home),"in-flight.running")),true);
     await assertProtected(tenant,account);
   } finally {
-    await getGrantStore().remove(tenant);await reconcile();spawned.at(-1)!.exit();
+    await getGrantStore("spot").remove(tenant);await reconcile();spawned.at(-1)!.exit();
     setPaperRestoreForTest(null);setRetirementMemoryStoreForTest(null);
     setSpawnForTest(()=>{const proc=new FakeProc(77_000+spawned.length);spawned.push(proc);return proc as unknown as ChildProcess;});
   }

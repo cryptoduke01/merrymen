@@ -61,13 +61,13 @@ async function fixture(expiresAt = Math.floor(Date.now() / 1000) + 86_400) {
   const grant = { smartAccount: account, owner, sessionKeyAddress: addr(0xa400 + n), serialized: "disposable persistent fixture", chainId: 4663,
     grantedAt: 1, expiresAt, caps: { perTradeUsdg: 10, dailyUsdg: 50, maxDrawdownPct: 20, expiryDays: 7 }, grantFeatures: ["tradeable-v2"], grantTokens: [],
     demoSessionPrivateKey: `0x${"ab".repeat(32)}` } as unknown as StoredGrant;
-  await getGrantStore().put(tenant, grant);
+  await getGrantStore("spot").put(tenant, grant);
   raw.prepare("INSERT INTO grants VALUES(?,?,1000,1)").run(tenant, JSON.stringify({ smartAccount: account, owner, chainId: 4663 }));
   const lease: TenantLease = { tenant, backend: "postgres", healthy: () => true, async release() { releases.n++; } };
   return { tenant, account, owner, grant, lease, releases, home: childHome(tenant), options: { tenant, smartAccount: account, chainId: 4663, home: childHome(tenant), volume, shared, dek, lease, dialect: "sqlite" as const } };
 }
 async function remove(f: Awaited<ReturnType<typeof fixture>>, proc?: FakeProc) {
-  await getGrantStore().remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant);
+  await getGrantStore("spot").remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant);
   await reconcile(); if (proc) { proc.exit(); await reconcile(); }
   setTenantLeaseForTest(f.tenant, null);
 }
@@ -164,7 +164,7 @@ it("explicit removal waits for writer exit, then clears private access and DM me
   const f = await fixture(); const { original } = await sourceBook(f); setTenantLeaseForTest(f.tenant, f.lease);
   await reconcile(); const proc = spawned.at(-1)!; const before = financialFacts(path.join(original, "merrymen.db"));
   writeFileSync(path.join(f.home, "telegram.json"), "{\"privateBotState\":true}"); writeFileSync(path.join(f.home, "settings.json"), "{\"privateBotConfig\":true}");
-  await getGrantStore().remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile();
+  await getGrantStore("spot").remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile();
   assert.deepEqual(proc.signals, ["SIGTERM"]); assert.equal(existsSync(path.join(f.home, "grant.json")), true);
   assert.equal(existsSync(path.join(f.home, "soul", "OWNER.md")), true); assert.deepEqual(financialFacts(path.join(f.home, "merrymen.db")), before);
   assert.equal(hasLeaseForTest(f.tenant), true); proc.exit(); await reconcile();
@@ -191,10 +191,10 @@ it("removed blocked sources retain the original book and recovery lease after th
   const f = await fixture(); await sourceBook(f); setTenantLeaseForTest(f.tenant, f.lease); await reconcile();
   const proc = spawned.at(-1)!, file = path.join(f.home, "merrymen.db"), expected = financialFacts(file);
   writeFileSync(path.join(f.home, "ledger-source-blocked.json"), JSON.stringify({ version: 1, state: "pending-mirror" }), { mode: 0o600 });
-  await getGrantStore().remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
+  await getGrantStore("spot").remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
   assert.deepEqual(financialFacts(file), expected); assert.equal(existsSync(path.join(f.home, "ledger-source-blocked.json")), true);
   assert.equal(hasLeaseForTest(f.tenant), true); assert.equal(f.releases.n, 0); assert.equal(existsSync(path.join(f.home, "grant.json")), false);
-  const before = spawned.length; await getGrantStore().put(f.tenant, f.grant);
+  const before = spawned.length; await getGrantStore("spot").put(f.tenant, f.grant);
   raw.prepare("INSERT INTO grants VALUES(?,?,1001,2)").run(f.tenant, JSON.stringify({ smartAccount: f.account, owner: f.owner, chainId: 4663 }));
   await reconcile(); assert.equal(spawned.length, before); assert.deepEqual(financialFacts(file), expected);
   await remove(f);
@@ -214,7 +214,7 @@ it("an unconfirmed final copy retains its lease and original IDs until a healthy
   } });
   const unavailable = failEventCopy(shared);
   setRetirementMemoryStoreForTest({ shared: unavailable, dek, dialect: "sqlite" });
-  await getGrantStore().remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
+  await getGrantStore("spot").remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
   assert.equal(hasLeaseForTest(f.tenant), true); assert.equal(f.releases.n, 0); assert.deepEqual(financialFacts(file), expected);
   assert.equal(raw.prepare("SELECT 1 FROM events WHERE agent_id=? AND created_at=1100").get(f.account), undefined);
   setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" }); await reconcile();
@@ -228,7 +228,7 @@ it("a final source larger than one batch retains its recovery lease until every 
   local.exec("BEGIN"); const insert = local.prepare("INSERT INTO events(id,agent_id,message,created_at) VALUES(?,?,'final backlog',?)");
   for (let id = 100; id <= 700; id++) insert.run(id, f.account, 1000 + id); local.exec("COMMIT"); local.close();
   const expected = financialFacts(file);
-  await getGrantStore().remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
+  await getGrantStore("spot").remove(f.tenant); raw.prepare("DELETE FROM grants WHERE tenant=?").run(f.tenant); await reconcile(); proc.exit(); await reconcile();
   assert.equal(Number(raw.prepare("SELECT last_id FROM mirror_state WHERE tenant=? AND table_name='events'").get(f.tenant)!.last_id), 599);
   assert.equal(hasLeaseForTest(f.tenant), true); assert.equal(f.releases.n, 0); assert.deepEqual(financialFacts(file), expected);
   await reconcile();
@@ -241,7 +241,7 @@ it("a failed persistent root proof writes no cached key, child book or partial r
   const f = await fixture(); setTenantLeaseForTest(f.tenant, f.lease); const before = spawned.length;
   const sharedFacts = () => Object.fromEntries((raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name<>'fleet_recovery_health' ORDER BY name").all() as Array<{ name: string }>).map(({ name }) =>
     [name, raw.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY 1`).all()]));
-  const expectedShared = sharedFacts(), expectedGrant = await getGrantStore().get(f.tenant), checkedAfter = Math.floor(Date.now() / 1000);
+  const expectedShared = sharedFacts(), expectedGrant = await getGrantStore("spot").get(f.tenant), checkedAfter = Math.floor(Date.now() / 1000);
   assert.equal(existsSync(f.home), false);
   let paperCalls = 0; setPaperRestoreForTest(async () => { paperCalls++; return { ok: true, line: null }; });
   setPersistentHomeVerifierForTest(() => { throw new Error("disposable volume proof failure"); });
@@ -258,7 +258,7 @@ it("a failed persistent root proof writes no cached key, child book or partial r
     assert.equal(existsSync(f.home), false);
     assert.equal(existsSync(path.join(f.home, "grant.json")), false); assert.equal(existsSync(path.join(f.home, "merrymen.db")), false);
     assert.equal(existsSync(path.join(f.home, "recovery-command-barrier.json")), false);
-    assert.deepEqual(await getGrantStore().get(f.tenant), expectedGrant); assert.deepEqual(sharedFacts(), expectedShared);
+    assert.deepEqual(await getGrantStore("spot").get(f.tenant), expectedGrant); assert.deepEqual(sharedFacts(), expectedShared);
     assert.equal(hasLeaseForTest(f.tenant), true); assert.equal(f.releases.n, 0);
   } finally {
     setPersistentHomeVerifierForTest(() => volume); setPaperRestoreForTest(async () => ({ ok: true, line: null })); await remove(f);

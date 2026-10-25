@@ -266,7 +266,7 @@ export const readAgent = cache(async function readAgent(
   // The book is the OWNER's call, and the setting is per tenant.
   let publicBook = false;
   try {
-    const s = (await getSettingsStore().get(identity.tenant)) as { publicBook?: boolean } | null;
+    const s = (await getSettingsStore("spot").get(identity.tenant)) as { publicBook?: boolean } | null;
     publicBook = s?.publicBook === true;
   } catch {
     /* fail closed: no setting readable means no book published */

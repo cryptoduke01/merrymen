@@ -109,9 +109,9 @@ it("keeps the old process and failed final group save as barriers, then saves it
     },
   };
   setRetirementMemoryStoreForTest({ shared: unavailable, dek, dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   adoptChildForTest(tenant, account, old, lease(tenant, releases));
-  await getGrantStore().stopForReplacement(tenant, account);
+  await getGrantStore("spot").stopForReplacement(tenant, account);
   await reconcile();
   assert.equal(old.signals[0], "SIGTERM");
   assert.equal(isRetiringExpiredForTest(tenant), true);
@@ -121,7 +121,7 @@ it("keeps the old process and failed final group save as barriers, then saves it
   assert.equal(hasLeaseForTest(tenant), true);
   assert.equal(releases.n, 0, "failed final save retains its lease");
   const before = spawned.length;
-  await getGrantStore().put(tenant, grant(account, "cd"));
+  await getGrantStore("spot").put(tenant, grant(account, "cd"));
   await reconcile();
   assert.equal(spawned.length, before, "fresh authority cannot bypass an unsaved memory barrier");
   failed = false;
@@ -136,7 +136,7 @@ it("keeps the old process and failed final group save as barriers, then saves it
   const personalHome = mkdtempSync(path.join(fleet, "restored-personal-"));
   assert.equal(await restorePersonalMemory({ tenant, home: personalHome, shared: db, dek, log: () => {} }), "restored");
   assert.equal(readFileSync(path.join(personalHome, "soul", "OWNER.md"), "utf8"), "final owner memory from the stopped worker");
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   spawned.at(-1)!.exit();
   setRetirementMemoryStoreForTest(null);
@@ -156,9 +156,9 @@ it("held retirement patches forget requests without publishing its stale local g
   appendForget(home, { chatId: -10071, userId: 42, atMs: Date.now() });
   recordPersonalMemoryForget({ kind: "owner" }, home);
   setRetirementMemoryStoreForTest({ shared: db, dek, dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   await adoptHolderForTest(tenant, account, old as unknown as ChildProcess);
-  await getGrantStore().stopForReplacement(tenant, account);
+  await getGrantStore("spot").stopForReplacement(tenant, account);
   await reconcile();
   old.exit();
   await reconcile();
@@ -169,7 +169,7 @@ it("held retirement patches forget requests without publishing its stale local g
   const personalHome = mkdtempSync(path.join(fleet, "restored-personal-"));
   assert.equal(await restorePersonalMemory({ tenant, home: personalHome, shared: db, dek, log: () => {} }), "restored");
   assert.equal(readFileSync(path.join(personalHome, "soul", "OWNER.md"), "utf8"), "", "the final held pass patches the personal forget journal without publishing stale notes");
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   setRetirementMemoryStoreForTest(null);
 });
@@ -181,9 +181,9 @@ it("a missing DEK keeps the final-memory barrier until a sealed save can succeed
   writeFileSync(path.join(home, "tg-groups.json"), memory("memory requiring encryption"));
   await emptyLedger(home);
   setRetirementMemoryStoreForTest({ shared: db, dek: null, dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   adoptChildForTest(tenant, account, old, lease(tenant, releases));
-  await getGrantStore().stopForReplacement(tenant, account);
+  await getGrantStore("spot").stopForReplacement(tenant, account);
   await reconcile();
   old.exit();
   await reconcile();
@@ -193,7 +193,7 @@ it("a missing DEK keeps the final-memory barrier until a sealed save can succeed
   await reconcile();
   assert.equal(releases.n, 1);
   assert.ok((await restoredText(tenant)).includes("memory requiring encryption"));
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   setRetirementMemoryStoreForTest(null);
 });
@@ -207,9 +207,9 @@ it("an unreadable held group row retains both its ciphertext and retirement barr
   const original = await db.prepare("SELECT sealed FROM tenant_tg_groups WHERE tenant = ?").get(tenant) as { sealed: string };
   appendForget(home, { chatId: -10071, userId: 42, atMs: Date.now() });
   setRetirementMemoryStoreForTest({ shared: db, dek: Buffer.alloc(32, 72), dialect: "sqlite" });
-  await getGrantStore().put(tenant, grant(account));
+  await getGrantStore("spot").put(tenant, grant(account));
   await adoptHolderForTest(tenant, account, old as unknown as ChildProcess);
-  await getGrantStore().stopForReplacement(tenant, account);
+  await getGrantStore("spot").stopForReplacement(tenant, account);
   await reconcile();
   old.exit();
   await reconcile();
@@ -220,7 +220,7 @@ it("an unreadable held group row retains both its ciphertext and retirement barr
   await reconcile();
   assert.equal(isRetiringExpiredForTest(tenant), false);
   assert.ok(!(await restoredText(tenant)).includes("alice-private-line"));
-  await getGrantStore().remove(tenant);
+  await getGrantStore("spot").remove(tenant);
   await reconcile();
   setRetirementMemoryStoreForTest(null);
 });
@@ -257,13 +257,13 @@ it("a rebuilt retirement source never advances its stale cursor or erases the sh
   const { sourceRaw } = await rebuiltBook(tenant, account);
   try {
     setRetirementMemoryStoreForTest({ shared: db, dek, dialect: "sqlite" });
-    await getGrantStore().put(tenant, grant(account));
+    await getGrantStore("spot").put(tenant, grant(account));
     adoptChildForTest(tenant, account, old, lease(tenant, releases));
-    await getGrantStore().stopForReplacement(tenant, account);
+    await getGrantStore("spot").stopForReplacement(tenant, account);
     await reconcile(); old.exit(); await reconcile();
     assert.equal(await savedTradeCursor(tenant), 100, "preflight preserves the original witness before mirror mutation");
     assert.equal(await savedPositionCount(account), 1);
-    await getGrantStore().put(tenant, grant(account, "cd"));
+    await getGrantStore("spot").put(tenant, grant(account, "cd"));
     const before = spawned.length;
     await reconcile(); await reconcile();
     assert.equal(await savedTradeCursor(tenant), 100);
@@ -305,7 +305,7 @@ it("an unexpected source rewind leaves a durable guard which refuses a second co
     assert.equal(await finalMirrorBeforeAnchor(tenant, db), false);
     assert.equal(await savedPositionCount(account), 1, "a second pass is refused before it can clear the protected snapshot");
     setRetirementMemoryStoreForTest({ shared: db, dek, dialect: "sqlite" });
-    await getGrantStore().put(tenant, grant(account));
+    await getGrantStore("spot").put(tenant, grant(account));
     const before = spawned.length;
     await reconcile();
     assert.equal(spawned.length, before, "startup observes the durable marker even without a retirement entry");

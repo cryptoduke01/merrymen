@@ -64,7 +64,7 @@ const grantAt = (grantedAt: number): StoredGrant =>
     demoSessionPrivateKey: SESSION,
   }) as unknown as StoredGrant;
 
-const store = getGrantStore();
+const store = getGrantStore("spot");
 /** Every ✅ the orchestrator would have sent the owner, by tenant. */
 const confirmed: string[] = [];
 setKillConfirmForTest(async (t) => {

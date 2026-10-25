@@ -85,7 +85,7 @@ describe("SETTINGS_CATALOG against PUT /api/settings", () => {
         const res = await put({ [s.key]: value });
         assert.equal(res.status, 200, `${s.key}=${JSON.stringify(value)}: ${JSON.stringify(res.body)}`);
         assert.equal((res.body.ignored ?? []).includes(s.key), false, `${s.key} came back ignored`);
-        const stored = (await getSettingsStore().get(TENANT)) as Record<string, unknown> | null;
+        const stored = (await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null;
         assert.deepEqual(stored?.[s.key], value, `${s.key}=${JSON.stringify(value)} was not stored`);
       }
       if (NUMERIC.has(s.kind)) {
@@ -101,11 +101,11 @@ describe("SETTINGS_CATALOG against PUT /api/settings", () => {
   it("a hosted deployment that has not opted in to Fomo saves none of its switches, and says so", async () => {
     delete process.env.MERRYMEN_FOMO_ENABLED;
     try {
-      const before = { ...((await getSettingsStore().get(TENANT)) as Record<string, unknown> | null) };
+      const before = { ...((await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null) };
       const res = await put({ fomoDataAccess: false, fomoMonitoringEnabled: true, fomoFollowEnabled: true, scoutEnabled: true });
       assert.equal(res.status, 200, JSON.stringify(res.body));
       assert.deepEqual([...(res.body.ignored ?? [])].sort(), ["fomoDataAccess", "fomoFollowEnabled", "fomoMonitoringEnabled"]);
-      const stored = (await getSettingsStore().get(TENANT)) as Record<string, unknown> | null;
+      const stored = (await getSettingsStore("spot").get(TENANT)) as Record<string, unknown> | null;
       for (const k of ["fomoDataAccess", "fomoMonitoringEnabled", "fomoFollowEnabled"]) assert.deepEqual(stored?.[k], before[k], `${k} left as it was`);
       assert.equal(stored?.scoutEnabled, true, "everything else saves as before");
     } finally {

@@ -154,11 +154,11 @@ export function projectSpecValues(raw: Record<string, unknown> | null | undefine
 
 export const storeSettingsReader: SettingsReader = {
   async settingsFor(tenant) {
-    const raw = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+    const raw = await getSettingsStore("spot").get(tenant.toLowerCase() as `0x${string}`);
     return projectSettings(raw as unknown as Record<string, unknown> | null);
   },
   async specValuesFor(tenant) {
-    const raw = await getSettingsStore().get(tenant.toLowerCase() as `0x${string}`);
+    const raw = await getSettingsStore("spot").get(tenant.toLowerCase() as `0x${string}`);
     return projectSpecValues(raw as unknown as Record<string, unknown> | null);
   },
 };

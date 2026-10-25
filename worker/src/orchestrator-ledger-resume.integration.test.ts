@@ -137,7 +137,7 @@ async function preIncident(o: { live: boolean; owner?: `0x${string}` }) {
   return { tenant, account, owner, home };
 }
 async function putGrant(tenant: `0x${string}`, g: StoredGrant) {
-  await getGrantStore().put(tenant, g);
+  await getGrantStore("spot").put(tenant, g);
   raw.prepare("INSERT INTO grants VALUES (?, ?, ?, 1) ON CONFLICT (tenant) DO UPDATE SET grant_json = excluded.grant_json, updated_at = excluded.updated_at, row_version = grants.row_version + 1")
     .run(tenant, JSON.stringify({ smartAccount: g.smartAccount, owner: g.owner, chainId: g.chainId }), nowSec());
 }
@@ -233,7 +233,7 @@ it("a pre-incident live tenant: refused without approval; previewed, batch-appro
   } finally { book.close(); }
   // The rolling caps read the trailing day from Postgres: nothing in it.
   assert.deepEqual(await readBudgetSeed(shared, t.account, String(CASH.USDG), nowSec()), []);
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("an RPC failure keeps the tenant held and retries; chain activity Postgres lacks refuses", async () => {
@@ -285,7 +285,7 @@ it("an RPC failure keeps the tenant held and retries; chain activity Postgres la
     assert.ok(line?.includes(`"pass":true`), "information only: the verdict is the preconditions'");
     assert.ok((r.entries[0] as { lastRefusal?: { reason: string } }).lastRefusal?.reason.endsWith(named), "the run row names it too");
   } finally { chainLogs = []; console.log = realLog; }
-  await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await getGrantStore("spot").remove(u.tenant); await reconcile();
 });
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -321,7 +321,7 @@ it("activity landing after the chain read and before the registration refuses: t
     assert.deepEqual(cursorsOf(t.tenant), cursors, "no cursor moved");
     assert.equal(rows("SELECT * FROM tenant_ledger_import WHERE tenant = ?", t.tenant).length, 0, "no new book registered");
   } finally { head = HEAD; chainLogs = []; }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a clean chain read is not reused after a failed registration: the retry reads the whole window again first, and refuses what landed since", async () => {
@@ -356,7 +356,7 @@ it("a clean chain read is not reused after a failed registration: the retry read
     assert.equal(forksOf(t.tenant).length, 0);
     assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 0);
   } finally { head = HEAD; chainLogs = []; }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 /**
@@ -422,7 +422,7 @@ it("a tenant refused for a deposit Postgres lacks is booked by the chain-gap too
     assert.equal(approval(t.tenant)?.state, "applied");
     assert.equal(forksOf(t.tenant).length, 1, "admitted through the ordinary path");
   } finally { chainLogs = []; }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 /** What the orchestrator says while `fn` runs. MERRYMEN_TEST_VERBOSE=1 prints it as well. */
@@ -449,7 +449,7 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
   try {
     await sayings(async (said) => {
       // 1. Its owner's settings asked for the live rail: read on chain, and refused for the deposit Postgres lacks.
-      await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+      await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: true } as never);
       const p1 = await preview(t.tenant);
       assert.deepEqual([p1.entries[0]!.pass, p1.entries[0]!.chain], [true, "required"]);
       await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p1.entries[0]!.digest}` });
@@ -474,7 +474,7 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
       process.env.MERRYMEN_RESUME_AUTO_PAPER = "1";
       try {
         await reconcile(); // the lane's first pass: the roster as it stands, nobody's re-sign
-        await getSettingsStore().put(t.tenant, { liveTradingEnabled: false } as never);
+        await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: false } as never);
         const opens = chainOpens, from = said.length;
         await putGrant(t.tenant, { ...grant(t.account, t.owner, 2), expiresAt: nowSec() + 86_400 + 77 } as StoredGrant);
         await reconcile(); await reconcile();
@@ -540,7 +540,7 @@ it("a paper tenant held on a chain refusal no admission has answered: the lane l
       } finally { delete process.env.MERRYMEN_RESUME_AUTO_PAPER; }
     });
   } finally { chainLogs = []; setResumeChainForTest(() => chain); }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a tenant held on a chain refusal is admitted only on a chain read that answers: an unreadable chain, no RPC, or an unreadable refusal lookup holds it", async () => {
@@ -595,7 +595,7 @@ it("a tenant held on a chain refusal is admitted only on a chain read that answe
   assert.equal(approval(t.tenant)?.state, "applied");
   assert.equal(forksOf(t.tenant).length, 1);
   assert.equal(rows("SELECT chain_head FROM ledger_resume_attestations WHERE tenant = ?", t.tenant)[0]?.chain_head, String(HEAD));
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 /**
@@ -628,7 +628,7 @@ for (const recorded of ["as this build records it", "as an earlier build left it
     const depositAt = nowSec() - 20 * 3600;
     try {
       // 1. Its owner's settings asked for live trading: read on chain, and refused for the deposit, with where that read began.
-      await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+      await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: true } as never);
       const p1 = await preview(t.tenant);
       await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${p1.entries[0]!.digest}` });
       await reconcile(); await settle();
@@ -640,7 +640,7 @@ for (const recorded of ["as this build records it", "as an earlier build left it
       if (recorded !== "as this build records it") raw.prepare("UPDATE ledger_resume_approvals SET chain_read_from_sec = NULL WHERE approval_id = ?").run(String(r1.approval_id));
 
       // 2. Its owner turns live trading off. A day on: twenty hours by the clock and the chain, and a row lands that changes its evidence.
-      await getSettingsStore().put(t.tenant, { liveTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: false } as never);
       await aDayOn(20, async () => {
         raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(t.account, OLD + 11);
         assert.ok(nowSec() - 26 * 3600 > depositAt, "26 hours back from now is past the deposit: the window used to start after it");
@@ -686,7 +686,7 @@ for (const recorded of ["as this build records it", "as an earlier build left it
         assert.equal(rows("SELECT * FROM flows WHERE agent_id = ? AND tx_hash = ?", t.account, depositTx).length, 1, "booked");
       });
     } finally { chainLogs = []; }
-    await getGrantStore().remove(t.tenant); await reconcile();
+    await getGrantStore("spot").remove(t.tenant); await reconcile();
   });
 }
 
@@ -707,7 +707,7 @@ it("an approval an earlier build recorded, on its table from before the column, 
     assert.match(String(r.reason), new RegExp(`^${CHAIN_REFUSAL}: `));
     assert.equal(typeof r.chain_read_from_sec, "number", "the column is added first, and the refusal writes it");
   } finally { chainLogs = []; }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("every decision of a held tenant changes its digest: refused on the chain while live, then for stale evidence, then turned paper — the preview's digest is approvable, reads the chain, and refuses afresh", async () => {
@@ -723,7 +723,7 @@ it("every decision of a held tenant changes its digest: refused on the chain whi
   try {
     await sayings(async (said) => {
       // R1: live trading on, so the evidence reads chain:required already; approved, and refused on the chain.
-      await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+      await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: true } as never);
       const d0 = (await preview(t.tenant)).entries[0]!.digest;
       raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 1, 0, 0, 1, ?, 2, 'paper')").run(t.account, OLD + 21);
       const d1 = (await preview(t.tenant)).entries[0]!.digest;
@@ -736,7 +736,7 @@ it("every decision of a held tenant changes its digest: refused on the chain whi
       assert.deepEqual(refusalsOf(t.tenant).map((r) => r.state), ["refused", "refused"]);
       assert.match(String(approval(t.tenant)?.reason), /evidence changed/);
       // Its owner turns live trading off: it reads chain:required for the hold now, not the intent — and its digest is not d1's.
-      await getSettingsStore().put(t.tenant, { liveTradingEnabled: false } as never);
+      await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: false } as never);
       const p3 = await preview(t.tenant);
       const e3 = p3.entries[0]! as (typeof p3.entries)[number] & { chainHeld?: boolean };
       assert.deepEqual([e3.pass, e3.chain, e3.chainHeld], [true, "required", true]);
@@ -760,7 +760,7 @@ it("every decision of a held tenant changes its digest: refused on the chain whi
       assert.equal(holdOf(snap, nowSec()).anchorSec, Math.floor(Number(r3.updated_at_ms) / 1000));
     });
   } finally { chainLogs = []; setResumeChainForTest(() => chain); }
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a paper tenant needs no chain read; evidence that changed after the preview refuses with nothing moved", async () => {
@@ -791,7 +791,7 @@ it("a paper tenant needs no chain read; evidence that changed after the preview 
   finally { setResumeChainForTest(() => chain); }
   assert.equal(forksOf(t.tenant).length, 1);
   assert.equal(approval(t.tenant)?.state, "applied");
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a re-sign by the same owner still admits; a new account refuses; an expired grant is not admitted", async () => {
@@ -819,7 +819,7 @@ it("a re-sign by the same owner still admits; a new account refuses; an expired 
   assert.equal(approval(expired.tenant)?.state, "approved", "an expired grant is never taken into Phase A");
   assert.equal(existsSync(path.join(expired.home, "merrymen.db")), true);
   assert.equal(forksOf(expired.tenant).length, 0);
-  for (const x of [same, moved, expired]) await getGrantStore().remove(x.tenant);
+  for (const x of [same, moved, expired]) await getGrantStore("spot").remove(x.tenant);
   await reconcile();
 });
 
@@ -857,7 +857,7 @@ it("a lost lease moves nothing; a crash between the archive and the registration
   assert.equal(done.generation, mid.generation, "the same generation, not a second archive");
   assert.equal(readdirSync(path.join(fleet, "archive", t.tenant)).length, 1);
   assert.equal(forksOf(t.tenant).length, 1);
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a batch approval admits exactly the previewed tenants that passed", async () => {
@@ -875,7 +875,7 @@ it("a batch approval admits exactly the previewed tenants that passed", async ()
   assert.equal(forksOf(good.tenant).length, 1);
   assert.equal(forksOf(bad.tenant).length, 0);
   assert.equal(forksOf(late.tenant).length, 0);
-  for (const x of [good, bad, late]) await getGrantStore().remove(x.tenant);
+  for (const x of [good, bad, late]) await getGrantStore("spot").remove(x.tenant);
   await reconcile();
 });
 
@@ -928,7 +928,7 @@ it("a failed seed is completed before the first worker, or the spawn is held; Po
   const cost = (r: Record<string, unknown>) => [r.agent_id, r.mode, r.symbol, r.qty_raw, r.cost_usdg];
   assert.deepEqual(snapshots(t.account).cost_basis.map(cost), preImage.cost_basis.map(cost), "the first mirror pass left Postgres's basis as it was: the seeded set");
   assert.deepEqual(snapshots(t.account).position_floors, preImage.position_floors);
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("the preview says a durable pause starts the worker paused, unless the owner's mirrored /resume is newer than it", async () => {
@@ -948,7 +948,7 @@ it("the preview says a durable pause starts the worker paused, unless the owner'
   assert.equal(await startsPaused(), true, "a durable pause over a home never armed");
   raw.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'warn', 'Telegram: resumed by chat 7', ?)").run(t.account, stamp + 60);
   assert.equal(await startsPaused(), false, "the owner's /resume, mirrored after it, lifts it");
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a paper book whose owner turned live trading on during the hold previews as chain-read and exits-only", async () => {
@@ -956,11 +956,11 @@ it("a paper book whose owner turned live trading on during the hold previews as 
   const before = await preview(t.tenant);
   assert.deepEqual([before.entries[0]!.chain, before.entries[0]!.suggestedLevel], ["not-required", "trade"]);
   const { getSettingsStore } = await import("./settings-store");
-  await getSettingsStore().put(t.tenant, { liveTradingEnabled: true } as never);
+  await getSettingsStore("spot").put(t.tenant, { liveTradingEnabled: true } as never);
   const after = await preview(t.tenant);
   assert.deepEqual([after.entries[0]!.chain, after.entries[0]!.suggestedLevel], ["required", "exits-only"]);
   assert.notEqual(after.entries[0]!.digest, before.entries[0]!.digest, "an approval of the paper verdict no longer matches");
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("an admitted tenant previews as already admitted, and a run approval of that preview archives nothing", async () => {
@@ -977,7 +977,7 @@ it("an admitted tenant previews as already admitted, and a run approval of that 
   await reconcile(); await new Promise((r) => setTimeout(r, 20));
   assert.equal(readdirSync(path.join(fleet, "archive", t.tenant)).length, 1, "its running book was not archived again");
   assert.equal(rows("SELECT * FROM ledger_resume_attestations WHERE tenant = ?", t.tenant).length, 1);
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("a registered approval whose grant moved to a new account before its first worker ends refused, and the tenant can be approved again", async () => {
@@ -1004,7 +1004,7 @@ it("a registered approval whose grant moved to a new account before its first wo
   assert.equal(fresh.entries[0]!.pass, true, fresh.entries[0]!.refusals.join(" | "));
   await runResumeAdmissionControlsForTest({ MERRYMEN_RESUME_APPROVE: `${t.tenant}:${fresh.entries[0]!.digest}` });
   assert.equal(approval(t.tenant)?.state, "approved");
-  await getGrantStore().remove(t.tenant); await reconcile();
+  await getGrantStore("spot").remove(t.tenant); await reconcile();
 });
 
 it("an operation the owner's own key signed is answered by its mirrored owner record — re-derived from the receipt — and a 'review' record answers nothing", async () => {
@@ -1049,6 +1049,6 @@ it("an operation the owner's own key signed is answered by its mirrored owner re
     assert.equal(String(approval(u.tenant)?.reason), `${CHAIN_REFUSAL}: operation ${uOp.hash} in tx ${uOp.tx} at block ${HEAD - 100n}`);
     assert.equal(forksOf(u.tenant).length, 0);
     assert.equal(rows("SELECT COUNT(*) AS n FROM trades WHERE user_op_hash IN (?, ?)", uOp.hash, `0x${"7".repeat(62)}01`)[0]!.n, 0, "and no trades row was written for either");
-    await getGrantStore().remove(t.tenant); await getGrantStore().remove(u.tenant); await reconcile();
+    await getGrantStore("spot").remove(t.tenant); await getGrantStore("spot").remove(u.tenant); await reconcile();
   } finally { chainLogs = []; setResumeChainForTest(() => chain); }
 });

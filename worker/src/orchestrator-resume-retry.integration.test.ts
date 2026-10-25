@@ -52,8 +52,8 @@ const { childHome, reconcile, setSpawnForTest, setRetirementMemoryStoreForTest, 
   setLeaseAcquireForTest, setResumeChainForTest, runResumeAdmissionControlsForTest, setKillConfirmForTest, setBasisSeedSharedForTest,
   setPersonalMemoryStoreForTest, publishChildTelegramForTest } = orch;
 // Taken now, while DATABASE_URL is unset, so both stay on files for the whole file.
-const grants = (await import("./grant-store")).getGrantStore();
-const settingsStore = (await import("./settings-store")).getSettingsStore();
+const grants = (await import("./grant-store")).getGrantStore("spot");
+const settingsStore = (await import("./settings-store")).getSettingsStore("spot");
 // A hosted deployment from here on: the privacy proof and the offset handoff
 // run. Nothing answers at this address; the gates read the stand-in below.
 process.env.DATABASE_URL = "postgres://resume-retry.invalid/not-a-real-connection";

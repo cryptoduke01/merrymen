@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +39,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOME = process.env.MERRYMEN_HOME ?? path.join(os.homedir(), ".merrymen");
 const SETTINGS = path.join(HOME, "settings.json");
 const GRANT = path.join(HOME, "grant.json");
+/** The local Perps wallet's grant, in its own home (worker/src/home.ts purposeHome). */
+const PERPS_GRANT = path.join(HOME, "accounts", "perps", "grant.json");
 const HEARTBEAT = path.join(HOME, "heartbeat.json");
 const DB = path.join(HOME, "merrymen.db");
 const STRATEGIES = path.join(HOME, "strategies");
@@ -1104,13 +1106,28 @@ function selftest() {
 }
 
 /**
+ * IS THERE SOMETHING HERE A KILL MUST STOP? "absent" only when the file is not
+ * there (ENOENT). Anything else, EACCES on a home another user owns among them,
+ * is "unknown": a grant or strategy that may still be live, which the kill must
+ * try and fail at rather than call done. existsSync answers false to both.
+ */
+function killTarget(file) {
+  try {
+    statSync(file);
+    return "present";
+  } catch (e) {
+    return e?.code === "ENOENT" ? "absent" : "unknown";
+  }
+}
+
+/**
  * The kill's Solana half: every local Solana strategy off (worker/src/solana-kill-cli.ts,
  * stopLocalSolanaForKill), before the grant is touched, as the dashboard's and Telegram's
  * self-hosted kills do. Nothing to run without a Solana accounts database. False, with the
  * exit code set, when it could not be stopped: the kill is incomplete, never said done.
  */
 function stopLocalSolana() {
-  if (!process.env.DATABASE_URL && !existsSync(path.join(HOME, "solana-accounts.sqlite"))) return true;
+  if (!process.env.DATABASE_URL && killTarget(path.join(HOME, "solana-accounts.sqlite")) === "absent") return true;
   const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "solana-kill-cli.ts")], {
     cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1123,19 +1140,59 @@ function stopLocalSolana() {
   return false;
 }
 
+/**
+ * The kill's Perps half: the local Perps wallet's grant archived and revoked
+ * (worker/src/perps-kill-cli.ts, stopLocalPerpsForKill), before the Spot grant is
+ * touched, as the dashboard's and Telegram's self-hosted kills do. Nothing to run
+ * without a Perps grant. False, with the exit code set, when it could not be
+ * revoked: the kill is incomplete, never said done.
+ */
+function stopLocalPerps() {
+  if (killTarget(PERPS_GRANT) === "absent") return true;
+  const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "perps-kill-cli.ts")], {
+    cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (child.status === 0) {
+    if (child.stdout.trim() === "stopped") ok("Perps wallet's grant revoked");
+    return true;
+  }
+  const why = child.stderr.trim().split("\n").pop();
+  bad(`Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign.${why ? ` ${why}` : ""} Rerun: merrymen kill`);
+  process.exitCode = 1;
+  return false;
+}
+
 async function kill() {
-  if (!existsSync(GRANT)) {
+  // Not there, or cannot tell (killTarget): a grant this cannot see may still sign,
+  // so only a missing file counts as no grant.
+  const perpsTarget = killTarget(PERPS_GRANT);
+  if (killTarget(GRANT) === "absent") {
+    // No Spot grant: the other halves still run. Asked first only when a Perps grant would go.
+    if (perpsTarget !== "absent") {
+      const p = makePrompter();
+      const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — revoke your Perps wallet's grant? [y/N]: `)).trim().toLowerCase();
+      p.close();
+      if (answer !== "y" && answer !== "yes") {
+        console.log(dim("  stayed the hand — nothing touched"));
+        return;
+      }
+      stopLocalSolana();
+      stopLocalPerps();
+      return;
+    }
     warn("no grant to call in — the band's already home");
     stopLocalSolana();
     return;
   }
   const p = makePrompter();
-  const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
+  const both = perpsTarget !== "absent";
+  const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant${both ? "s of both wallets (Spot and Perps)" : ""}? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {
-    // Kept to the end: a Solana stop that failed makes the whole kill incomplete,
-    // even once the Robinhood grant is gone, so the owner knows to rerun it.
+    // Kept to the end: a Solana stop or a Perps revocation that failed makes the whole
+    // kill incomplete, even once the Robinhood grant is gone, so the owner knows to rerun it.
     const solanaStopped = stopLocalSolana();
+    const perpsStopped = stopLocalPerps();
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
     const archive = archiveCurrentGrant();
@@ -1173,8 +1230,8 @@ async function kill() {
       /* no marker */
     }
     const archived = archive.kind === "archived" ? archive.account : null;
-    if (solanaStopped) ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
-    else bad("grant destroyed and the Robinhood band stands down, but the kill is incomplete: the Solana strategy was not stopped. Rerun: merrymen kill");
+    if (solanaStopped && perpsStopped) ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
+    else bad(`grant destroyed and the Robinhood band stands down, but the kill is incomplete: ${[solanaStopped ? null : "the Solana strategy was not stopped", perpsStopped ? null : "the Perps wallet's grant was not revoked"].filter(Boolean).join(" and ")}. Rerun: merrymen kill`);
     if (archived) {
       console.log(
         `  ${dim("wallet archived — funds stay reachable:")} ${bold("merrymen wallets")} ${dim("·")} ${bold("merrymen recover")}`,

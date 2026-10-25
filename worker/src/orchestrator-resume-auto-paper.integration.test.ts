@@ -135,7 +135,7 @@ const grant = (account: `0x${string}`, owner: `0x${string}`, o: { expired?: bool
   } as unknown as StoredGrant;
 };
 async function putGrant(tenant: `0x${string}`, g: StoredGrant) {
-  await getGrantStore().put(tenant, g);
+  await getGrantStore("spot").put(tenant, g);
   raw.prepare("INSERT INTO grants VALUES (?, ?, ?, 1) ON CONFLICT (tenant) DO UPDATE SET grant_json = excluded.grant_json, updated_at = excluded.updated_at, row_version = grants.row_version + 1")
     .run(tenant, JSON.stringify({ smartAccount: g.smartAccount, owner: g.owner, chainId: g.chainId }), nowSec());
 }
@@ -184,14 +184,14 @@ const table = (name: string) => rows("SELECT name FROM sqlite_master WHERE type 
 const settingsFile = (tenant: string) => path.join(fleet, "tenant-settings", `${tenant}.json`);
 /** The owner's settings with live trading switched on, sealed as the store writes them — but not stored yet: written by the test when it chooses. */
 async function liveSettingsFor(tenant: `0x${string}`): Promise<Buffer> {
-  await getSettingsStore().put(tenant, { liveTradingEnabled: true } as never);
+  await getSettingsStore("spot").put(tenant, { liveTradingEnabled: true } as never);
   const sealed = readFileSync(settingsFile(tenant));
   rmSync(settingsFile(tenant));
   return sealed;
 }
 async function pass() { await reconcile(); await new Promise((r) => setTimeout(r, 20)); }
 async function cleanUp(...tenants: string[]) {
-  for (const t of tenants) await getGrantStore().remove(t as `0x${string}`);
+  for (const t of tenants) await getGrantStore("spot").remove(t as `0x${string}`);
   await pass();
 }
 

@@ -59,7 +59,7 @@ before(async () => {
   const require = createRequire(import.meta.url);
   const grants = require("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "get", async (tenant: string) => (tenant === A ? grant() : null));
+  mock.method(grants.getGrantStore("spot"), "get", async (tenant: string) => (tenant === A ? grant() : null));
   settingsStore = require("../../../../../worker/src/settings-store.ts") as typeof settingsStore;
   settingsStore.useSettingsStoreForTest({
     get: async (tenant: `0x${string}`) => {
@@ -67,7 +67,7 @@ before(async () => {
       if (settings instanceof Error) throw settings;
       return settings;
     },
-  } as unknown as import("../../../../../worker/src/settings-store").SettingsStore);
+  } as unknown as import("../../../../../worker/src/settings-store").SettingsStore, "spot");
   const balances = require("../../../lib/grant-balances.ts") as typeof import("@/lib/grant-balances");
   const cachedBalances = require.cache[require.resolve("../../../lib/grant-balances.ts")]!;
   cachedBalances.exports = { ...balances, readGrantBalancesFrom: async () => ({ ethWei: null, cashUsdg: null, vaultUsdg: null }) };

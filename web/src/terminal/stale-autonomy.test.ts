@@ -165,7 +165,7 @@ describe("the page reads the server's answer back, and nothing else", () => {
   it("the tick is read for the caller, and a failed read is the default, never the house's", () => {
     const fn = ROUTE.slice(ROUTE.indexOf("async function tickSecondsFor"));
     const body = fn.slice(0, fn.indexOf("\n}\n"));
-    assert.match(body, /getSettingsStore\(\)\.get\(hostedTenant\)/, "hosted: this tenant's own settings");
+    assert.match(body, /getSettingsStore\("spot"\)\.get\(hostedTenant\)/, "hosted: this tenant's own settings");
     assert.match(body, /catch \{\s*return null;/, "a failed read falls back to freshWithin's default");
   });
 

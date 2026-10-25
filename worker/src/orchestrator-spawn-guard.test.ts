@@ -61,8 +61,8 @@ const { RECOVERY_REPLY_SCHEMA, sealRecoveryReplyState } = await import("./recove
 
 // Taken now, while DATABASE_URL is unset, so both stay on files for the whole
 // file once it is set below.
-const store = getGrantStore();
-const settingsStore = getSettingsStore();
+const store = getGrantStore("spot");
+const settingsStore = getSettingsStore("spot");
 // A hosted deployment from here on: every recovery gate runs. Nothing answers
 // at this address. Where `pg` will not load (this repo: it is runtime-only,
 // installed by the image), every pool the orchestrator builds for itself

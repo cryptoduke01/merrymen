@@ -81,7 +81,7 @@ describe("the ceiling a chat order is held to", () => {
   it("HOSTED, THE TENANT'S OWN VALUE, else the house's — env included", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     process.env.MERRYMEN_TELEGRAM_MAX_ACTION_USDG = "10";
-    await getSettingsStore().put(TENANT, { telegramMaxActionUsdg: 7 });
+    await getSettingsStore("spot").put(TENANT, { telegramMaxActionUsdg: 7 });
     assert.equal(await ceiling(TENANT), 7, "their own");
     assert.equal(await ceiling(OTHER), 10, "nothing stored: the house's, which the chips used to read as 25");
   });
@@ -113,9 +113,9 @@ describe("POST refuses at the ceiling GET reports — one fixture, both readers"
   it("HOSTED: the tenant's own 7 over the house's 10 — POST refuses 8 and GET says 7", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     process.env.MERRYMEN_TELEGRAM_MAX_ACTION_USDG = "10";
-    await getGrantStore().put(TENANT, grantOf(ACCOUNT[TENANT]));
-    await getGrantStore().put(OTHER, grantOf(ACCOUNT[OTHER]));
-    await getSettingsStore().put(TENANT, { telegramMaxActionUsdg: 7 });
+    await getGrantStore("spot").put(TENANT, grantOf(ACCOUNT[TENANT]));
+    await getGrantStore("spot").put(OTHER, grantOf(ACCOUNT[OTHER]));
+    await getSettingsStore("spot").put(TENANT, { telegramMaxActionUsdg: 7 });
 
     const over = await place(TENANT, 8);
     assert.equal(over.status, 400, "8 is over the tenant's own 7, whatever the house allows");

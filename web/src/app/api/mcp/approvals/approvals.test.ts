@@ -393,7 +393,7 @@ test("an approved classExitAtGraduationPct change is saved and reported applied,
   process.env.MERRYMEN_HOME = home;
   delete process.env.DATABASE_URL;
   resetSettingsStoreForTest();
-  getSettingsStore();
+  getSettingsStore("spot");
   process.env.DATABASE_URL = saved.db;
   try {
     const { run } = await base({ scopes: ["agents:read", "drafts:write"] });
@@ -404,7 +404,7 @@ test("an approved classExitAtGraduationPct change is saved and reported applied,
     assert.equal(body.status, "applied", JSON.stringify(body.result));
     assert.deepEqual(body.result?.applied, ["classExitAtGraduationPct"]);
     assert.equal(body.result?.not_applied, undefined);
-    assert.equal(((await getSettingsStore().get(OWNER_A)) as unknown as Record<string, unknown>).classExitAtGraduationPct, 50);
+    assert.equal(((await getSettingsStore("spot").get(OWNER_A)) as unknown as Record<string, unknown>).classExitAtGraduationPct, 50);
   } finally {
     resetSettingsStoreForTest();
     if (saved.home === undefined) delete process.env.MERRYMEN_HOME;

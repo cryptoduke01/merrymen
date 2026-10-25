@@ -14,6 +14,44 @@ import { isEnergyReserveToken } from "./energy";
 import { GRANT_PERP_LIGHTER, validatePerpPubKey, type PerpGrant, type PerpRecoveryReference } from "./perps";
 
 /**
+ * WHICH OF A LOGIN'S TWO WALLETS A GRANT IS FOR.
+ *
+ * One owner key holds two Kernel accounts: Spot at index 0 (every account
+ * made before Perps existed) and Perps at index 1. Each has its own grant,
+ * session key, settings and stores, and neither's authority reaches the other.
+ * A kill reaches both (worker/src/perps-kill.ts).
+ */
+export type GrantPurpose = "spot" | "perps";
+
+export function isGrantPurpose(value: unknown): value is GrantPurpose {
+  return value === "spot" || value === "perps";
+}
+
+/**
+ * The wallet a grant says it is for. ABSENT IS SPOT, because every grant
+ * signed before Perps existed is a Spot grant; anything else unrecognised is
+ * refused rather than read as Spot, so a typo can never land a grant in the
+ * other wallet's slot.
+ */
+export function grantPurpose(grant: { purpose?: unknown } | null | undefined): GrantPurpose {
+  const purpose = grant?.purpose;
+  if (purpose === undefined) return "spot";
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised wallet purpose");
+  return purpose;
+}
+
+/**
+ * The Kernel account index a wallet is derived at. Spot keeps Kernel's
+ * default 0, so every existing address stays where it is; Perps is 1, a
+ * different address from the same owner key. No default: a caller that does
+ * not name the wallet would silently derive Spot's.
+ */
+export function accountIndexForPurpose(purpose: GrantPurpose): bigint {
+  if (!isGrantPurpose(purpose)) throw new Error("Unrecognised wallet purpose");
+  return purpose === "perps" ? 1n : 0n;
+}
+
+/**
  * grantFeatures marker meaning "this signature carries the WIDE tradable set".
  *
  * TRADEABLE_SYMBOLS grows as pools are seeded, but a session key signed last
@@ -335,7 +373,10 @@ export function isBindingVersion(v: unknown): v is BindingVersion {
   return v === "legacy-wallet-owner-v1" || v === "privy-did-owner-v1";
 }
 
-/** What a claim binds, by version. `did` exists on exactly the arm that needs it. */
+/**
+ * What a claim binds, by version. `did` exists on exactly the arm that needs it.
+ * `purpose` is the wallet the claim is for; absent is Spot (grantPurpose).
+ */
 export type BindingClaim =
   | {
       version?: "legacy-wallet-owner-v1";
@@ -344,6 +385,7 @@ export type BindingClaim =
       owner: `0x${string}`;
       smartAccount: `0x${string}`;
       chainId: number;
+      purpose?: GrantPurpose;
     }
   | {
       version: "privy-did-owner-v1";
@@ -352,11 +394,16 @@ export type BindingClaim =
       owner: `0x${string}`;
       smartAccount: `0x${string}`;
       chainId: number;
+      purpose?: GrantPurpose;
       /** The Privy DID the access token was verified to carry. */
       did: string;
     };
 
 export function bindingMessage(args: BindingClaim): string {
+  // A PERPS CLAIM SAYS SO IN THE SIGNED TEXT, so a signature over a Spot claim
+  // cannot be replayed as a claim on the same owner's Perps wallet. Spot adds
+  // nothing: its text below is frozen.
+  const wallet = grantPurpose(args) === "perps" ? ["Account purpose: perps"] : [];
   if (args.version === "privy-did-owner-v1") {
     // THE DID IS IN THE SIGNED TEXT. Without it the owner signature would say
     // "this key authorizes account X" and name no identity at all — it would
@@ -371,6 +418,7 @@ export function bindingMessage(args: BindingClaim): string {
       `Owner key: ${args.owner.toLowerCase()}`,
       `Identity: ${args.did}`,
       `Chain ID: ${args.chainId}`,
+      ...wallet,
       `URI: ${args.origin}`,
       `Nonce: ${args.nonce}`,
     ].join("\n");
@@ -386,12 +434,15 @@ export function bindingMessage(args: BindingClaim): string {
     `Agent account: ${args.smartAccount.toLowerCase()}`,
     `Owner key: ${args.owner.toLowerCase()}`,
     `Chain ID: ${args.chainId}`,
+    ...wallet,
     `URI: ${args.origin}`,
     `Nonce: ${args.nonce}`,
   ].join("\n");
 }
 
 export interface StoredGrant {
+  /** The wallet this grant is for. Absent on every Spot grant (grantPurpose). */
+  purpose?: GrantPurpose;
   /** Explicit owner recovery reference, independently verified before incident clearing. */
   perpRecovery?: PerpRecoveryReference;
   smartAccount: `0x${string}`;
@@ -557,6 +608,8 @@ export interface StoredGrant {
  * secret of any kind, sealed or not.
  */
 export interface PublicGrantView {
+  /** The wallet, when the grant names one. No Spot grant signed so far names one. */
+  purpose?: GrantPurpose;
   smartAccount?: `0x${string}`;
   owner?: `0x${string}`;
   sessionKeyAddress?: `0x${string}`;
@@ -622,6 +675,7 @@ const SEALED_ADDRESS_FIELDS = [
 export function publicGrantView(grant: unknown): PublicGrantView {
   const g = (typeof grant === "object" && grant !== null ? grant : {}) as Record<string, unknown>;
   const out: PublicGrantView = {};
+  if (isGrantPurpose(g.purpose)) out.purpose = g.purpose;
   const address = (v: unknown): `0x${string}` | undefined =>
     typeof v === "string" && ADDRESS_RE.test(v) ? (v as `0x${string}`) : undefined;
   const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);

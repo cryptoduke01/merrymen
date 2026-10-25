@@ -195,10 +195,10 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
   const now = overrides.now ?? Date.now;
   const secret = overrides.secret ?? secretDefault;
   const recover = overrides.recover ?? recoverMessageAddress;
-  const grants = async () => overrides.grants ?? (await import("../../../worker/src/grant-store")).getGrantStore();
-  const settings = async () => overrides.settings ?? (await import("../../../worker/src/settings-store")).getSettingsStore();
+  const grants = async () => overrides.grants ?? (await import("../../../worker/src/grant-store")).getGrantStore("spot");
+  const settings = async () => overrides.settings ?? (await import("../../../worker/src/settings-store")).getSettingsStore("spot");
   const identities = async () => overrides.identities ?? (await import("../../../worker/src/identity-store")).getIdentityStore();
-  const derive = overrides.derive ?? (async (owner, chain) => (await import("./derive-account")).deriveKernelAccountAddress(owner, chain));
+  const derive = overrides.derive ?? (async (owner, chain) => (await import("./derive-account")).deriveKernelAccountAddress(owner, chain, "spot"));
   const classVault = overrides.classVault ?? (async (factory: Address, account: Address, chain: number) => {
     const [{ createPublicClient }, { chainForId, resolveClassVault }, { webChainRead }] = await Promise.all([import("viem"), import("@merrymen/core"), import("./chain-read")]);
     return resolveClassVault(createPublicClient({ chain: chainForId(chain), transport: webChainRead() }), factory, account);

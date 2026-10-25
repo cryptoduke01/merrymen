@@ -25,19 +25,23 @@ import {
   type EnergyStatus,
   type StoredGrant,
   GRANT_PERP_LIGHTER,
+  grantPurpose,
+  type GrantPurpose,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { readAgentEnergy } from "@/lib/agent-energy";
-import { getGrantStore, GrantReplacementConflict } from "@merrymen/grant-store";
+import { getGrantStore, GrantReplacementConflict, GrantWalletConflict } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
+import { perpsHalf, stopLocalPerpsForKill, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
+import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
 import { errorText } from "../../../../../worker/src/redact-urls";
@@ -247,6 +251,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "grant features must be a list of names" }, { status: 400 });
   }
 
+  // WHICH WALLET (?wallet=; absent is Spot), AND THE GRANT MUST AGREE. Pure,
+  // every mode, before anything is read or stored: a grant only ever lands
+  // in the wallet it names (grantPurpose: absent is Spot).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was saved.");
+  let named: GrantPurpose;
+  try { named = grantPurpose(grant); }
+  catch { return NextResponse.json({ error: "this grant names a wallet this server does not know. Nothing was saved." }, { status: 400 }); }
+  if (named !== wallet) {
+    return NextResponse.json(
+      { error: `this grant is for your ${named} wallet, but the request is for your ${wallet} wallet. Nothing was saved.`, code: "wallet-mismatch" },
+      { status: 400 },
+    );
+  }
+  // NO PERPS WALLET IS MADE OR RENEWED HERE YET (perps slice 2). The stores
+  // can hold one and every kill reaches one; making one waits for slice 5.
+  if (wallet === "perps") return perpsWalletNotOffered("Nothing was saved.");
+
   // PERPETUALS ARE NOT TAKEN BY THIS SERVER YET (perps slice 1). The signers can
   // carry a Lighter key and the canonical wall can rebuild one, but nothing here
   // can mint, seal, hold or stand down a key, so a grant naming one is refused
@@ -441,7 +463,7 @@ export async function POST(req: Request) {
     // not a security boundary so much as a collision guard, and it fails safe:
     // an unreadable store refuses rather than allowing a possible collision.
     try {
-      const holder = await getGrantStore().tenantForAccount(grant.smartAccount);
+      const holder = await getGrantStore("spot").tenantForAccount(grant.smartAccount);
       if (holder && holder !== tenant) {
         return NextResponse.json(
           { error: "this agent account is already linked to a different login" },
@@ -476,7 +498,7 @@ export async function POST(req: Request) {
     // derivation before any equality is computed. See packages/core/derivation.
     let derived: Derivation;
     try {
-      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId);
+      derived = await deriveKernelAccountAddress(grant.owner as `0x${string}`, grant.chainId, "spot");
     } catch (e) {
       // A live eth_call: its error is viem's, and names the RPC URL with its key.
       derived = derivationUnreachable(errorText(e));
@@ -496,9 +518,12 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
     try {
-      await getGrantStore().put(tenant, grant);
+      await getGrantStore("spot").put(tenant, grant);
     } catch (e) {
       if (e instanceof GrantReplacementConflict) return NextResponse.json({ error: e.message, ownerFacing: true }, { status: 409 });
+      // The other wallet's owner, or another login's claim on this account,
+      // decided inside the write (grant-store.ts). Nothing was stored.
+      if (e instanceof GrantWalletConflict) return NextResponse.json({ error: e.message, code: e.code, ownerFacing: true }, { status: 409 });
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
     }
 
@@ -529,8 +554,8 @@ export async function POST(req: Request) {
       account: grant.smartAccount,
       identities: () => getIdentityStore(),
       settings: {
-        get: () => getSettingsStore().get(tenant),
-        put: (s) => getSettingsStore().put(tenant, s),
+        get: () => getSettingsStore("spot").get(tenant),
+        put: (s) => getSettingsStore("spot").put(tenant, s),
       },
       ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
     });
@@ -560,6 +585,12 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  // WHICH WALLET a permission replacement stops (?wallet=; absent is Spot). A
+  // kill names none: it stops every wallet, and a request that names one for
+  // it is refused as ambiguous, as an unqualified DELETE is (below).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was deleted.");
+  const walletNamed = new URL(req.url).searchParams.has(WALLET_PARAM);
   if (isHostedMode()) {
     // The kill switch is per-tenant and authenticated. It forgets the server's
     // session key; the wallet and its funds stay reachable via the owner key
@@ -586,37 +617,93 @@ export async function DELETE(req: Request) {
         return NextResponse.json({ error: "The permission being replaced could not be identified. Reload your wallet and try again." }, { status: 400 });
       }
       try {
-        const state = await getGrantStore().stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
+        const state = await getGrantStore(wallet).stopForReplacement(tenant, body.expectedAccount, body.expectedSession);
         if (state === "changed") return NextResponse.json({ error: "Your permission changed in another tab. Reload your wallet before replacing it." }, { status: 409 });
         return NextResponse.json({ ok: true, replacement: true, state });
       } catch {
         return NextResponse.json({ error: "The service could not confirm the replacement stop. Your wallet was kept; try again.", ownerFacing: true }, { status: 503 });
       }
     }
-    // The Solana strategy is stopped whatever happens to the Robinhood grant: a store that throws
-    // here still leaves the owner's autonomous Solana trading off.
+    if (walletNamed) return killNamesWallet();
+    // The Solana strategy and the Perps wallet are stopped whatever happens to the Robinhood
+    // grant: a store that throws here still leaves the owner's autonomous Solana trading off and
+    // their Perps grant revoked. Neither half waits on the other.
     let removal: unknown = null;
-    try { await getGrantStore().remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
+    try { await getGrantStore("spot").remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
     const solana = await solanaStopped(() => stopSolanaForKill(tenant));
+    const perps = await perpsHalf(() => stopPerpsForKill(tenant));
     if (removal !== null) throw removal;
-    return solanaKilled(solana);
+    return killed(solana, perps);
   }
+  // A SELF-HOSTED RENEWAL STOPS THE WALLET IT NAMES, NOT THE OTHER ONE. Every
+  // self-hosted DELETE has always removed grant.json, renewals too (the new grant
+  // is posted straight after), so the body was never read. It is now, only so a
+  // renewal leaves the other wallet's grant alone: neither wallet's authority
+  // reaches the other. Anything but a readable permission replacement, an
+  // unreadable or oversized body included, is the kill it always was. Read before
+  // the wallet is judged: a renewal may name its wallet, as it may hosted, and
+  // only a kill that names one is refused.
+  let renewal = false;
+  try {
+    const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES);
+    renewal = text !== null && (JSON.parse(text) as { purpose?: unknown } | null)?.purpose === "permission-replacement";
+  } catch { /* a kill */ }
+  if (walletNamed && !renewal) return killNamesWallet();
+  if (renewal && wallet === "perps") return selfHostedPerpsRenewalStop();
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
-  // The local Solana strategy is stopped first, whatever happens to the Robinhood grant: an
-  // archive it cannot write keeps grant.json (and pauses trading instead), and must never
-  // leave autonomous Solana trading running behind a "paused" answer.
+  // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
+  // the Robinhood grant: an archive it cannot write keeps grant.json (and pauses trading
+  // instead), and must never leave autonomous Solana trading or a Perps grant behind a
+  // "paused" answer.
   const solana = await solanaStopped(() => stopLocalSolanaForKill());
+  const perps: PerpsHalf = renewal ? { state: "none" } : await perpsHalf(() => stopLocalPerpsForKill());
   try {
     await removeSelfHostedGrant();
   } catch (e) {
     if (e instanceof GrantArchiveError) {
-      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}`,
-        paused: e.paused, solana: solana ? "stopped" : "not-stopped" }, { status: 409 });
+      return NextResponse.json({ error: `${e.message}${solana ? " Your Solana strategy was stopped." : " Your Solana strategy could not be stopped either: try the kill again."}${perpsAfterKeptGrant(perps)}`,
+        paused: e.paused, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 409 });
     }
     throw e;
   }
-  return solanaKilled(solana);
+  return killed(solana, perps);
+}
+
+/** A `?wallet=` that names no wallet, or more than one. */
+function walletUnknown(nothing: string): NextResponse {
+  return NextResponse.json({ error: `That request names a wallet this server does not know (${WALLET_PARAM}=spot or ${WALLET_PARAM}=perps). ${nothing}` }, { status: 400 });
+}
+/** Perps wallets exist in the stores and every kill reaches one, but none is made, renewed or shown here yet. */
+function perpsWalletNotOffered(nothing: string): NextResponse {
+  return NextResponse.json(
+    { error: `Perps wallets are not offered on this server yet. ${nothing}`, code: "perps-wallet-not-offered", ownerFacing: true },
+    { status: 403 },
+  );
+}
+/**
+ * A self-hosted Perps renewal's first step, as hosted's stopForReplacement of the
+ * Perps grant: the Perps home's grant.json archived, then removed. Nothing of the
+ * Spot wallet's, or Solana's, is touched. (No new Perps grant can be posted until
+ * slice 5, so no client sends this yet.)
+ */
+async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
+  const perps = await perpsHalf(() => stopLocalPerpsForKill());
+  if (perps.state === "not-stopped") {
+    return NextResponse.json(
+      { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ ok: true, replacement: true, state: perps.state === "stopped" ? "stopped" : "absent" });
+}
+
+/** "Kill all agents" stops every wallet; a kill naming one is a client that means something else. */
+function killNamesWallet(): NextResponse {
+  return NextResponse.json(
+    { error: "Kill all agents stops every wallet and cannot be aimed at one. Reload and try again. Nothing was deleted.", ownerFacing: true },
+    { status: 400 },
+  );
 }
 
 /**
@@ -627,13 +714,26 @@ export async function DELETE(req: Request) {
 async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
   try { await stop(); return true; } catch { return false; }
 }
-/** A kill that could not stop the Solana strategy is reported incomplete, never as done. A retry is safe. */
-function solanaKilled(stopped: boolean): NextResponse {
-  if (!stopped) {
-    return NextResponse.json({ error: "Kill incomplete: your Robinhood Chain agent is stopped, but your Solana strategy could not be stopped yet. Try the kill again.",
-      ownerFacing: true, solana: "not-stopped" }, { status: 503 });
+/** What the Perps half did, said after a Robinhood grant the kill had to keep. */
+function perpsAfterKeptGrant(perps: PerpsHalf): string {
+  if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
+  if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
+  return "";
+}
+/**
+ * A kill that could not stop the Solana strategy or revoke the Perps grant is reported
+ * incomplete, never as done. A retry is safe. An owner with neither sees exactly what
+ * they always saw.
+ */
+function killed(solana: boolean, perps: PerpsHalf): NextResponse {
+  const perpsDown = perps.state === "not-stopped";
+  if (!solana || perpsDown) {
+    const what = !solana && perpsDown ? "your Solana strategy could not be stopped and your Perps wallet's grant could not be revoked yet"
+      : !solana ? "your Solana strategy could not be stopped yet" : "your Perps wallet's grant could not be revoked yet";
+    return NextResponse.json({ error: `Kill incomplete: your Robinhood Chain agent is stopped, but ${what}.${perps.why ? ` ${perps.why}` : ""} Try the kill again.`,
+      ownerFacing: true, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 503 });
   }
-  return NextResponse.json({ ok: true });
+  return NextResponse.json(perps.state === "stopped" ? { ok: true, perps: "stopped" } : { ok: true });
 }
 
 /**
@@ -649,7 +749,7 @@ function solanaKilled(stopped: boolean): NextResponse {
  */
 async function tickSecondsFor(hostedTenant: `0x${string}` | null | undefined): Promise<number | null> {
   try {
-    const tick = hostedTenant ? (await getSettingsStore().get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
+    const tick = hostedTenant ? (await getSettingsStore("spot").get(hostedTenant))?.tickSeconds : resolveConfig().tickSeconds;
     return typeof tick === "number" && Number.isFinite(tick) && tick > 0 ? tick : null;
   } catch {
     return null;
@@ -657,11 +757,16 @@ async function tickSecondsFor(hostedTenant: `0x${string}` | null | undefined): P
 }
 
 export async function GET(req: Request) {
+  // Spot's status, and only Spot's: a ?wallet=perps read is refused, never
+  // answered with the Spot wallet's status (the Perps desk lands in slice 5).
+  const wallet = readWalletParam(req);
+  if (wallet === null) return walletUnknown("Nothing was read.");
+  if (wallet === "perps") return perpsWalletNotOffered("Nothing was read.");
   let grant: StoredGrant;
   const hostedTenant = isHostedMode() ? tenantOf(req) : undefined;
   if (hostedTenant !== undefined) {
     if (!hostedTenant) return NextResponse.json({ exists: false, tenant: null } satisfies AgentStatus);
-    const g = await getGrantStore().get(hostedTenant);
+    const g = await getGrantStore("spot").get(hostedTenant);
     if (!g) return NextResponse.json({ exists: false, tenant: hostedTenant } satisfies AgentStatus);
     grant = g;
   } else {

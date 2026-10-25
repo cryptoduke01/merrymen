@@ -99,7 +99,7 @@ function seedMemory(tenant: `0x${string}`): () => void {
 
 it("retains soul, DM and group history through a replacement stop, exit, failed mirror and fresh-key resume", async () => {
   const tenant = address(0xd11);
-  const store = getGrantStore();
+  const store = getGrantStore("spot");
   const assertMemory = seedMemory(tenant);
   const old = new FakeProc(46_001);
   let releases = 0;
@@ -157,7 +157,7 @@ it("retains soul, DM and group history through a replacement stop, exit, failed 
 for (const unreadable of [false, true]) {
   it(`does not forget an unusable key's groups when the public roster is ${unreadable ? "unreadable" : "retained"}`, async () => {
     const tenant = address(unreadable ? 0xd21 : 0xd22);
-    const store = getGrantStore();
+    const store = getGrantStore("spot");
     await store.put(tenant, grantFor());
     const assertMemory = seedMemory(tenant);
     const before = spawned.length;
@@ -166,7 +166,7 @@ for (const unreadable of [false, true]) {
     const originalExpiries = store.listTenantExpiries;
     store.get = async (t) => t === tenant ? null : originalGet.call(store, t);
     if (unreadable) {
-      store.listTenantExpiries = async () => [{ tenant, expiresAt: now + 86_400 }];
+      store.listTenantExpiries = async () => [{ tenant, purpose: "spot", expiresAt: now + 86_400 }];
       store.listTenants = async () => { throw new Error("grant roster temporarily unavailable"); };
     }
     try {
@@ -186,7 +186,7 @@ for (const unreadable of [false, true]) {
 for (const changed of ["stopped", "changed", "unreadable"] as const) {
   it(`refuses to fork an earlier key when authority becomes ${changed} during preparation`, async () => {
     const tenant = address(changed === "stopped" ? 0xd31 : changed === "changed" ? 0xd32 : 0xd33);
-    const store = getGrantStore();
+    const store = getGrantStore("spot");
     const original = grantFor();
     await store.put(tenant, original);
     const assertMemory = seedMemory(tenant);
@@ -219,10 +219,10 @@ for (const changed of ["stopped", "changed", "unreadable"] as const) {
 for (const authority of ["stopped", "expired", "unreadable"] as const) {
   it(`does not start a held bot when authority becomes ${authority} during practice-book preparation`, async () => {
     const tenant = address(authority === "stopped" ? 0xd41 : authority === "expired" ? 0xd42 : 0xd43);
-    const store = getGrantStore(), originalGet = store.get;
+    const store = getGrantStore("spot"), originalGet = store.get;
     const original = grantFor();
     await store.put(tenant, original);
-    await getSettingsStore().put(tenant, {
+    await getSettingsStore("spot").put(tenant, {
       paperTradingEnabled: true, telegramEnabled: true, telegramBotToken: "111:holder-authority", telegramAllowlist: [424242],
     } as never);
     const assertMemory = seedMemory(tenant), before = spawned.length;
@@ -246,7 +246,7 @@ for (const authority of ["stopped", "expired", "unreadable"] as const) {
 }
 
 it("an explicit kill with no running process clears local personal memory before the same wallet can regrant", async () => {
-  const tenant = address(0xd51), store = getGrantStore(), original = grantFor();
+  const tenant = address(0xd51), store = getGrantStore("spot"), original = grantFor();
   await store.put(tenant, original);
   seedMemory(tenant);
   const home = childHome(tenant), file = path.join(home, "merrymen.db");

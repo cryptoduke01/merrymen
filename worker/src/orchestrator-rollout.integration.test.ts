@@ -106,7 +106,7 @@ const said: string[] = [];
 const realLog = console.log;
 console.log = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
 const settle = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
-const store = getGrantStore();
+const store = getGrantStore("spot");
 const used: `0x${string}`[] = [];
 const tenantAt = (n: number) => { const t = address(n); used.push(t); return t; };
 const spawnedFor = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === childHome(tenant));
@@ -445,7 +445,7 @@ describe("one hold predicate, at every path that starts a process", () => {
   it("narrowing during spawn preparation blocks the holder path", async () => {
     const a = tenantAt(0x1b1);
     await store.put(a, grant(address(0x1b2)));
-    await getSettingsStore().put(a, { paperTradingEnabled: true, telegramEnabled: false } as never);
+    await getSettingsStore("spot").put(a, { paperTradingEnabled: true, telegramEnabled: false } as never);
     process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade`;
     setPaperRestoreForTest(async () => {
       process.env.MERRYMEN_FLEET_ROLLOUT = "none";
@@ -461,25 +461,25 @@ describe("one hold predicate, at every path that starts a process", () => {
   it("a hold the rollout stops admitting mid-pass is not handed back (holdMayLeave)", async () => {
     const a = tenantAt(0x1f5), account = address(0x1f6);
     await store.put(a, grant(account));
-    await getSettingsStore().put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
+    await getSettingsStore("spot").put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
     const hold = new FakeProc({}, true);
     await adoptHolderForTest(a, account, hold as unknown as ChildProcess);
     process.env.MERRYMEN_FLEET_ROLLOUT = `${a}:trade`;
     // The scope narrows while the pass reads the held tenant's settings, after
     // its stand-down was decided and before its handover is: only holdMayLeave
     // is left to ask.
-    const real = getSettingsStore();
+    const real = getSettingsStore("spot");
     const narrowing = Object.create(real) as typeof real;
     narrowing.get = async (t) => {
       if (t.toLowerCase() === a) process.env.MERRYMEN_FLEET_ROLLOUT = "none";
       return real.get(t);
     };
-    useSettingsStoreForTest(narrowing);
+    useSettingsStoreForTest(narrowing, "spot");
     try {
       await reconcile();
       await settle();
     } finally {
-      useSettingsStoreForTest(real);
+      useSettingsStoreForTest(real, "spot");
     }
     assert.deepEqual(hold.signals, [], "its hold process is not stopped for a handover that would refuse");
     assert.equal(isHeldForTest(a), true, "it stays held, so its bot is still answered");
@@ -506,8 +506,8 @@ describe("one hold predicate, at every path that starts a process", () => {
     await store.put(b, grant(bAccount));
     // Practice switched off: the gate that held them no longer would, so the
     // pass hands each back to trading, if holdMayLeave lets it.
-    await getSettingsStore().put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
-    await getSettingsStore().put(b, { paperTradingEnabled: false, telegramEnabled: false } as never);
+    await getSettingsStore("spot").put(a, { paperTradingEnabled: false, telegramEnabled: false } as never);
+    await getSettingsStore("spot").put(b, { paperTradingEnabled: false, telegramEnabled: false } as never);
     const aHold = new FakeProc({}, true), bHold = new FakeProc({}, true);
     await adoptHolderForTest(a, aAccount, aHold as unknown as ChildProcess);
     await adoptHolderForTest(b, bAccount, bHold as unknown as ChildProcess);

@@ -207,7 +207,7 @@ describe("the permissions", () => {
       chainId: 4663,
       demoSessionPrivateKey: `0x${"1".repeat(64)}`,
     } as unknown as StoredGrant;
-    await getGrantStore().put(A, grant);
+    await getGrantStore("spot").put(A, grant);
     assert.equal(await grantStoreOwnerReader.hasAgent(A), true);
     assert.equal(await grantStoreOwnerReader.hasAgent(B), false);
     // And through the access reader every web surface uses, with the production reader in place.

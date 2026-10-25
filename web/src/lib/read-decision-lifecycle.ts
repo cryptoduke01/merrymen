@@ -25,7 +25,7 @@ export async function readPublicDecisionLifecycle(
   id: string,
   readDb: typeof withReadDb = withReadDb,
   identities: () => Promise<readonly Identity[]> = () => getIdentityStore().all(),
-  settings: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => getSettingsStore().get(tenant),
+  settings: (tenant: `0x${string}`) => Promise<unknown> = (tenant) => getSettingsStore("spot").get(tenant),
 ) {
   try {
     return await readDb(async (db) => {

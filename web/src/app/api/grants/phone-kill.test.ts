@@ -37,6 +37,7 @@ let auth: typeof import("@/lib/auth");
 const removed: string[] = [];
 const replacements: unknown[][] = [];
 const solanaStopped: string[] = [];
+const perpsAsked: string[] = [];
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grant-phone-kill-"));
@@ -50,8 +51,10 @@ before(async () => {
   auth = await import("@/lib/auth");
   const grants = createRequire(import.meta.url)("../../../../../worker/src/grant-store.ts") as typeof import("../../../../../worker/src/grant-store");
   grants.resetGrantStoreForTest();
-  mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { removed.push(tenant); });
-  mock.method(grants.getGrantStore(), "stopForReplacement", async (...args: unknown[]) => { replacements.push(args); return "stopped"; });
+  mock.method(grants.getGrantStore("spot"), "remove", async (tenant: string) => { removed.push(tenant); });
+  mock.method(grants.getGrantStore("spot"), "stopForReplacement", async (...args: unknown[]) => { replacements.push(args); return "stopped"; });
+  // The kill's Perps half runs on every phone stop too; this owner has no Perps wallet.
+  mock.method(grants.getGrantStore("perps"), "revokeForKill", async (tenant: string) => { perpsAsked.push(tenant); return "absent" as const; });
   const solana = await import("@/lib/solana-binding-store");
   mock.method(solana.getSolanaBindingStore(), "disableForKill", async (tenant: string) => { solanaStopped.push(tenant); return true; });
   ({ DELETE } = await import("./route"));
@@ -67,7 +70,7 @@ after(() => {
   }
   rmSync(home, { recursive: true, force: true });
 });
-beforeEach(() => { removed.length = 0; replacements.length = 0; solanaStopped.length = 0; });
+beforeEach(() => { removed.length = 0; replacements.length = 0; solanaStopped.length = 0; perpsAsked.length = 0; });
 
 /** One phone's stop button: the headers its client puts on the request, signed in as `tenant`. */
 interface Phone { app: string; headers: (tenant: `0x${string}`) => Record<string, string> }
@@ -110,17 +113,19 @@ it("the phones' stop as they shipped it ({}) is refused 400, and the agent keeps
   }
   assert.deepEqual(removed, [], "the Robinhood grant was never removed");
   assert.deepEqual(solanaStopped, [], "and the Solana strategy was never stopped");
+  assert.deepEqual(perpsAsked, [], "nor was the Perps wallet asked to stop");
   assert.deepEqual(replacements, []);
 });
 
-it("the phones' stop naming delete-agent and the signed-in wallet removes the grant and stops the Solana strategy", async () => {
+it("the phones' stop naming delete-agent and the signed-in wallet removes the grant, stops the Solana strategy and reaches the Perps wallet", async () => {
   for (const phone of PHONES) {
-    removed.length = 0; solanaStopped.length = 0;
+    removed.length = 0; solanaStopped.length = 0; perpsAsked.length = 0;
     const response = await stop(phone, OWNER, JSON.stringify({ purpose: "delete-agent", expectedTenant: OWNER }));
     assert.equal(response.status, 200, phone.app);
     assert.deepEqual(await response.json(), { ok: true }, phone.app);
     assert.deepEqual(removed, [OWNER], `${phone.app}: the Robinhood grant is removed`);
     assert.deepEqual(solanaStopped, [OWNER], `${phone.app}: the Solana strategy is stopped`);
+    assert.deepEqual(perpsAsked, [OWNER], `${phone.app}: the Perps half runs as well`);
   }
   assert.deepEqual(replacements, [], "a kill is never taken for a permission replacement");
 });
@@ -132,4 +137,5 @@ it("a phone whose session became another wallet since the tap is refused 409, an
   }
   assert.deepEqual(removed, []);
   assert.deepEqual(solanaStopped, []);
+  assert.deepEqual(perpsAsked, []);
 });

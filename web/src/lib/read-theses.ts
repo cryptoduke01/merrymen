@@ -234,7 +234,7 @@ export function newestNames(found: readonly { agent_id: string; symbol: string; 
   return new Map([...newest].map(([key, v]) => [key, v.name]));
 }
 
-export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore().get(tenant)): Promise<ThesesRead> {
+export async function readTheses(opts: ReadThesesOptions = {}, readDb = withReadDb, identities = () => getIdentityStore().all(), settings = (tenant: `0x${string}`) => getSettingsStore("spot").get(tenant)): Promise<ThesesRead> {
   const limit = Math.min(opts.limit ?? SHOW, 200);
 
   return readDb(async (db): Promise<ThesesRead> => {
