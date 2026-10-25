@@ -66,6 +66,7 @@ import dev.merrymen.app.ui.PagePadH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.accountControlsOf
+import dev.merrymen.app.ui.stopArmedNote
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
@@ -358,7 +359,7 @@ private fun StopControl(signedIn: String?) {
         .clickable(role = Role.Button) {
           if (!armed) {
             armed = true
-            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+            stopNote = stopArmedNote(signedIn)
           } else {
             armed = false
             // The stop goes to the server this page shows, or nowhere (ServerBound).

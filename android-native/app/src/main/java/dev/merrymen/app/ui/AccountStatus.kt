@@ -135,6 +135,22 @@ fun accountControlsOf(signedIn: String?, hosted: Boolean?, canOfferSignIn: Boole
     signOut = signedIn != null,
   )
 
+/**
+ * WHAT THE ARMED STOP SAYS BEFORE THE SECOND TAP. Hosted, the only place there
+ * is a signed-in wallet, removing the grant also deletes the agent's memory
+ * (the orchestrator's forgetTgGroups: personal and Telegram-group memory, in
+ * its home and the shared store), and re-signing does not bring it back. So
+ * the warning says so before the owner confirms, as the web's KillSwitch does.
+ * A self-hosted stop only halts the worker.
+ */
+fun stopArmedNote(signedIn: String?): String =
+  if (signedIn != null) {
+    "Tap again to stop it. This revokes its trading permission until you re-sign, " +
+      "and deletes its memory, which re-signing does not bring back."
+  } else {
+    "Tap again to stop it. This revokes its trading permission until you re-sign."
+  }
+
 /** What the sign-in page may show, in the order it finds out. Only [Open] loads the web sign-in. */
 enum class SignInPage {
   /** The stored server address has not been read yet. */
