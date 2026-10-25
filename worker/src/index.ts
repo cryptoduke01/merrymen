@@ -80,7 +80,9 @@ import {
   grantV4AdapterReaches,
   tokenCoverage,
   uncoveredBasketSymbols,
+  grantPurpose,
   type CircleTier,
+  type GrantPurpose,
   type PriceQuote,
   type StoredGrant,
 } from "../../packages/core/src/index";
@@ -89,7 +91,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, ownerRejectRuleLabel, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -121,7 +123,7 @@ import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-ev
 import { coinDisplayName } from "./coin-name";
 import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
 import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
-import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategies/types";
+import { breakerTripped, drawdownOf, opsHeadroomOf, opsSpent, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { recoveryCommandRefused } from "./recovery-command-barrier";
@@ -135,7 +137,7 @@ import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
-import { bookGaps, composeEquityUsdg } from "./equity";
+import { bookGaps, composeEquityUsdg, peakBasisUsdg, type PerpBookTerm } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { BrainCapabilityProbe } from "./brain-client";
 import { ONCHAIN_FLOW_LENS, flowLensRefused, readFlowEvidence, reviewFlowClient } from "./review-flow";
@@ -289,9 +291,26 @@ import {
   refundEnergy,
   setAgentEnergy,
 } from "./store";
+// THE PERP LANE (perps/lane.ts) and the ledger functions it books through —
+// one object, so the lane reads and writes exactly what a test drives it with.
+import {
+  bookPaperPerp,
+  bumpNonceHighWater,
+  getPerpAccount,
+  getPerpPositions,
+  listSubmittedPerpOrders,
+  perpLaneLedgerFacts,
+  setAgentPerps,
+} from "./store";
+import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore } from "./perps/lane";
+import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
+import { startLighterFeed } from "./perps/feed";
+import { createLighterApi } from "./perps/api";
 import {
   bundlerChainMismatch,
   connectionKey,
+  perpsCeilingNote,
+  perpsKey,
   resolveConfig,
   settingsArmRefusal,
   settingsHoldNotice,
@@ -560,6 +579,7 @@ import {
   getAgentEpoch,
   getAgentFinancials,
   getRiskPeriodPeak,
+  listOpenPerpTransfers,
   restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
@@ -752,6 +772,15 @@ async function main() {
   setMainnetRpc(cfg.rpcMainnet);
   let connKey = connectionKey(cfg);
   let stratKey = strategyKey(cfg);
+  /**
+   * EVERY PERPS FIELD, fingerprinted (settings.ts perpsKey) — a change moves
+   * the perp lane at once (refreshConfig): a lowered leverage, a market taken
+   * out, a switch turned off must not wait for a restart to bind.
+   */
+  let perpsCfgKey = perpsKey(cfg);
+  // An operator who asked for more perps than this build gives is told once.
+  const perpsNote = perpsCeilingNote(process.env.MERRYMEN_PERPS);
+  if (perpsNote) console.log(`[perps] ${perpsNote}`);
 
   /**
    * The official listings this worker may watch, or none.
@@ -3335,6 +3364,22 @@ async function main() {
         // Each paid model window is claimed against today's energy (the
         // registry forwards this only when there is a real model to pay).
         claimWindow: claimReview,
+        // PERPETUALS, when the owner made the strategist their perps driver
+        // (docs/perps.md "The perps route"). Settings re-read every window;
+        // the survivors go to the perp lane as a ONE-SHOT handoff the route
+        // consumes this tick and clears — never this strategy's own intents,
+        // so the route alone orders perp exits before the one entry. The
+        // registry forwards it only with a real model. ONLY ON A PERPS
+        // WALLET'S WORKER: a Spot worker's strategist is never shown perps,
+        // whatever its settings file says.
+        ...(c.workerWallet === "perps"
+          ? {
+              perps: {
+                settings: () => cfg,
+                deliver: (intents: Parameters<typeof perpLane.deliverStrategist>[0]) => perpLane.deliverStrategist(intents),
+              },
+            }
+          : {}),
         // RESEARCH INSTEAD OF GUESSING. Off unless the owner asked for it —
         // it costs several model calls a window instead of one.
         ...(c.deskEnabled
@@ -3513,6 +3558,15 @@ async function main() {
     // A settings.json that stopped parsing leaves `next` on the last good read;
     // the owner is told once that their edit has not taken effect.
     await noteSettingsHeld();
+    // THE PERPS FIELDS: the lane reads settings fresh at every decision, so a
+    // change binds at once; this re-reads the book, says what changed, and
+    // starts the protective loop (and the feed) the moment perps are on.
+    const nextPerps = perpsKey(next);
+    if (nextPerps !== perpsCfgKey) {
+      perpsCfgKey = nextPerps;
+      console.log("[settings] perps settings applied");
+      if (active && cfg.workerWallet === "perps") await perpLane.configChanged().catch((e) => console.error("[perps] config change:", e));
+    }
     // Adding a token in /settings is the common way this drifts — say so on the
     // next tick rather than at the next re-arm, which might never come.
     if (active) await noteTokenCoverage(active.agentId);
@@ -3634,6 +3688,82 @@ async function main() {
       );
     }
   };
+
+  // ── THE PERP LANE (docs/perps.md; perps/lane.ts) ────────────────────────
+  //
+  // Everything perps do lives in perps/lane.ts, built from this process's own
+  // edges so a test drives the same lane: the armed agent, the settings, the
+  // rail (execMode, asked fresh at every decision), the fleet feed FILE (never
+  // the network — feed-reader.ts), this file's budget halves and its decision
+  // and event writers. What stays here is where each is called from.
+  //
+  // THE LANE'S LOCK IS ALSO THE PAPER BOOK'S. The paper engine books a perp
+  // action as a DELTA on paper_book cash, on the protective loop's own clock;
+  // every read-modify-write of that row below (the spot paper fill, the paper
+  // peak, the reset) runs through perpLane.serial, and the tick reads paper
+  // cash and the perp term in one hold (readWithBook). See lane.ts's header.
+  const perpStore: PerpLaneStore = {
+    bumpNonceHighWater,
+    getPerpPositions,
+    getPaperBook,
+    bookPaperPerp,
+    listSubmittedPerpOrders,
+    getPerpAccount,
+    perpLaneLedgerFacts,
+    getAgentEpoch,
+    setAgentPerps,
+  };
+  /**
+   * ONE LIGHTER FEED PER SELF-HOSTED PROCESS, started the first time the lane
+   * is on (lane.ts createPerpFeedHost). A hosted child never starts one: it
+   * reads the fleet's `lighter-feed.json` from MERRYMEN_FLEET_HOME.
+   */
+  const perpFeed = createPerpFeedHost({
+    hostedChild: () => isHostedChildProcess(),
+    wanted: () => cfg.perpsEnabled || (perpLane.last()?.held ?? false),
+    start: () =>
+      startLighterFeed({
+        marketIds: () => perpLane.feedMarketIds(),
+        outPath: lighterFeedPath(merrymenHome()),
+        home: merrymenHome(),
+        // THE PUBLIC CLIENT: market data never bills a tenant's L1 bucket.
+        api: createLighterApi({ home: merrymenHome(), budgetKey: "public" }),
+        logger: (line) => console.log(`[perps feed] ${line}`),
+      }),
+    log: (line) => console.log(line),
+  });
+  const perpLane = createPerpLane({
+    store: perpStore,
+    // ONLY A PERPS WALLET'S WORKER EVER ARMS THE LANE (settings.ts
+    // workerWalletOf; syncGrant refuses the other wallet's grant). On a Spot
+    // worker it is never armed: no perp table is read, no feed starts, the
+    // perp term is the known zero and every path is the one it always was.
+    armed: () =>
+      active && cfg.workerWallet === "perps"
+        ? { agentId: active.agentId, smartAccount: active.grant.smartAccount, limits: active.limits }
+        : null,
+    config: () => cfg,
+    execMode: () => execMode(),
+    readFeed: (nowMs) => readLighterFeed(lighterFeedPath(merrymenHome()), nowMs),
+    now: () => Date.now(),
+    agentState: (equity) => perpAgentState(equity.equityUsdg, equity.equityKnown),
+    budget: {
+      // The same two in-flight halves every other intent reserves against,
+      // so a spot buy judged while a perp open is booking sees it.
+      reserve: (spend) => {
+        inFlightOps += 1;
+        inFlightSpentUsdg += spend;
+      },
+      release: (spend) => {
+        inFlightOps -= 1;
+        inFlightSpentUsdg -= spend;
+      },
+      refresh: () => (active ? refreshBudget(active.agentId) : Promise.resolve()),
+    },
+    events: (level, message) => (active ? addEvent(active.agentId, level, message) : Promise.resolve()),
+    decide: (intent, source, reason, known) => ensureDecision(intent, source, reason, known),
+    onActive: () => perpFeed.ensure(),
+  });
 
   /**
    * Narrow adapter over a live client — raw eth_getLogs (topics-based) and the
@@ -4727,6 +4857,33 @@ async function main() {
   /** The live breaker's peak when no risk period stands: the lifetime mark plus what held looks saw above it. */
   const lifetimeBreakerPeak = () => highWaterMarkUsdg + heldBreakerLiftUsdg;
   const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? lifetimeBreakerPeak());
+  /**
+   * THE PERP VENUE'S SIDE OF THE BOOK, as the perp lane last read it (docs/
+   * perps.md rules 11 and 12; equity.ts PerpBookTerm) — the one seam every
+   * equity, peak and policy site below reads, so the lane that reads Lighter
+   * sets it in one place and nothing composes the venue a second way.
+   *
+   *   undefined — this agent has no perps: a KNOWN zero, Lighter is never
+   *               read, and every path is byte-identical to before perps.
+   *   "unread"  — it has perps and the venue did not read: no equity row, no
+   *               peak, no fee, and every non-exit intent refused while
+   *               `perpLastKnownMicro` is not a read zero; exits still run.
+   *   a part    — C, ΣM, ΣU and T from one snapshot.
+   *
+   * ASSIGNED BY THE TICK ALONE, from the perp lane's read (perps/lane.ts):
+   * on paper in the SAME hold of the lane's lock as the paper cash it is
+   * added to (readWithBook), on live from the lane's refresh (the known zero
+   * in this build — no live perps exist yet). A protective pass or an intent
+   * re-reads the book for itself and never writes this, so a tick's equity is
+   * never one read's cash beside another read's margin. (Typed by assertion
+   * so the compiler does not narrow a not-yet-assigned `let` to its
+   * initialiser inside the closures that read it.)
+   */
+  let perpBook = undefined as PerpBookTerm;
+  /** C + ΣM + ΣU + T at the last venue read that succeeded (micro-USDG); null before any. */
+  let perpLastKnownMicro = null as bigint | null;
+  /** Whether the owner has been told about the current Lighter outage — once per outage, like `notedUnpriced`. */
+  let perpUnreadNoted = false;
   /**
    * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
    * not caught up — on purpose.
@@ -6683,8 +6840,17 @@ async function main() {
           "real positions and trades are never deleted.",
       };
     }
-    const opened = await resetPaperLedger(id, cfg.paperStartUsdg);
-    if (trenchBrain.reset()) tgDeliver(tgBook.reset());
+    // UNDER THE PERP LANE'S LOCK, AND THE LANE FORGETS WITH IT. The reset
+    // clears the paper perp book with the spot one (store.ts resetPaperLedger)
+    // and the epoch moves; a protective pass booking in between would land a
+    // stop's proceeds in the new book, and a breach clock, a cooldown or an
+    // entry candle remembered from the old book would act on one that no
+    // longer exists (perps/lane.ts resetPaper).
+    const opened = await perpLane.resetPaper(async () => {
+      const epoch = await resetPaperLedger(id, cfg.paperStartUsdg);
+      if (trenchBrain.reset()) tgDeliver(tgBook.reset());
+      return epoch;
+    });
     await addEvent(
       id,
       "ok",
@@ -7146,6 +7312,37 @@ async function main() {
         lastArmFailure = settingsRefusal;
         console.log(`[worker] NOT ARMING — ${settingsProblem()?.why ?? "settings.json is unusable"}`);
         await addEvent(agentId, "err", settingsRefusal);
+      }
+      active = null;
+      return false;
+    }
+
+    // NEVER THE OTHER WALLET'S AUTHORITY (docs/perps.md "One login, two
+    // wallets"). The grant says which wallet it is for, signed; the process
+    // was started for one (settings.ts workerWalletOf). A Perps grant in a
+    // Spot worker's home, or a Spot grant in a Perps worker's, is refused here,
+    // before anything is built from it — so the environment alone can neither
+    // put perps on a Spot grant nor spot trading on a Perps one. Checked before
+    // the unchanged short-circuit, so a grant replaced under an armed worker is
+    // judged too. A purpose the grant spells wrong is refused the same way.
+    let grantWallet: GrantPurpose | null;
+    try {
+      grantWallet = grantPurpose(grant);
+    } catch {
+      grantWallet = null;
+    }
+    if (grantWallet !== cfg.workerWallet) {
+      const agentId = await ensureAgent(grant);
+      const why =
+        grantWallet === null
+          ? "the signed permission names a wallet this version does not know, so it is not armed"
+          : `the signed permission is for the ${grantWallet === "perps" ? "Perps" : "Spot"} wallet, and this worker runs the ` +
+            `${cfg.workerWallet === "perps" ? "Perps" : "Spot"} wallet, so it is not armed here`;
+      await setAgentStatus(agentId, "error");
+      if (lastArmFailure !== why) {
+        lastArmFailure = why;
+        console.log(`[worker] NOT ARMING — ${why}`);
+        await addEvent(agentId, "err", why);
       }
       active = null;
       return false;
@@ -7739,6 +7936,22 @@ async function main() {
     suppressedIntents.clear();
     entryGateRows.clear();
     execBackoff.clear("armed");
+    // THE PERP LANE, ARMED WITH THE AGENT — HERE, the first thing after
+    // `active` is set, and not at the end of this tail. Every await below
+    // (the in-flight reconcile, the energy pin, refreshBudget, the epoch,
+    // the financials, the status and event writes) can throw; one that did
+    // left `active` set, so syncGrant's `unchanged` short-circuit never ran
+    // this tail again, and the protective loop — the only thing that fires a
+    // paper stop, liquidates, or closes on liquidation proximity — was never
+    // started for this arm, however much was held (the review's S3-02).
+    // armed() forgets per-arm memory, says the rail once for this arm and
+    // starts the loop whatever the lane holds; from here it runs on its own
+    // clock — never from tick() — so pause, an unread market, a book hold,
+    // the breaker or a tick's early return cannot switch it off (rules 8,
+    // 8a; protect.ts). It reads only the ledger and the feed file, nothing
+    // the steps below produce.
+    // A Spot wallet's worker never starts it: no loop, no timer, no read.
+    if (cfg.workerWallet === "perps") await perpLane.armed().catch((e) => console.error("[perps] arm:", e));
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -7809,6 +8022,7 @@ async function main() {
     // against the current settings rather than carrying the old verdict forward.
     lastCoverageKey = null;
     await noteTokenCoverage(agentId);
+    // (The perp lane was armed right after `active` was set, above.)
     return true;
   }
 
@@ -7844,6 +8058,12 @@ async function main() {
    */
   /** A swap or curve trade whose proceeds are cash: an exit, which spends no budget. */
   function returnsCash(intent: TradeIntent): boolean {
+    // PERPS: the perp lane owns execution and its own budget rows (store.ts
+    // perp budget). Named here so the reservation arithmetic never reads a
+    // perp intent through token legs it does not have: an exit, a withdrawal
+    // and a claim spend nothing; an open and a deposit do.
+    if (intent.kind === "perp-order") return intent.reduceOnly === true;
+    if (intent.kind === "perp-margin") return intent.direction !== "deposit";
     const out = tokenLegs(intent).buy_token;
     return out !== undefined && out.toLowerCase() === (CASH.USDG as string).toLowerCase();
   }
@@ -7857,6 +8077,11 @@ async function main() {
     // purchase by kind OR by these legs, and a row that lost its kind to a
     // rewrite would otherwise be invisible to both after a crash.
     if (intent.kind === "energy-buy") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
+    // PERPS HAVE NO TOKEN LEGS, by name rather than by falling through: an L2
+    // order moves no ERC-20, and a margin leg's one token (USDG) is the route's,
+    // not a leg a producer chose. The perp lane owns execution and writes its
+    // own tables (docs/perps.md, "the trades boundary").
+    if (intent.kind === "perp-order" || intent.kind === "perp-margin") return {};
     return {};
   }
 
@@ -7894,6 +8119,16 @@ async function main() {
         symbol: symbolOfToken(buying ? intent.assetOut : intent.assetIn),
         sizeUsdg: usdgNum(intent.notionalUsdg),
       };
+    }
+    // PERPS, NAMED — the perp lane owns execution; this only labels the
+    // decision row. `open-long`, `close-short`…: the effect and the side HELD,
+    // never "buy"/"sell" (a short is never spelled "sell"), with the market key
+    // as the symbol so nothing groups a BTC-PERP decision with spot BTC.
+    if (intent.kind === "perp-order") {
+      return { action: `${intent.effect}-${intent.side}`, symbol: intent.market, sizeUsdg: usdgNum(intent.notionalUsdg) };
+    }
+    if (intent.kind === "perp-margin") {
+      return { action: `perp-${intent.direction}`, sizeUsdg: usdgNum(intent.amountUsdg) };
     }
     return { action: intent.kind, sizeUsdg: usdgNum(intent.amountUsdg) };
   }
@@ -8370,6 +8605,11 @@ async function main() {
     // wall an unpriceable asset has. It has to cover the venue where nothing
     // else does.
     if (!active) return undefined;
+    // PERPS ARE NOT SCOUT POSITIONS: a perp is priced by the venue's own mark,
+    // and an unread mark is refused by the perp branch itself (market-inactive,
+    // perp-unpriced) — there is no unpriceable token to budget. The perp lane
+    // owns execution; named so no perp intent is read for a buy token.
+    if (intent.kind === "perp-order" || intent.kind === "perp-margin") return undefined;
     const buyToken =
       intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
     if (!buyToken) return undefined;
@@ -8645,6 +8885,33 @@ async function main() {
     });
   }
 
+  /**
+   * THE ACCOUNT-WIDE HALF OF AgentState FOR A PERP INTENT THE PROTECTIVE LOOP
+   * SENDS (perps/lane.ts deps.agentState) — processIntentLocked passes its
+   * own `state` instead. The loop sends only reduce-only closes, which the
+   * perp branch answers before any brake (rule 8), so nothing here can refuse
+   * one; it is still composed from the same counters and the same peak a spot
+   * intent meets, so no reader ever sees a default standing in for a figure.
+   */
+  async function perpAgentState(equityUsdg: bigint, equityKnown: boolean): Promise<Omit<AgentState, "perp">> {
+    const agentId = active?.agentId ?? "";
+    return {
+      spentTodayUsdg: spentToday(),
+      opsToday: opsTodayCount(),
+      highWaterMarkUsdg: paperActive()
+        ? highWaterMarkUsdg
+        : usdg(
+            (await getRiskPeriodPeak(agentId)) ??
+              (markBook === "paper" ? (await getAgentFinancials(agentId)).hwmUsdg : usdgNum(lifetimeBreakerPeak())),
+          ),
+      equityUsdg,
+      equityKnown,
+      perpVenueUnread: perpBook === "unread",
+      perpLastKnownMicro,
+      nowSec: Math.floor(Date.now() / 1000),
+    };
+  }
+
   async function processIntentLocked(
     intent: TradeIntent,
     equityUsdg: bigint,
@@ -8765,13 +9032,16 @@ async function main() {
       intent.kind === "swap" ||
       intent.kind === "equity-order" ||
       intent.kind === "curve-trade" ||
-      intent.kind === "energy-buy"
+      intent.kind === "energy-buy" ||
+      intent.kind === "perp-order"
         ? intent.notionalUsdg
         : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
     // on the broker rail. Step 5's schema work gives broker rows their own
-    // columns — until then the ticker in `target` keeps the tape readable.
-    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
+    // columns — until then the ticker in `target` keeps the tape readable. A
+    // perp intent has none, and never writes a `trades` row (below).
+    const perpIntent = intent.kind === "perp-order" || intent.kind === "perp-margin";
+    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : perpIntent ? "" : intent.target;
 
     // ── ADMISSION, BEFORE ANYTHING ELSE IS ASKED ────────────────────────────
     //
@@ -8793,6 +9063,15 @@ async function main() {
     if (admissionRule) {
       // Counted, not read — one line per refusal, as the policy's own.
       console.log(`[admission] REFUSED ${intent.kind}: ${admissionRule} (level ${admission.level}${draining ? ", draining" : ""})`);
+      // A PERP INTENT IS REFUSED WITHOUT A `trades` ROW: that table is the
+      // public tape, and nothing perp reaches it (docs/perps.md "the trades
+      // boundary", rule 17). The answer still reaches an owner's order through
+      // lastTradeOutcome, as the perp lane's own refusals do; the tenant's
+      // level is the account's fact and is said for the account, not per order.
+      if (perpIntent) {
+        lastTradeOutcome = { status: "rejected", rejectRule: admissionRule };
+        return;
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -8818,8 +9097,40 @@ async function main() {
           ),
       equityUsdg,
       equityKnown,
+      // LIGHTER DARK, NOTHING NEW (rule 11; policy.ts perp-unpriced). From the
+      // latest venue read, whoever placed this — a tick, the app, Telegram:
+      // the venue's state is the account's, not the order's. An agent with
+      // no perps is `undefined` there, so this is false and refuses nothing.
+      perpVenueUnread: perpBook === "unread",
+      perpLastKnownMicro,
+      // EVERYTHING THE PERP BRANCH JUDGES AN OPEN BY, from the lane's last
+      // read (view.ts buildPerpPolicyState) — on every intent, so no perp
+      // intent is ever judged against its absence. A perp intent is re-judged
+      // below against a FRESH read taken under the lane's lock.
+      perp: perpLane.policyState(),
       nowSec: Math.floor(Date.now() / 1000),
     };
+    // ── PERPS: THE PERP LANE OWNS EXECUTION (docs/perps.md; perps/lane.ts) ──
+    //
+    // A perp order is an L2 order, never a UserOp, and it writes the perp
+    // tables, never `trades` ("the trades boundary") — so none of the EVM,
+    // broker or spot-paper machinery below may see one. The lane judges it on
+    // the proposed terms, has the executor price it, judges the REVIEWED
+    // terms again, reserves this intent's op and spend in the same in-flight
+    // halves `state` was read from, books it, re-reads the settled halves and
+    // releases (recordTrade's order, with a finally on every exit). The rail
+    // is decided INSIDE, from execMode() as it stands now — never a rail
+    // computed before this intent reached the chain (the broker lane's
+    // consent-fork lesson above): a live account resolves to
+    // `perp-live-not-yet` and no live executor exists to be reached. A
+    // refusal is the owner's (events, once per change) and never a `trades`
+    // row: that table is the public tape, which a perp never reaches
+    // (rule 17). What happened comes back as this intent's own facts, so an
+    // energy claim is refunded when nothing was placed.
+    if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+      lastTradeOutcome = await perpLane.execute(intent, { equityUsdg, equityKnown }, state);
+      return;
+    }
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
 
     // This check belongs inside the intent queue, beside the grant's caps.
@@ -9107,20 +9418,38 @@ async function main() {
     }
     if (execRail.mode === "paper") {
       // ── PAPER FILL: same wall, simulated execution at the live oracle px ──
-      const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      const fill = applyPaperIntent(
-        intent,
-        { cashUsdg: bookRow.cashUsdg, vaultUsdg: bookRow.vaultUsdg, hwmUsdg: bookRow.hwmUsdg },
-        paperPositionsOf(bookRow.shares),
-        {
-          priceUsdOf: paperPriceOf,
-          symbolOf: paperSymbolOf,
-          multiplierOf: paperMultiplierOf,
-          usdgAddress: CASH.USDG as `0x${string}`,
-          slippageBps: cfg.slippageBps,
-          notionalUsdg: usdgNum(notional),
-        },
-      );
+      //
+      // READ, FILL AND WRITE IN ONE HOLD OF THE PERP LANE'S LOCK. setPaperBook
+      // writes the whole row, cash included, from this read — and the paper
+      // perp engine books margin and P&L as a DELTA on that same cash, on the
+      // protective loop's own clock (perps/lane.ts). A delta landing between
+      // this read and this write would be written over: margin gone, or a
+      // stop's proceeds never paid. Ledger work only, so the hold is short.
+      const { fill } = await perpLane.serial(async () => {
+        const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
+        const fill = applyPaperIntent(
+          intent,
+          { cashUsdg: bookRow.cashUsdg, vaultUsdg: bookRow.vaultUsdg, hwmUsdg: bookRow.hwmUsdg },
+          paperPositionsOf(bookRow.shares),
+          {
+            priceUsdOf: paperPriceOf,
+            symbolOf: paperSymbolOf,
+            multiplierOf: paperMultiplierOf,
+            usdgAddress: CASH.USDG as `0x${string}`,
+            slippageBps: cfg.slippageBps,
+            notionalUsdg: usdgNum(notional),
+          },
+        );
+        if (fill.ok) {
+          await setPaperBook(agentId, {
+            cashUsdg: fill.book.cashUsdg,
+            vaultUsdg: fill.book.vaultUsdg,
+            hwmUsdg: bookRow.hwmUsdg,
+            shares: Object.fromEntries(fill.positions.map((p) => [p.symbol, { token: p.token, shares: p.shares }])),
+          });
+        }
+        return { fill };
+      }, "spot paper fill");
       if (!fill.ok) {
         console.log(`[paper] refused ${intent.kind}: ${fill.reason}`);
         await addEvent(agentId, "warn", `paper fill refused: ${fill.reason}`);
@@ -9134,12 +9463,6 @@ async function main() {
         });
         return;
       }
-      await setPaperBook(agentId, {
-        cashUsdg: fill.book.cashUsdg,
-        vaultUsdg: fill.book.vaultUsdg,
-        hwmUsdg: bookRow.hwmUsdg,
-        shares: Object.fromEntries(fill.positions.map((p) => [p.symbol, { token: p.token, shares: p.shares }])),
-      });
       // The reservation covers the window between here and the row landing.
       // Only recordTrade releases it, and the awaited store writes in between
       // can throw — which would leak an op into inFlightOps for the LIFE OF THE
@@ -11385,6 +11708,19 @@ async function main() {
    * tick it is. See runCommandTick at the run loop.
    */
   let commandTick = false;
+  /**
+   * THE PAPER PEAK, AND NOTHING ELSE ON THE ROW. setPaperBook writes the whole
+   * paper_book row; the peak is re-read and written inside one hold of the
+   * perp lane's lock, so a cash delta the paper perp engine booked since the
+   * tick's read (perps/lane.ts header) is carried, never written over.
+   */
+  async function writePaperPeak(agentId: string, hwmUsdg: number): Promise<void> {
+    await perpLane.serial(async () => {
+      const fresh = await getPaperBook(agentId, cfg.paperStartUsdg);
+      await setPaperBook(agentId, { ...fresh, hwmUsdg });
+    }, "paper peak");
+  }
+
   let nominationTick = false;
   async function tick() {
     // A COMMAND TICK is this same tick with its producers left out: the same
@@ -11621,7 +11957,16 @@ async function main() {
     const cashReadAtSec = Math.floor(Date.now() / 1000);
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
-      const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
+      //
+      // AND ITS PERP HALF IN THE SAME BREATH (docs/perps.md rules 12, 14): the
+      // paper perp engine draws margin from this very cash, so the cash and the
+      // perp term (C + ΣM + ΣU) are read in ONE hold of the perp lane's lock. A
+      // stop filling on the protective loop's clock between two separate reads
+      // would count its margin in both, and every peak would ratchet on it.
+      const paperRead = await perpLane.readWithBook(() => getPaperBook(agentId, cfg.paperStartUsdg));
+      const bookRow = paperRead.value;
+      perpBook = paperRead.read.book;
+      perpLastKnownMicro = paperRead.read.lastKnownMicro;
       balances = { ethWei: 0n, cashUsdg: usdg(bookRow.cashUsdg), vaultUsdg: usdg(bookRow.vaultUsdg) };
       positions = [];
       // Multipliers are a property of the token, not of a holding, so they matter
@@ -12136,7 +12481,44 @@ async function main() {
     lastQuarantinedKnown = true;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
-    const bookIncomplete = unknownCost.length > 0;
+    // A LIVE BOOK'S PERP HALF. No live perps exist in this build (perps/lane.ts
+    // perpsRailOf: a live account with perps on is refused `perp-live-not-yet`),
+    // so the lane reads nothing and this is the known zero of an agent with
+    // no perps — while the read still says why nothing opens, for the report.
+    // (The paper book's half was read with its cash, above.)
+    if (!paper) {
+      const liveRead = await perpLane.refresh();
+      perpBook = liveRead.book;
+      perpLastKnownMicro = liveRead.lastKnownMicro;
+    }
+    // agents.perps, from this tick's read (lane.ts: written only on a change).
+    await perpLane.report().catch(() => {});
+    // THE VENUE, AS THIS TICK TAKES IT — one snapshot of the perp lane's read,
+    // so the equity, the peak basis and the row below are all the SAME read
+    // even if the lane re-reads Lighter mid-tick (docs/perps.md rule 12).
+    const perpTerm = perpBook;
+    // AN UNREAD VENUE IS A BOOK GAP (rule 11), and it rides THIS path — the
+    // unknown-cost one — not the unread-balance return above. That return ends
+    // the tick before anything is proposed, which would switch off every spot
+    // stop-loss for as long as Lighter is down; the contract instead keeps
+    // exits running and refuses every non-exit by name (policy.ts
+    // perp-unpriced). So: no equity row, no peak, no fee, equity judged as
+    // unknown — and strategies still run, so the owner can always get out.
+    const venueGap = bookGaps({ unreadBalances: [], positionsReadFailed: false, missingPrice: [], perp: perpTerm });
+    const bookIncomplete = unknownCost.length > 0 || venueGap.length > 0;
+    if (venueGap.length > 0 && !perpUnreadNoted) {
+      perpUnreadNoted = true; // once per outage, not once per tick
+      await addEvent(
+        agentId,
+        "warn",
+        perpLastKnownMicro === 0n
+          ? `couldn't read Lighter this tick — it held nothing when last read, so trading continues, but equity, P&L ` +
+              `and the drawdown breaker are paused until it reads (fail-closed); this is a data gap, not a loss`
+          : `couldn't read Lighter this tick — equity, P&L, the high-water mark and the fee are paused, and nothing new ` +
+              `is opened (spot included) until it reads; exits still go out. This is a data gap, not a loss`,
+      );
+    }
+    if (venueGap.length === 0) perpUnreadNoted = false;
     if (unpricedByDesign.length > 0 && !notedUnpriced) {
       notedUnpriced = true; // once per run, not once per tick — this never clears
       // Say WHY. "No price feed" was true but useless once pool pricing exists:
@@ -12156,7 +12538,7 @@ async function main() {
       // condition `bookIncomplete` reports separately and by name.
       console.log(
         `[tick] held ${why} — carried at cost, not at a mark` +
-          (bookIncomplete
+          (unknownCost.length > 0
             ? `; ${unknownCost.join(",")} has no cost on record either, so equity and the breaker are paused`
             : `; equity and the breaker keep running`),
       );
@@ -12175,6 +12557,13 @@ async function main() {
     // quarantined holdings at cost. The cost term is what stops a scout buy from
     // reading as an instant loss: cash left the wallet, so without it equity
     // would drop by the full spend and book a drawdown that never happened.
+    //
+    // AND THE PERP VENUE (rule 12): C + ΣM + ΣU + T, read — or, for an agent
+    // with no perps, absent, which composes exactly the sum above. An UNREAD
+    // venue is left out of this figure and the figure is then PARTIAL:
+    // `bookIncomplete` says so, so it writes no row, moves no peak, charges no
+    // fee and is judged as unknown — the same treatment an unknown cost gets.
+    const perpRead = perpTerm === "unread" ? undefined : perpTerm;
     const equityUsdg = composeEquityUsdg({
       // PLUS THE QUOTE ASSET SITTING IN THE CLASS VAULT. It is the owner's
       // money at an address `readAccountBalances` does not cover, and it is
@@ -12184,6 +12573,7 @@ async function main() {
       vaultUsdg: balances.vaultUsdg,
       positionsUsdg,
       quarantinedCostUsdg: quarantine.totalCostUsdg,
+      perp: perpRead,
     });
 
     // Reconcile LIVE cost basis against the chain. A live fill is booked from
@@ -12389,6 +12779,13 @@ async function main() {
       if (p.priceSource === "sampled") sampledCost.set(p.symbol, (await getBasis(agentId, qMode, p.symbol)).costUsdg);
     }
     const peakEquityUsdg = equityUsdg - sampledGainUsdg(positions, (symbol) => sampledCost.get(symbol) ?? null);
+    // AND NO OPEN PERP GAIN EITHER (docs/perps.md rule 12): the peak basis is
+    // that figure less each open perp gain, per position (equity.ts
+    // peakBasisUsdg). The breaker's CURRENT figure stays `equityUsdg` — every
+    // unrealized loss is judged — while the paper peak, the risk-period peak,
+    // the lifetime mark and its fee, and the held-look lift below all take
+    // this. With no perps it IS peakEquityUsdg.
+    const peakBasis = peakBasisUsdg(peakEquityUsdg, perpRead);
     // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
     // observation, the fee and the mark, and the equity row — decided in
     // command-wake.ts tickRatchets, where a test runs every guard. A command
@@ -12402,7 +12799,14 @@ async function main() {
     // the drawdown one would trip the breaker on a token we simply can't price.
     // Skipped entirely; strategies below still run, so the position can be sold.
     if (bookIncomplete) {
-      console.log(`[account] book incomplete (${unknownCost.join(",")} unpriced AND no cost on record) — equity, HWM, fee and breaker skipped this tick`);
+      console.log(
+        `[account] book incomplete (` +
+          [
+            ...(unknownCost.length > 0 ? [`${unknownCost.join(",")} unpriced AND no cost on record`] : []),
+            ...(venueGap.length > 0 ? [`${venueGap.join(",")} could not be read`] : []),
+          ].join("; ") +
+          `) — equity, HWM, fee and breaker skipped this tick`,
+      );
     } else if (paper) {
       // Paper profit accrues NO fees and never touches the persistent agent
       // HWM — mixing paper peaks into real accounting would trip the breaker
@@ -12418,7 +12822,13 @@ async function main() {
       // Raised past the recorded peak and written only on a regular tick with no
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
-      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(peakEquityUsdg), (b) => setPaperBook(agentId, b)));
+      // ON THE PEAK BASIS (rule 12): a paper perp's open gain is no more money
+      // than a live one's, and this peak is what the paper breaker judges.
+      // WRITTEN AS THE PEAK ALONE (writePaperPeak): the row this peak was read
+      // beside may have moved since — a paper stop filling on the protective
+      // loop's clock pays its margin back into this cash — and writing the
+      // whole row back would erase that.
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(peakBasis), (b) => writePaperPeak(agentId, b.hwmUsdg)));
       markBook = "paper";
       // The mark is the paper book's now, until a live tick re-reads the live
       // one (livePeaksStale); a live lift observed above the live mark means
@@ -12464,18 +12874,48 @@ async function main() {
       // a figure no unbooked deposit can reach (heldCashBaseline) — and the row
       // is written, flagged, so neither the restart baseline nor the hosted
       // anchor ever takes its cash.
-      if (flows === "held") {
+      //
+      // AND PERP MARGIN IN MOTION HOLDS THEM THE SAME WAY (docs/perps.md rule
+      // 12c). While any perp_transfers row is not yet final the same USDG may
+      // be counted at home and at the venue — a payout in cash before the
+      // venue's history says it left, a deposit in transit and already
+      // credited — and no order of reads rules that out, so safety comes from
+      // the hold: no fee, no lifetime peak, and the breaker's peak observation
+      // leaves the transit term out entirely (every error downward). A store
+      // read that fails is held too: the query exists to prove nothing is
+      // moving, and an unanswered question proves nothing. An agent with no
+      // perps has no rows, and this is the tick it always was.
+      //
+      // The venue read's own transit term holds too: T > 0 is money the lane
+      // found between the two places (a pending balance on the contract
+      // included), whether or not a row of ours names it yet.
+      let transitHeld: boolean;
+      try {
+        // A Spot wallet's worker holds no perp transfer and reads no perp table.
+        transitHeld =
+          cfg.workerWallet === "perps" &&
+          ((perpRead?.inTransitMicro ?? 0n) > 0n || (await listOpenPerpTransfers(agentId, "live")).length > 0);
+      } catch (e) {
+        console.log(`[account] perp transfers unreadable (${e instanceof Error ? e.message : String(e)}) — ratchets held this tick`);
+        transitHeld = true;
+      }
+      if (flows === "held" || transitHeld) {
         ratchet = tickRatchets(plan, {
           incomplete: bookIncomplete,
           curveMarked: curveMarked.length,
-          held: true,
+          held: flows === "held",
+          transitHeld,
           breakerObservationUsdg: heldBreakerObservationUsdg({
             // The same figure every other peak is judged on: sampled holdings
-            // at min(mark, cost). A held look still observes the breaker, and
-            // raw equity here would let a sampled mark raise its peak.
-            equityUsdg: peakEquityUsdg,
+            // at min(mark, cost) and no open perp gain (peakBasis). A held look
+            // still observes the breaker, and raw equity here would let a
+            // sampled mark or a perp wick raise its peak.
+            equityUsdg: peakBasis,
             cashUsdg: balances.cashUsdg,
-            expectedCashUsdg: await heldCashBaseline(agentId),
+            // A look that was NOT held explained its cash — nothing above what
+            // the account holds is unbooked — so only the transit comes out.
+            expectedCashUsdg: flows === "held" ? await heldCashBaseline(agentId) : balances.cashUsdg,
+            inTransitUsdg: perpRead?.inTransitMicro ?? 0n,
           }),
         });
       }
@@ -12521,7 +12961,7 @@ async function main() {
       // — null asks without observing (risk-period.ts markRiskPeriod), and
       // tickRatchets passes null on a command tick or under a curve mark. On a
       // held tick it passes the held observation, never the raw equity.
-      const riskPeak = await ratchet.riskPeak(usdgNum(peakEquityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      const riskPeak = await ratchet.riskPeak(usdgNum(peakBasis), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -12546,7 +12986,10 @@ async function main() {
       }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(peakEquityUsdg, highWaterMarkUsdg, feeBpsThisTick);
+      // ON THE PEAK BASIS (rule 12): the fee is charged on realized money only.
+      // An open perp gain is left out until it closes, when the basis rises by
+      // exactly what was realized and the fee is charged on it once.
+      const accrual = accrueAboveHwm(peakBasis, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is a one-way ratchet in SQL, with a real
@@ -12671,6 +13114,12 @@ async function main() {
         // The block the balances were read at — where an auditor re-reads from.
         // Non-null by construction: an unreadable market returned above.
         blockNumber: market.blockNumber ?? undefined,
+        // THE VENUE'S TERMS, beside the total (rule 12), so the identity closes
+        // for an auditor exactly as the quarantine term made it close: C, ΣM,
+        // ΣU, Σmax(0,Uᵢ) and T, and the snapshot they came from. Only when the
+        // venue was read — an agent with no perps writes a row, and a journal
+        // mark, byte-identical to before perps.
+        ...(perpRead ? { perp: perpRead } : {}),
       }),
     );
     await setPositions(
@@ -12726,7 +13175,17 @@ async function main() {
     // Brain execution uses this tick's book, including on the first tick; so
     // does every order until the next tick states its own — and the drain
     // below is handed this same statement: the book valued, and totalled or not.
-    const drainReads = tickBook.composed(equityUsdg, !bookIncomplete);
+    //
+    // WITH LIGHTER UNREAD, `equityUsdg` IS THE SPOT HALF ONLY — judged as
+    // unknown already, but it is also what the heartbeat divides a drawdown
+    // by, and a book with half its money at the venue would show the other
+    // half as a loss. So the figure DISPLAYED stays the last whole one, as a
+    // tick that cannot read a balance leaves it (order-gate.ts `unread`) —
+    // unless there never was one, when the partial figure beats a zero that
+    // reads as "still saddling up" and would refuse the owner's sells too.
+    const shownEquityUsdg =
+      venueGap.length > 0 && tickBook.latest().equityUsdg > 0n ? tickBook.latest().equityUsdg : equityUsdg;
+    const drainReads = tickBook.composed(shownEquityUsdg, !bookIncomplete);
     if (!paper) lastGasWei = balances.ethWei;
     // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
     // peak and equity settled above and read twice: by the Trencher's entry
@@ -13766,6 +14225,11 @@ async function main() {
       // nothing on the rest. Absent is a normal state — a cold cache, a pool
       // that could not be read — and nothing downstream may require it.
       depth: await depthReader.read(watchTokens.map((t) => t.symbol)),
+      // THE PERP BOOK, from this tick's read (perps/lane.ts snapshotView):
+      // ABSENT when perps are off for this agent, NULL when Lighter is unread,
+      // else the view — never folded into `holdings` or `prices`, where a
+      // `TSLA-PERP` would read as the TSLA token (strategies/types.ts).
+      ...(perpLane.snapshotView() !== undefined ? { perps: perpLane.snapshotView() } : {}),
     };
 
     // NOT ON PAPER. The paper tick hardcodes balances.ethWei to 0n instead of
@@ -14231,6 +14695,39 @@ async function main() {
         await processIntent(intent, equityUsdg, !bookIncomplete);
       }
     }
+
+    // ── THE PERPS ROUTE (docs/perps.md "The perps route"; perps/lane.ts) ────
+    //
+    // A ROUTE BESIDE THE OWNER'S STRATEGY, never instead of it: after the
+    // strategy loop and the class route, perp exits first, then at most ONE
+    // entry — each through countsAsEntry → energy claim → ensureDecision →
+    // processIntentReporting → refund when nothing was placed, exactly the
+    // class route's shape above. `perpsDriver` picks the one producer
+    // (perp-trend; the strategist's handoff from its window this tick; or
+    // nobody), and a `strategist` driver with no real model behind it is
+    // nobody. Pause and the tick's early returns end this route with the rest
+    // of the tick; the PROTECTIVE LOOP is not here — it runs on its own clock
+    // (perpLane.armed) and nothing in this function can stop it.
+    await perpLane.runRoute(
+      {
+        equityUsdg,
+        equityKnown: !bookIncomplete,
+        breakerIdle: !breakerTripped({ drawdown: drawdownNow }),
+        breakerLimitBps: drawdownNow?.limitBps ?? null,
+        energyEntriesLeft: !energyNow.enforce || energyNow.entries.open,
+        opsHeadroom: !opsSpent(snap),
+        spendHeadroomMicro: snap.spendHeadroomUsdg ?? null,
+        strategistLive: cfg.strategy === "llm-strategist" && resolveLlm(cfg) !== null,
+      },
+      {
+        claimEntry,
+        refundEntry,
+        withholdEntry: () => withholdEntry(agentId),
+        ensureDecision: (i, source, reason, known) => ensureDecision(i, source, reason, known),
+        processIntentReporting: (i) => processIntentReporting(i, equityUsdg, !bookIncomplete),
+        processIntent: (i) => processIntent(i, equityUsdg, !bookIncomplete),
+      },
+    );
   }
 
   if (selftest) {
@@ -14659,7 +15156,10 @@ async function main() {
          * is what support triages on, and an unknown rule must still be
          * traceable — it just stops being the whole sentence.
          */
-        const label = rejectRuleLabel(outcome.rejectRule);
+        // THE OWNER's register, so a rule withheld from the public (the perp
+        // rules, thesis-policy.ts WITHHELD_REJECT_RULES) still reaches the one
+        // person who can act on it as words and not a slug.
+        const label = rejectRuleLabel(outcome.rejectRule) ?? ownerRejectRuleLabel(outcome.rejectRule);
         const remedy = rejectRuleRemedy(outcome.rejectRule);
         const slug = outcome.rejectRule ?? outcome.status;
         if (!label) {

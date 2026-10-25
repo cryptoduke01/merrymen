@@ -186,6 +186,35 @@ const RULE_STAGE: Readonly<Record<string, FunnelStage>> = {
   "nonce-changed": "SUBMISSION_FAILED",
   // Sent, and its fate not yet read back.
   "receipt-unresolved": "SETTLEMENT_PENDING",
+  // PERPETUALS (policy.ts's perp branch, exec-mode.ts perpsModeOf, perps/
+  // lane.ts). A perp refusal never writes a `trades` row, so the tick's funnel
+  // does not hear one today; mapped so the table stays the whole vocabulary.
+  "perp-not-enabled": "PERMISSION_BLOCKED",
+  "perp-live-not-enabled": "PERMISSION_BLOCKED",
+  "perp-live-not-yet": "PERMISSION_BLOCKED",
+  "perp-not-granted": "PERMISSION_BLOCKED",
+  "perp-operator-off": "PERMISSION_BLOCKED",
+  "perp-venue-unready": "PERMISSION_BLOCKED",
+  "perp-venue-incident": "PERMISSION_BLOCKED",
+  "perp-entries-halted": "PERMISSION_BLOCKED",
+  "perp-grant-expiring": "PERMISSION_BLOCKED",
+  "perp-market-not-allowed": "PERMISSION_BLOCKED",
+  "perp-stop-required": "PERMISSION_BLOCKED",
+  "perp-stop-inside-liquidation": "PERMISSION_BLOCKED",
+  "perp-leverage-unset": "PERMISSION_BLOCKED",
+  "perp-leverage-mismatch": "PERMISSION_BLOCKED",
+  "perp-add-to-position": "PERMISSION_BLOCKED",
+  "perp-side-mismatch": "PERMISSION_BLOCKED",
+  "perp-no-position": "PERMISSION_BLOCKED",
+  "perp-order-malformed": "PERMISSION_BLOCKED",
+  "perp-per-trade-cap": "BUDGET_EXHAUSTED",
+  "perp-open-notional-cap": "BUDGET_EXHAUSTED",
+  "perp-collateral-cap": "BUDGET_EXHAUSTED",
+  "perp-max-opens": "BUDGET_EXHAUSTED",
+  "perp-below-min": "SIZE_BELOW_ECONOMIC_FLOOR",
+  "perp-market-inactive": "UNSUPPORTED_ROUTE",
+  "perp-unpriced": "UNSUPPORTED_ROUTE",
+  "perp-close-in-flight": "SETTLEMENT_PENDING",
 };
 
 /**

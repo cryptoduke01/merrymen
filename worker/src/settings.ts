@@ -16,11 +16,13 @@ import {
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   TELEGRAM_GROUPS_CHATTINESS,
+  isGrantPurpose,
   isHostedMode,
   isPerpKey,
   isValidCustomToken,
   perpsNumberOk,
   type CustomToken,
+  type GrantPurpose,
   type MerrymenSettings,
   type PerpKey,
   type PerpsDriver,
@@ -284,6 +286,31 @@ export interface ResolvedConfig {
   perpsLiveTenants: readonly `0x${string}`[] | null;
   /** MERRYMEN_HALT_PERP_ENTRIES — no opens anywhere; exits and protection keep running. */
   perpsEntriesHalted: boolean;
+  /**
+   * WHICH OF THE LOGIN'S TWO WALLETS THIS WORKER SERVES (workerWalletOf).
+   * Spot unless whatever started the worker said Perps. A Perps worker trades
+   * perps and nothing else; a Spot worker never trades perps.
+   */
+  workerWallet: GrantPurpose;
+}
+
+/**
+ * MERRYMEN_WALLET_PURPOSE: which wallet's worker this process is (docs/perps.md
+ * "One login, two wallets"). It is set by whatever starts a Perps wallet's
+ * worker — the orchestrator's per-wallet slot (slice 4), `merrymen start` for
+ * the Perps home (slice 5) — never by a tenant: it is the operator's
+ * environment, like MERRYMEN_PERPS, and a settings file cannot name it.
+ * Unset is Spot, which every worker on main is. Anything else refuses to
+ * resolve: a worker must never guess which wallet's authority it holds.
+ *
+ * index.ts checks it against the signed grant's own `purpose` at every arm, so
+ * the variable alone can neither give a Spot grant perps nor a Perps grant spot.
+ */
+export function workerWalletOf(env: Record<string, string | undefined>): GrantPurpose {
+  const v = (env.MERRYMEN_WALLET_PURPOSE ?? "").trim();
+  if (v === "") return "spot";
+  if (!isGrantPurpose(v)) throw new Error(`MERRYMEN_WALLET_PURPOSE must be spot or perps, not ${JSON.stringify(v).slice(0, 40)}`);
+  return v;
 }
 
 /**
@@ -455,6 +482,7 @@ export function mergeSettings(
 ): ResolvedConfig {
   const d = SETTINGS_DEFAULTS;
   const hosted = isHostedMode();
+  const workerWallet = workerWalletOf(env);
 
   // HOSTED: the house owns the connection/credential/endpoint fields. Drop them
   // from the tenant file so every `str(file.X, env.X)` below falls through to the
@@ -792,6 +820,25 @@ export function mergeSettings(
     perpsOperatorCeiling: perpsCeilingOf(env.MERRYMEN_PERPS),
     perpsLiveTenants: perpsLiveTenantsOf(env.MERRYMEN_PERPS_LIVE_TENANTS, hosted),
     perpsEntriesHalted: perpsEntriesHaltedOf(env.MERRYMEN_HALT_PERP_ENTRIES),
+    workerWallet,
+    // A PERPS WALLET'S WORKER RUNS NO SPOT PRODUCER, whatever its settings file
+    // says. The Perps wallet holds the Lighter account and nothing else
+    // (docs/perps.md "One login, two wallets"); its paper cash is the perp
+    // book's collateral, and a basket buy, a launch snipe or a scout entry
+    // would spend it on tokens. `perps-only` is the builtin that proposes
+    // nothing (strategies/registry.ts); the perp lane runs beside it.
+    ...(workerWallet === "perps"
+      ? {
+          strategy: "perps-only",
+          discoveryEnabled: false,
+          officialCoinsEnabled: false,
+          classSnipeEnabled: false,
+          scoutEnabled: false,
+          trencherLiveEnabled: false,
+          trencherFastEnabled: false,
+          fomoFollowEnabled: false,
+        }
+      : {}),
   };
 }
 
