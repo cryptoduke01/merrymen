@@ -492,9 +492,11 @@ function ledgerTxHash(raw: string): string {
 }
 
 /**
- * THE PERP LEDGER'S SCHEMA (docs/perps.md, "Ledger"), applied after
+ * THE PERP LEDGER'S SCHEMA (docs/perps.md, "Ledger"), applied before
  * SQLITE_ALTERS as required objects (execPerpLedger; initSqlite) — each
- * statement on its own, in order, each index after its table. A failure stops
+ * statement on its own, in order, each index after its table. It touches
+ * only the perp tables, so nothing in it waits on a column migration, and the
+ * migrations can then reach the perp tables too (PERP_LEDGER_ALTERS). A failure stops
  * setup rather than being skipped. Exported so a test can run every statement
  * through translateSchema.
  */
@@ -788,12 +790,11 @@ export const PERP_LEDGER_DDL: readonly string[] = [
 ];
 
 /**
- * COLUMNS A PERP TABLE GAINED AFTER ITS FIRST BUILD, applied after
- * PERP_LEDGER_DDL (applyLedgerSchema; initSqlite). A book an earlier build
- * made — the perps branch's paper runs — has the table without them, and
- * CREATE TABLE IF NOT EXISTS never adds a column to a table that is there; on
- * a fresh book the table already has them and the runner skips each. Required
- * like the tables: a failure stops setup.
+ * COLUMNS A PERP TABLE GAINED AFTER ITS FIRST BUILD, in SQLITE_ALTERS, which
+ * runs after PERP_LEDGER_DDL. A book an earlier build made — the perps
+ * branch's paper runs — has the table without them, and CREATE TABLE IF NOT
+ * EXISTS never adds a column to a table that is there; on a fresh book the
+ * table already has them and the runner skips each.
  */
 export const PERP_LEDGER_ALTERS: readonly string[] = [
   // The level a paper position is protected at (paper.ts PaperPerpPosition.recordedStop).
@@ -802,7 +803,7 @@ export const PERP_LEDGER_ALTERS: readonly string[] = [
 ];
 
 /**
- * THE VENUE'S TERMS ON AN EQUITY ROW (rule 12), the last of the perp ledger's
+ * THE VENUE'S TERMS ON AN EQUITY ROW (rule 12), one of the perp ledger's
  * migrations, in SQLITE_ALTERS after PERP_LEDGER_DDL. Its own list so a test
  * can name exactly what the change adds to `equity`.
  */
@@ -1472,9 +1473,11 @@ const SQLITE_ALTERS: string[] = [
   // strictly weaker constraint), so the new index has already built by the
   // time this runs; and IF EXISTS makes it a no-op everywhere else.
   "DROP INDEX IF EXISTS owner_operations_identity",
-  // THE VENUE'S COLUMNS ON EQUITY (PERP_EQUITY_ALTERS); the perp tables are
-  // required objects, built after these (execPerpLedger), not best-effort.
+  // THE VENUE'S COLUMNS ON EQUITY (PERP_EQUITY_ALTERS), and the perp tables'
+  // later columns (PERP_LEDGER_ALTERS). The perp tables themselves are
+  // required objects, built BEFORE these (execPerpLedger), not best-effort.
   ...PERP_EQUITY_ALTERS,
+  ...PERP_LEDGER_ALTERS,
 ];
 
 // Financial readers treat account casing as one account and scope every read
@@ -1537,6 +1540,11 @@ function initSqlite(): Db {
   // applyLedgerSchema and initPostgres run it — where nothing would ever write
   // or read the table.
   db.exec(BUDGET_SEED_SCHEMA);
+  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed:
+  // the perp tables (execPerpLedger), before the ALTERs that reach them, and
+  // the read indexes, after the ALTERs they need.
+  try { for (const ddl of PERP_LEDGER_DDL) db.exec(ddl); }
+  catch (error) { db.close(); throw error; }
   for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
@@ -1544,15 +1552,7 @@ function initSqlite(): Db {
       // column already exists
     }
   }
-  // Unlike ADD COLUMN compatibility, a failed build must not be swallowed:
-  // the perp tables (execPerpLedger) and the read indexes alike.
-  try {
-    for (const ddl of [...PERP_LEDGER_DDL, ...LEDGER_READ_INDEXES]) db.exec(ddl);
-    for (const ddl of PERP_LEDGER_ALTERS) {
-      try { db.exec(ddl); }
-      catch (error) { if (!/duplicate column name/i.test((error as Error)?.message ?? "")) throw error; }
-    }
-  }
+  try { for (const ddl of LEDGER_READ_INDEXES) db.exec(ddl); }
   catch (error) { db.close(); throw error; }
   // stderr, not stdout: `merrymen export` writes the audit journal to stdout,
   // and a diagnostic line landing in the middle of it corrupts the file. A log
@@ -1579,9 +1579,8 @@ function initSqlite(): Db {
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
-  await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execPerpLedger(db);
-  await applyLedgerMigrations(db, PERP_LEDGER_ALTERS);
+  await applyLedgerMigrations(db, SQLITE_ALTERS);
   await execReadIndexes(db);
 }
 
