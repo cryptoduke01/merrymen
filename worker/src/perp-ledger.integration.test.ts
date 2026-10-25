@@ -14,12 +14,12 @@
  *   budgets   — perp orders count against the day's caps after a refresh and
  *               a restart, per rail, by fill once known and by worst notional
  *               until then; exits never count as spend.
- *   paper     — the paper perp book survives a checkpoint round trip whole,
- *               and a reset takes it with the cash.
- *   mirror    — the shared copy moves forward only, never carries the signed
- *               bytes, and copies an unchanged ledger as nothing.
+ *   paper     — a reset takes the paper perp book with the cash. (Its ride on
+ *               the hosted checkpoint, and the mirror's copy of the perp
+ *               ledger, are hosted operation: slice 4.)
  *   migration — the schema lands over an existing ledger without touching a
- *               row, and every statement translates for Postgres.
+ *               row, the shared ledger's migration leaves `equity` alone, and
+ *               every statement translates for Postgres.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -29,13 +29,6 @@ import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { verifyChain } from "./audit";
 import { translateSchema, wrapSqlite, type Db } from "./db";
-import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
-import {
-  mirrorPaperCheckpoints,
-  paperCheckpointRejection,
-  paperPerpRejection,
-  restorePaperCheckpoint,
-} from "./paper-checkpoint";
 import type { PerpSignedTx } from "./store";
 import type { PerpOrderIntent } from "./policy";
 import { readFileSync } from "node:fs";
@@ -479,10 +472,19 @@ describe("budgets: perp orders count against the day, per rail", () => {
     assert.equal(await store.getOpsToday(id, "paper"), 0);
   });
 
-  it("forgets an order only when it leaves the trailing window", async () => {
+  it("on main's clock: an unresolved order counts whatever its age, a resolved one for 24 h from resolving", async () => {
     const id = await agent();
     const { id: orderId } = await liveOpen(id, 9_000_000n);
     raw.prepare("UPDATE perp_orders SET created_at = ? WHERE id = ?").run(now() - 86_401, orderId);
+    // A pending op never releases its slot by growing old (getOpsToday's rule).
+    assert.equal(await store.perpOpenNotionalSince(id, "live", DAY_AGO()), 9_000_000n);
+    assert.equal(await store.perpOpsSince(id, "live", DAY_AGO()), 1);
+    // Resolved an hour ago, though signed 25 h ago: its window runs from the answer.
+    raw.prepare("UPDATE perp_orders SET status = 'filled', filled_quote_micro = '8000000', resolved_at = ? WHERE id = ?").run(now() - 3_600, orderId);
+    assert.equal(await store.perpOpenNotionalSince(id, "live", DAY_AGO()), 8_000_000n);
+    assert.equal(await store.perpOpsSince(id, "live", DAY_AGO()), 1);
+    // Resolved 24 h ago and more: it has left the window.
+    raw.prepare("UPDATE perp_orders SET resolved_at = ? WHERE id = ?").run(now() - 86_401, orderId);
     assert.equal(await store.perpOpenNotionalSince(id, "live", DAY_AGO()), 0n);
     assert.equal(await store.perpOpsSince(id, "live", DAY_AGO()), 0);
   });
@@ -591,171 +593,17 @@ describe("epochs and equity", () => {
 });
 
 // ── paper ─────────────────────────────────────────────────────────────────────
+//
+// The paper perp book riding the hosted checkpoint (paper_checkpoints.perp_json)
+// and the mirror carrying the perp ledger to the shared database are hosted
+// operation, and land with it in slice 4. Here: the reset, which the worker's
+// own ledger does in one transaction.
 
-/** A shared or fresh database with the real schema, as the orchestrator builds one. */
-async function ledgerDb(): Promise<{ db: Db; raw: DatabaseSync }> {
-  const r = new DatabaseSync(":memory:");
-  others.push(r);
-  const db = wrapSqlite(r);
-  await store.applyLedgerSchema(db);
-  await db.exec(MIRROR_STATE_DDL);
-  return { db, raw: r };
-}
-
-describe("the paper perp book rides the checkpoint", () => {
-  it("round-trips collateral and positions, margin, imf and funding hour included", async () => {
-    const id = await agent();
-    await store.getPaperBook(id, 1000);
-    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 50_000_000n });
-    await store.upsertPerpPosition({
-      agentId: id, mode: "paper", source: "paper", marketId: 1, side: "short", base: 20_000n, entryPrice: 11_500_000n,
-      allocatedMarginMicro: 11_500_000n, imfBp: 5000, marginMode: "isolated", fundingHourApplied: 1_790_683_200,
-      stopTrigger: 12_075_000n, stopPrice: 12_316_500n, openedAt: 1_790_680_000,
-    });
-    const child = wrapSqlite(raw);
-    const shared = await ledgerDb();
-    assert.ok((await mirrorPaperCheckpoints(child, shared.db)) >= 1);
-    const cp = shared.raw.prepare("SELECT perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { perp_json: string };
-    assert.equal(paperPerpRejection(cp.perp_json), null);
-    shared.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, 'o', 's', 4663, '{}', 0, 0)").run(id);
-
-    const fresh = await ledgerDb();
-    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /restored, with the paper perp book/);
-    const acct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { paper_collateral_micro: string };
-    assert.equal(acct.paper_collateral_micro, "50000000");
-    const pos = fresh.raw.prepare("SELECT side, base, allocated_margin_micro, imf_bp, funding_hour_applied, stop_price, source FROM perp_positions WHERE agent_id = ?").all(id.toLowerCase());
-    assert.deepEqual(pos.map((p) => ({ ...p })), [
-      { side: "short", base: "20000", allocated_margin_micro: "11500000", imf_bp: 5000, funding_hour_applied: 1_790_683_200, stop_price: "12316500", source: "paper" },
-    ]);
-  });
-
-  it("a position the REAL paper engine opened is carried by the checkpoint, and restored whole into an empty child (R3-PAPER-CKPT-NULL-COLLATERAL)", async () => {
-    // The engine books under an account row bumpNonceHighWater created with
-    // paper_collateral_micro NULL; the checkpoint reads NULL collateral beside
-    // an open position as a torn book and skips the WHOLE row — cash, shares
-    // and basis too. Only the engine's own path proves the column is a read 0.
-    const id = await agent();
-    await store.getPaperBook(id, 100);
-    const btc = parseOrderBookDetails(JSON.parse(readFileSync(path.join(import.meta.dirname, "perps", "fixtures", "orderBookDetails.perp.json"), "utf8")))!.markets.get(1)!;
-    const H = 1_790_708_400;
-    let clockMs = (H - 1800) * 1000;
-    const feed = () =>
-      parseLighterFeed(
-        {
-          v: 1,
-          observedAt: clockMs - 500,
-          markets: {
-            "1": {
-              observedAt: clockMs - 1_000,
-              priceSource: "ws",
-              mark: "800000",
-              index: "800000",
-              // The hour's payment exists only once the hour has passed.
-              ...(clockMs > H * 1000 + 1_000 ? { lastFundingRatePctPerHour: "0.0012", lastFundingAt: H * 1000 + 40 } : {}),
-              status: btc.spec.status,
-              spec: specToJson(btc.spec),
-              specObservedAt: clockMs - 60_000,
-              takerFeePpm: 0,
-              makerFeePpm: 0,
-              bids: [["799900", "1000"]],
-              asks: [["800000", "1000"]],
-              bookObservedAt: clockMs - 1_000,
-              bookSource: "ws",
-            },
-          },
-        },
-        clockMs,
-      );
-    const ex = createPaperPerpExecutor({ agentId: id, epoch: () => 1, feed, store, now: () => clockMs, paperStartUsdg: 100 });
-    await ex.setLeverage!(1, 5000);
-    const open = {
-      kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "open", side: "long", reduceOnly: false,
-      baseAmount: 20n, worstPrice: 804_000n, markPrice: 800_000n, notionalUsdg: 16_080_000n, imfBp: 5000, stopTrigger: 760_000n, stopPrice: 744_800n,
-    } as PerpOrderIntent;
-    const placed = await ex.place(open, await ex.review(open), { decisionId: null, agentId: id });
-    assert.equal(placed.status, "filled");
-    // An hour's funding, so funding_hour_applied is part of what must round-trip.
-    clockMs = H * 1000 + 60_000;
-    assert.equal((await ex.tick!()).events.length, 1);
-    assert.equal((await store.getPerpAccount(id, "paper"))?.paperCollateralMicro, 0n, "the engine's book keeps a READ zero, never NULL");
-
-    const child = wrapSqlite(raw);
-    const shared = await ledgerDb();
-    await mirrorPaperCheckpoints(child, shared.db);
-    const cp = shared.raw.prepare("SELECT cash_usdg, perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { cash_usdg: number; perp_json: string } | undefined;
-    assert.ok(cp, "the agent's checkpoint row was mirrored — not skipped over its perp book");
-    assert.equal(paperPerpRejection(cp.perp_json), null);
-    const state = JSON.parse(cp.perp_json) as { collateral_micro: string; positions: { market_id: number; allocated_margin_micro: string; funding_hour_applied: number; stop_trigger: string }[] };
-    assert.equal(state.collateral_micro, "0");
-    assert.equal(state.positions.length, 1);
-    assert.equal(cp.cash_usdg, 92, "the margin left paper cash (8 USDG at 2x of 16)");
-
-    shared.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, 'o', 's', 4663, '{}', 0, 0)").run(id);
-    const fresh = await ledgerDb();
-    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /restored, with the paper perp book/);
-    const book = fresh.raw.prepare("SELECT cash_usdg FROM paper_book").get() as { cash_usdg: number };
-    assert.equal(book.cash_usdg, 92, "cash as it stood with the position open — not the pre-open 100");
-    const pos = fresh.raw.prepare("SELECT side, base, allocated_margin_micro, funding_hour_applied, stop_trigger, stop_price FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").all(id.toLowerCase());
-    assert.deepEqual(pos.map((p) => ({ ...p })), [
-      { side: "long", base: "20", allocated_margin_micro: String(8_000_000 - 192), funding_hour_applied: H, stop_trigger: "760000", stop_price: "744800" },
-    ]);
-    const acct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { paper_collateral_micro: string };
-    assert.equal(acct.paper_collateral_micro, "0");
-  });
-
-  it("refuses a perp book it could not write back whole", () => {
-    const base = { agent_id: "a", epoch: 1, cash_usdg: 900, vault_usdg: 0, hwm_usdg: 1000, shares: "{}", basis_json: "[]", updated_at: 10 };
-    const position = { market_id: 1, side: "long", base: "1", entry_price: "1", allocated_margin_micro: "0", imf_bp: 5000, margin_mode: "isolated", realized_micro: null, funding_micro: null, funding_hour_applied: null, stop_trigger: null, stop_price: null, take_trigger: null, take_price: null, opened_at: null };
-    const ok = { v: 1, collateral_micro: "1", positions: [position] };
-    assert.equal(paperCheckpointRejection({ ...base, perp_json: JSON.stringify(ok) }), null);
-    assert.equal(paperCheckpointRejection({ ...base, perp_json: null }), null);
-    assert.match(paperCheckpointRejection({ ...base, perp_json: JSON.stringify({ ...ok, collateral_micro: "-1" }) })!, /collateral/);
-    assert.match(paperCheckpointRejection({ ...base, perp_json: JSON.stringify({ ...ok, positions: [{ ...position, market_id: 9999 }] }) })!, /market 9999/);
-    assert.match(paperCheckpointRejection({ ...base, perp_json: JSON.stringify({ ...ok, positions: [position, position] }) })!, /held twice/);
-    assert.match(paperCheckpointRejection({ ...base, perp_json: JSON.stringify({ ...ok, positions: [{ ...position, allocated_margin_micro: "-5" }] }) })!, /margin/);
-    assert.match(paperCheckpointRejection({ ...base, perp_json: "{" })!, /unreadable/);
-  });
-
-  it("recovers from a valuation whose perp term is part of the identity, closing the paper perps at that mark", async () => {
-    const id = await agent();
-    const shared = await ledgerDb();
-    shared.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, 'o', 's', 4663, '{}', 0, 0)").run(id);
-    const mark = shared.raw.prepare(
-      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at,
-                           perp_collateral_micro, perp_isolated_margin_micro, perp_unrealized_micro, perp_unrealized_gain_micro, perp_in_transit_micro)
-       VALUES (?, '0', ?, 0, 0, ?, 1, 'paper', ?, ?, ?, ?, ?, '0')`,
-    );
-    // A wick: 1,100 of equity, 150 of it an unrealized gain that reverted. Its basis is 950.
-    mark.run(id, 900, 1100, 5, "50000000", "0", "150000000", "150000000");
-    // The recoverable valuation: 900 cash + 50 collateral + 20 margin + 5 unrealized = 975.
-    mark.run(id, 900, 975, 10, "50000000", "20000000", "5000000", "5000000");
-    const fresh = await ledgerDb();
-    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /closed into paper collateral/);
-    const book = fresh.raw.prepare("SELECT cash_usdg, hwm_usdg FROM paper_book").get() as { cash_usdg: number; hwm_usdg: number };
-    assert.equal(book.cash_usdg, 900);
-    assert.equal(book.hwm_usdg, 975, "the wick never lifted the peak; today's book is the highest real candidate");
-    const acct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE mode = 'paper'").get() as { paper_collateral_micro: string };
-    assert.equal(acct.paper_collateral_micro, "75000000");
-
-    // The identity without its perp term does not add up, and says so.
-    const broken = await ledgerDb();
-    broken.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, 'o', 's', 4663, '{}', 0, 0)").run(id);
-    broken.raw.prepare(
-      "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at, perp_collateral_micro) VALUES (?, '0', 900, 0, 0, 975, 1, 'paper', 10, '50000000')",
-    ).run(id);
-    await assert.rejects(restorePaperCheckpoint((await ledgerDb()).db, broken.db, id), /does not add up/);
-
-    // A paper perp fill after the valuation moved money the mark does not hold.
-    shared.raw.prepare(
-      `INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, base, price, quote_micro, fee_micro,
-                               trade_type, attribution, venue_ts_ms, created_at)
-       VALUES (?, 'paper', 1, 'p1', 'bid', 1, 'long', '1', '1', '1', '0', 'trade', 'intent', 1, 11)`,
-    ).run(id.toLowerCase());
-    await assert.rejects(restorePaperCheckpoint((await ledgerDb()).db, shared.db, id), /perp fills or funding are newer/);
-  });
-
+describe("the paper perp book is reset with the paper cash", () => {
   it("resets the paper perp book with the paper cash, and never touches the live one", async () => {
     const id = await agent();
+    // Main's reset refuses an agent not on the paper rail (paper-opening.integration.test.ts).
+    await store.setAgentMode(id, "paper", 1, false);
     await store.getPaperBook(id, 1000);
     await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 9_000_000n });
     const p = { agentId: id, marketId: 1, side: "long" as const, base: 5n, entryPrice: 1n, allocatedMarginMicro: 1n };
@@ -767,97 +615,6 @@ describe("the paper perp book rides the checkpoint", () => {
     assert.equal((await store.getPerpPositions(id, "paper", { includeFlat: true })).length, 0);
     assert.equal((await store.getPerpPositions(id, "live")).length, 1);
     assert.equal(await store.getNonceHighWater(id, "paper"), hw, "the high-water survives a reset");
-  });
-});
-
-// ── the mirror ────────────────────────────────────────────────────────────────
-
-describe("the mirror carries the perp ledger up, forward only", () => {
-  it("copies every perp table — never the signed bytes or an incident's detail — and an unchanged ledger as nothing", async () => {
-    const id = await agent();
-    const acct = id.toLowerCase();
-    const { id: orderId } = await liveOpen(id, 23_000_000n);
-    await store.insertPerpFill(fill(id, { orderId }));
-    await store.insertPerpFunding({ agentId: id, mode: "live", marketId: 1, fundingId: "501", fundingHour: 7200, paymentMicro: -3n });
-    await store.upsertPerpTransfer({ agentId: id, mode: "live", direction: "deposit", amountMicro: 5_000_000n, initiator: "agent", state: "landed", chainId: 4663, txHash: `0x${"12".repeat(32)}`, logIndex: 0 });
-    await store.upsertPerpPosition({ agentId: id, mode: "live", source: "venue", marketId: 1, side: "long", base: 20_000n, allocatedMarginMicro: 11_500_000n, imfBp: 5000, marginMode: "isolated" });
-    await store.patchPerpAccount(id, "live", { accountIndex: 22_149, incident: { kind: "foreign-key", at: 7, detail: { pubkey: "secret-ish" } } });
-    await store.addEquity(id, {
-      ethWei: 0n, cashUsdg: 1, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 1, mode: "live",
-      perp: { collateralMicro: 0n, isolatedMarginMicro: 0n, unrealizedMicro: 0n, unrealizedGainMicro: 0n, inTransitMicro: 0n, snapshotTime: null },
-    });
-
-    const child = wrapSqlite(raw);
-    const shared = await ledgerDb();
-    const first = await mirrorTenant({ tenant: "t1", child, shared: shared.db });
-    assert.equal(first.failed, undefined, JSON.stringify(first.failed));
-    for (const t of ["perp_fills", "perp_funding", "perp_orders", "perp_order_legs", "perp_transfers", "perp_positions", "perp_accounts"]) {
-      assert.ok((first.copied[t] ?? 0) > 0, `${t} arrived`);
-    }
-    const order = shared.raw.prepare("SELECT status, tx_info, tx_hash FROM perp_orders WHERE id = ?").get(orderId) as Record<string, unknown>;
-    assert.equal(order.status, "submitted");
-    assert.equal(order.tx_info, null, "the signed bytes stay in the child");
-    const incident = shared.raw.prepare("SELECT incident_json FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { incident_json: string };
-    assert.deepEqual(JSON.parse(incident.incident_json), { at: 7, kind: "foreign-key" }, "kind and time, never the detail");
-    const eq = shared.raw.prepare("SELECT perp_collateral_micro FROM equity WHERE agent_id = ?").get(id) as { perp_collateral_micro: string };
-    assert.equal(eq.perp_collateral_micro, "0", "the equity row's perp terms travel with it");
-
-    const again = await mirrorTenant({ tenant: "t1", child, shared: shared.db });
-    for (const t of ["perp_fills", "perp_funding", "perp_orders", "perp_order_legs", "perp_transfers", "perp_positions", "perp_accounts"]) {
-      assert.equal(again.copied[t], undefined, `${t}: an unchanged ledger copies as nothing`);
-    }
-    assert.equal(Number((shared.raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ?").get(acct) as { n: number }).n), 1);
-
-    // The answer arrives: the resolved row replaces the submitted one.
-    await store.resolvePerpOrder({ agentId: id, mode: "live", id: orderId, status: "filled", filledBase: 20_000n, filledQuoteMicro: 23_000_000n });
-    raw.prepare("UPDATE perp_orders SET updated_at = updated_at + 1 WHERE id = ?").run(orderId);
-    await mirrorTenant({ tenant: "t1", child, shared: shared.db });
-    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
-
-    // A STALE CHILD NEVER REGRESSES A ROW: walk the child's copy back and
-    // make it look newer, as a ledger restored from an old backup would.
-    raw.prepare("UPDATE perp_orders SET status = 'submitted', updated_at = updated_at + 10 WHERE id = ?").run(orderId);
-    raw.prepare("UPDATE perp_transfers SET state = 'submitted', updated_at = updated_at + 10 WHERE agent_id = ?").run(acct);
-    await mirrorTenant({ tenant: "t1", child, shared: shared.db });
-    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
-    assert.equal((shared.raw.prepare("SELECT state FROM perp_transfers WHERE agent_id = ?").get(acct) as { state: string }).state, "landed");
-
-    // A nonce high-water never falls in shared storage, whatever the child says.
-    const high = (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water;
-    raw.prepare("UPDATE perp_accounts SET nonce_high_water = '1', updated_at = updated_at + 20 WHERE agent_id = ? AND mode = 'live'").run(acct);
-    await mirrorTenant({ tenant: "t1", child, shared: shared.db });
-    assert.equal(
-      (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water,
-      high,
-    );
-  });
-
-  it("flattens a shared position the child has since closed — and not one it has merely not re-read", async () => {
-    const id = await agent();
-    const acct = id.toLowerCase();
-    const shared = await ledgerDb();
-    const child = wrapSqlite(raw);
-    await store.upsertPerpPosition({ agentId: id, mode: "paper", source: "paper", marketId: 3, side: "long", base: 7n, allocatedMarginMicro: 1n });
-    await mirrorTenant({ tenant: "t2", child, shared: shared.db });
-    // The child's paper reset deletes its rows and touches its account row.
-    await store.resetPaperLedger(id, 1000);
-    raw.prepare("DELETE FROM perp_accounts WHERE agent_id = ?").run(acct);
-    await mirrorTenant({ tenant: "t2", child, shared: shared.db });
-    assert.equal((shared.raw.prepare("SELECT base FROM perp_positions WHERE agent_id = ?").get(acct) as { base: string }).base, "7", "silence is not flatness");
-    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 0n });
-    raw.prepare("UPDATE perp_accounts SET updated_at = updated_at + 5 WHERE agent_id = ?").run(acct);
-    await mirrorTenant({ tenant: "t2", child, shared: shared.db });
-    assert.equal((shared.raw.prepare("SELECT base FROM perp_positions WHERE agent_id = ?").get(acct) as { base: string }).base, "0");
-  });
-
-  it("skips a child ledger from before perps, with nothing to say and nothing failed", async () => {
-    const old = new DatabaseSync(":memory:");
-    others.push(old);
-    old.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY)");
-    const shared = await ledgerDb();
-    const r = await mirrorTenant({ tenant: "t3", child: wrapSqlite(old), shared: shared.db });
-    assert.equal(Object.keys(r.copied).some((k) => k.startsWith("perp")), false);
-    assert.equal(Object.keys(r.failed ?? {}).some((k) => k.startsWith("perp")), false);
   });
 });
 
@@ -886,6 +643,7 @@ describe("the migration, over a ledger that already has rows", () => {
   }
 
   it("adds every table, index and column, keeps every row, and is a no-op the second time", async () => {
+    assert.deepEqual(store.PERP_EQUITY_ALTERS.map((d) => /ADD COLUMN (\w+)/.exec(d)?.[1]), EQUITY_COLS, "the equity columns are exactly PERP_EQUITY_ALTERS");
     const { db, raw: r } = await preMigration();
     r.exec(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, mode, at) VALUES ('0xa', '0', 10, 0, 0, 10, 'live', 1)`);
     r.exec(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status) VALUES ('0xa', 'swap', '0xb', 5, 'landed')`);
@@ -905,7 +663,7 @@ describe("the migration, over a ledger that already has rows", () => {
   });
 
   it("translates every statement for Postgres, with nothing sqlite-only left in it", () => {
-    for (const ddl of store.PERP_LEDGER_DDL) {
+    for (const ddl of [...store.PERP_LEDGER_DDL, ...store.PERP_EQUITY_ALTERS]) {
       const pg = translateSchema(ddl);
       assert.doesNotMatch(pg, /unixepoch|AUTOINCREMENT|\bREAL\b|\bINTEGER\b/, pg);
       assert.doesNotMatch(pg, /\bCHECK\b/, "no CHECK on a table the mirror copies");

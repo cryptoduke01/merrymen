@@ -44,8 +44,44 @@ async function existingColumns(db: Db): Promise<{ columns: Set<string>; sqlite: 
 export const ledgerMigrationSkipped = (index: number) =>
   `[warn] ledger migration #${index} failed and was skipped; the ledger opened without it`;
 
+/**
+ * A MISSING COLUMN'S ONE ADD, WITHOUT A QUEUE BEHIND IT (PostgreSQL).
+ *
+ * The catalog check above makes an ADD COLUMN happen once per database, at the
+ * deploy that brings it. That once still needs an AccessExclusiveLock, and a
+ * lock request waits behind every reader already on the table and blocks every
+ * reader that arrives after it: behind one long query on `equity`, the whole
+ * app stalls for as long as that query runs. So the ADD waits at most
+ * `waitMs` for its lock (SET LOCAL lock_timeout, in its own transaction),
+ * pauses and asks again, `tries` times. A table that stays busy past all of
+ * them still fails setup (55P03), as an unmigrated ledger must; a reader is
+ * never queued behind it for longer than one wait.
+ */
+export interface AddColumnLock {
+  waitMs: number;
+  tries: number;
+  pauseMs: number;
+}
+export const ADD_COLUMN_LOCK: Readonly<AddColumnLock> = Object.freeze({ waitMs: 2_000, tries: 5, pauseMs: 1_000 });
+
+async function addColumn(db: Db, ddl: string, sqlite: boolean, lock: Readonly<AddColumnLock>): Promise<void> {
+  if (sqlite) return db.exec(ddl);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await db.tx(async (t) => {
+        await t.exec(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(lock.waitMs))}ms'`);
+        await t.exec(ddl);
+      });
+      return;
+    } catch (error) {
+      if ((error as { code?: unknown })?.code !== "55P03" || attempt >= lock.tries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, lock.pauseMs));
+    }
+  }
+}
+
 export async function applyLedgerMigrations(db: Db, migrations: readonly string[],
-  log: (line: string) => void = (line) => console.error(line)): Promise<void> {
+  log: (line: string) => void = (line) => console.error(line), lock: Readonly<AddColumnLock> = ADD_COLUMN_LOCK): Promise<void> {
   const { columns, sqlite } = await existingColumns(db);
   for (const [index, ddl] of migrations.entries()) {
     const add = /^ALTER TABLE ([a-z_][a-z0-9_]*) ADD COLUMN ([a-z_][a-z0-9_]*)\s/i.exec(ddl);
@@ -53,7 +89,7 @@ export async function applyLedgerMigrations(db: Db, migrations: readonly string[
       const key = `${add[1]!.toLowerCase()}.${add[2]!.toLowerCase()}`;
       if (columns.has(key)) continue;
       try {
-        await db.exec(ddl);
+        await addColumn(db, ddl, sqlite, lock);
       } catch (error) {
         // SQLite has no ADD COLUMN IF NOT EXISTS. Another initializer can add
         // it after the snapshot; accept only that error AND a confirmed column.

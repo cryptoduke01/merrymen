@@ -27,7 +27,6 @@ import type { StoredGrant } from "../../packages/core/src/index";
 import {
   CASH,
   ENERGY_RESERVE_TOKENS,
-  isHostedMode,
   PERP_COI_MAX,
   PERP_LEG,
   officialCoinCurve,
@@ -784,9 +783,9 @@ export const PERP_LEDGER_DDL: readonly string[] = [
 ];
 
 /**
- * THE VENUE'S TERMS ON AN EQUITY ROW (rule 12), applied to the worker's own
- * sqlite ledger alone — see the note in the list. Each statement on its own,
- * swallowed when the column is already there, like SQLITE_ALTERS on sqlite.
+ * THE VENUE'S TERMS ON AN EQUITY ROW (rule 12), the last of the perp ledger's
+ * migrations, in SQLITE_ALTERS after PERP_LEDGER_DDL. Its own list so a test
+ * can name exactly what the change adds to `equity`.
  */
 export const PERP_EQUITY_ALTERS: readonly string[] = [
   // ── THE VENUE IN EQUITY (rule 12) ─────────────────────────────────────────
@@ -803,13 +802,13 @@ export const PERP_EQUITY_ALTERS: readonly string[] = [
   // asked the question, and '0' would be a claim that it had and found none.
   // A reader treats NULL as "this mark carried no perp term".
   //
-  // THE WORKER'S OWN LEDGER ONLY, IN THIS SLICE (initSqlite): a self-hosted
-  // home's and a hosted child's. Not the shared Postgres: SQLITE_ALTERS is also
-  // its migration (applyLedgerSchema), `equity` is one of its hottest tables,
-  // and an ADD COLUMN there takes an AccessExclusiveLock that queues every
-  // reader behind any long one. Nothing writes these columns to it yet: the
-  // mirror's equity list (ledger-mirror.ts) names none of them, and no Perps
-  // worker runs hosted until slice 4, which adds them there with the mirror.
+  // `equity` IS ONE OF THE SHARED LEDGER'S HOTTEST TABLES, and an ADD COLUMN
+  // there takes an AccessExclusiveLock. Each runs once per database (the
+  // runner skips a column the catalog already has), and the runner waits a
+  // bounded time for that lock and retries rather than queueing every reader
+  // behind a long one (ledger-migrations.ts ADD_COLUMN_LOCK). Nothing writes
+  // them on the shared ledger yet: the mirror's equity list names none of them
+  // until slice 4.
   "ALTER TABLE equity ADD COLUMN perp_collateral_micro TEXT",
   "ALTER TABLE equity ADD COLUMN perp_isolated_margin_micro TEXT",
   "ALTER TABLE equity ADD COLUMN perp_unrealized_micro TEXT",
@@ -1454,9 +1453,10 @@ const SQLITE_ALTERS: string[] = [
   // strictly weaker constraint), so the new index has already built by the
   // time this runs; and IF EXISTS makes it a no-op everywhere else.
   "DROP INDEX IF EXISTS owner_operations_identity",
-  // THE PERP LEDGER — its own list so the migration test can translate every
-  // statement of it for Postgres; see PERP_LEDGER_DDL.
+  // THE PERP LEDGER — its own lists so the migration test can translate every
+  // statement of them for Postgres; see PERP_LEDGER_DDL and PERP_EQUITY_ALTERS.
   ...PERP_LEDGER_DDL,
+  ...PERP_EQUITY_ALTERS,
 ];
 
 // Financial readers treat account casing as one account and scope every read
@@ -1498,7 +1498,7 @@ function initSqlite(): Db {
   // applyLedgerSchema and initPostgres run it — where nothing would ever write
   // or read the table.
   db.exec(BUDGET_SEED_SCHEMA);
-  for (const ddl of [...SQLITE_ALTERS, ...PERP_EQUITY_ALTERS]) {
+  for (const ddl of SQLITE_ALTERS) {
     try {
       db.exec(ddl);
     } catch {
@@ -1573,11 +1573,6 @@ async function execSchemaBatch(db: Db): Promise<void> {
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
   await applyLedgerSchema(d);
-  // A SELF-HOSTED worker on its own Postgres is a worker's own ledger, like a
-  // sqlite home, and gets the venue's equity columns (PERP_EQUITY_ALTERS). The
-  // hosted web and orchestrator are on the SHARED ledger, which does not get
-  // them in this slice: see the note in that list.
-  if (!isHostedMode()) await applyLedgerMigrations(d, PERP_EQUITY_ALTERS);
   console.error("[store] postgres ledger");
   return d;
 }
@@ -4151,8 +4146,7 @@ export async function addEquity(
           b.cashReadAt ?? null,
         ];
         // THE VENUE'S COLUMNS ONLY WHEN THERE IS A VENUE TERM. An agent with no
-        // perps writes the row it always wrote, so it never depends on columns
-        // that only a worker's own ledger has in this slice (PERP_EQUITY_ALTERS).
+        // perps writes exactly the row it always wrote (PERP_EQUITY_ALTERS).
         if (perp === undefined && cashReadBlock === null) {
           await db
             .prepare(
