@@ -883,6 +883,51 @@ about half the USDG cap). Withdraw is never limited.
    `MERRYMEN_SOLANA` alone, which also removes owners' in-app revoke and
    withdraw.
 
+### Perpetual futures (off in production; nothing can make a Perps wallet yet)
+
+An owner's perpetual futures on Lighter's Robinhood Chain instance trade from a
+second wallet of their login, the **Perps wallet** (Kernel index 1 of the same
+owner key; contract: [docs/perps.md](perps.md)). Perps lands on main in six
+slices, and until slice 5 no route can make, renew or fund a Perps wallet:
+`POST /api/grants` refuses one (`perps-wallet-not-offered`) and every perps
+grant (`perp-not-offered`). Merging a slice deploys nothing, but the next Deploy
+Latest Commit for any other change ships every slice already on main, so each
+one is built to be safe alone with perps off.
+
+- **Every kill already reaches a Perps wallet** (slice 2). "Kill all agents",
+  the phone apps' Stop (both through `DELETE /api/grants`), a hosted Telegram
+  /kill and `merrymen kill` revoke the tenant's Perps grant beside its Spot
+  grant and Solana strategy, and report the kill incomplete, never done, when
+  the Perps half fails. A tenant with no Perps wallet costs a kill one catalog
+  read of `perps_grants`, with no lock and no schema written.
+- **The tables are additive.** `perps_grants` and `perps_tenant_settings` hold
+  the Perps wallets' grants and settings beside `grants` and `tenant_settings`,
+  which no Perps code rewrites. `perps_grants` is created by the first Perps
+  grant written and by nothing else, so on today's fleet it does not exist.
+  Never drop either once it does: it is accounting evidence. The identity
+  store's claim backfill reads both grants tables.
+
+These variables only ever **restrict** what an owner may turn on. Nothing here
+switches perps on for anyone, and none of it is a setting an owner can see or
+change. They limit trading, never a kill.
+
+| variable | where | value |
+|---|---|---|
+| `MERRYMEN_PERPS` | **both** `web` and `orchestrator` | `off` · `paper` · `live`. **Unset means off, hosted and self-hosted**, as `MERRYMEN_SOLANA` does; anything it does not recognise reads as `off` too — a typo in a switch that takes capability away must not hand it back. Set `MERRYMEN_PERPS=off` on both services anyway before slice 1 merges. `web` reads it to decide whether to offer the opt-in and mint a Lighter key; children inherit the orchestrator's value. Keep the two equal |
+| `MERRYMEN_PERPS_LIVE_TENANTS` | **both** | Only read with `MERRYMEN_PERPS=live`. A comma-separated list of **Perps wallet** smart accounts (the Perps grant's `smartAccount` — never the Spot wallet's, and never the SIWE sign-in wallet, which is a different address again); an entry that is not an address is dropped. Hosted, a Perps wallet not on it stays on paper. Empty means nobody. Do not name anyone before [the mainnet checklist](perps-mainnet-checklist.md) has passed and both mobile apps show the perps banner |
+| `MERRYMEN_HALT_PERP_ENTRIES` *(optional)* | `orchestrator` | `1`: no perp opens for any tenant; exits, the protective loop, stand-downs, withdrawals and claims keep running. Only an empty value, `0`, `false`, `no` or `off` means not halted — any other spelling halts. Children read it at spawn, so it takes effect when Railway restarts the service on the variable change (seconds). This is the lever to reach for first in a perps incident (section 8) |
+| `MERRYMEN_LIGHTER_VENDOR_DIR` *(optional)* | `orchestrator` | A directory holding `lighter-signer.wasm` and `wasm_exec.js`. Unset, the signer is found at `worker/vendor/lighter/`, which the image carries. Both files are hash-checked before a byte runs, and a known-answer test must pass, whatever the path; an override that points at the wrong place fails closed (live perps stay unarmed). Paper never loads the signer |
+
+> **What the later slices add here** (from the branch, to be checked again as
+> each lands): the Lighter key sealed under `MERRYMEN_STORE_DEK` in the Perps
+> wallet's grant and written as `perp-key.json` (0600) into that wallet's
+> child home, never the Spot wallet's; the hosted kill's exits-only stand-down
+> with a use deadline no more than 15 minutes later, reported as closing until
+> it ends; and the one fleet feed file, `lighter-feed.json`, in the
+> orchestrator's `MERRYMEN_HOME`, which children read and never open a socket
+> for. Hosted children share one OS user, so per-child isolation is a
+> prerequisite for general availability.
+
 ## 5b. The AI gateway (its own Railway project)
 
 `merrymen-gateway` is **not** one of the services above and does not live in the
@@ -1235,3 +1280,108 @@ hour of drafting it is already skipped as stale, so the queue is short.
 - **Keep web at ONE replica.** Auth nonces are in-memory; multiple web replicas would let a nonce replay across them. Multi-replica needs the KV-backed nonce store (B4/Railway hardening).
 - **Single orchestrator replica.** The per-tenant Postgres advisory lease (so two orchestrators never both trade a tenant) is Phase B; run exactly one orchestrator until it lands.
 - **Testnet only.** Before real funds: the mainnet re-audit + a two-funded-tenant testnet run (see `docs/hosted-platform-plan.md`).
+
+## 8. Halting the fleet (`FLEET_HALT`) while perps are open
+
+Nothing below applies until live perps exist (docs/perps.md, Rollout); it is
+written now so the runbook is reviewed with the two-wallet model it serves.
+
+`touch "$MERRYMEN_HOME/FLEET_HALT"` in the orchestrator container stands
+every child down and spawns none until the file is removed. With live
+perpetuals on the fleet that stops more than trading: it stops each Perps
+wallet's protective loop, its reduce-only exits and any stand-down in
+progress. What protects an open position while the fleet is halted is only the
+stop resting at Lighter — which a fast gap can pass through, and which expires
+after at most 28 days. Nothing tells the owners: the orchestrator logs the halt
+and sends no message.
+
+1. **If the trouble is perps opening, do not use FLEET_HALT.** Set
+   `MERRYMEN_HALT_PERP_ENTRIES=1` on the orchestrator instead: no perp opens
+   anywhere, while exits, the protective loop, stand-downs and withdrawals
+   keep running.
+2. **Before a FLEET_HALT, list the owners with open live perps**, from the
+   shared Postgres. The venue's last word (the live cache, mirrored), each row
+   with the Perps wallet it is on and the login that owns it:
+
+   ```sql
+   SELECT p.agent_id AS perps_wallet, c.tenant AS owner, p.market_id, p.side, p.base,
+          p.stop_trigger, to_timestamp(p.updated_at) AS as_of
+     FROM perp_positions p
+     LEFT JOIN agent_account c ON c.smart_account = lower(p.agent_id)
+    WHERE p.mode = 'live' AND p.side IS NOT NULL AND p.base <> '0'
+    ORDER BY c.tenant, p.agent_id, p.market_id;
+   ```
+
+   and every wallet whose own report says something is, or may be, REAL money
+   at Lighter — positions, collateral, money in transit, or figures it could
+   not read (`null` is unread, never zero). The report's `mode` is the perps
+   rail, not the book: a practice position held while practice perps are off
+   reports `mode: "off"` with no account index, so the book is the report's
+   `live` mode, an account index, or else the agent's own `agents.mode`
+   (web/src/lib/perps-view.ts perpsBookOf). An unread live report can carry no
+   account index, so the index is not a filter:
+
+   ```sql
+   WITH r AS (
+     SELECT smart_account, mode AS book, perps::jsonb AS p
+       FROM agents
+      WHERE perps IS NOT NULL
+        AND pg_input_is_valid(perps, 'jsonb')   -- Postgres 16+; see below
+   )
+   SELECT r.smart_account AS wallet, c.tenant AS owner, r.book,
+          p->>'mode'            AS rail,
+          p->>'accountIndex'    AS account_index,
+          p->'positions'        AS positions,
+          p->>'collateralMicro' AS collateral_micro,
+          p->>'inTransitMicro'  AS in_transit_micro,
+          p->>'stopsMissing'    AS stops_missing,
+          p->>'incident'        AS incident
+     FROM r
+     LEFT JOIN agent_account c ON c.smart_account = lower(r.smart_account)
+    WHERE p->>'mode' <> 'paper'
+      AND (p->>'mode' = 'live' OR p->>'accountIndex' IS NOT NULL OR COALESCE(book, '') <> 'paper')
+      AND (jsonb_array_length(p->'positions') > 0
+           OR COALESCE(p->>'collateralMicro', '?') <> '0'
+           OR COALESCE(p->>'inTransitMicro', '?') <> '0'
+           OR COALESCE(p->>'stopsMissing', '0') <> '0'
+           OR p->>'incident' = 'true');
+   ```
+
+   **The owner comes from `agent_account`, not from a grants table.** Live
+   perps trade from a Perps wallet, whose grant is in `perps_grants`, never
+   `grants`: the old one-wallet query (`SELECT tenant FROM grants WHERE
+   lower(grant_json->>'smartAccount') = …`) finds nobody for it. And a wallet
+   being stood down has had its grant removed already. `agent_account` keeps
+   every account a login has held, Spot and Perps, for good. A row with no
+   owner there is one to chase by hand, never one to skip; check the grants
+   tables for it as well:
+
+   ```sql
+   SELECT tenant, 'perps' AS wallet FROM perps_grants WHERE lower(grant_json->>'smartAccount') = lower('<account>')
+   UNION ALL
+   SELECT tenant, 'spot' FROM grants WHERE lower(grant_json->>'smartAccount') = lower('<account>');
+   ```
+
+   A row whose `perps` is not valid JSON is unknown, not empty — list those
+   too: `SELECT smart_account FROM agents WHERE perps IS NOT NULL AND NOT
+   pg_input_is_valid(perps, 'jsonb');`. On Postgres older than 16 there is no
+   `pg_input_is_valid`, and a plain `perps::jsonb` cast aborts the WHOLE query
+   on the first such row, not just that row: run the second query without the
+   `pg_input_is_valid` line and, if it fails on a cast, find the bad row by
+   hand before trusting any list.
+3. **Tell each owner on the list** through their own bot or by email, before
+   the halt if you can: their agent is halted with leveraged positions open at
+   Lighter on their Perps wallet, protected only by the stops resting there,
+   and nothing will manage those positions until the halt lifts. **Do not tell
+   them they can close positions with `merrymen recover`: they cannot.**
+   Closing a position with the owner key stays off until the mainnet checklist
+   proves it. Recovery can revoke the agent's Lighter key and withdraw free
+   collateral, but its unwind cancels every resting order first — including the
+   stops on positions it leaves open — so during a halt, running it strips the
+   only protection those positions have. For almost every owner the right
+   advice is to wait for the halt to lift; an owner who suspects the key itself
+   is compromised is the exception, and should be told exactly that trade-off.
+4. **Keep it short, and check on the way out.** When the file is removed and
+   the children are back, every listed Perps wallet's report must show a fresh
+   `protectAt` and `stopsMissing` of 0 within a minute or two; anything else is
+   a wallet to look at by hand.
