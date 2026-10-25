@@ -73,6 +73,11 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
       // table. A held reader makes the ADD give up after waitMs, pause, and try
       // again; a second reader arriving meanwhile is not queued behind it.
       await db.exec("CREATE TABLE lock_probe (id TEXT)");
+      // A migrator with NO lock_timeout of its own (unlike `scoped`), as the
+      // production pool has none: only the runner's SET LOCAL can bound it.
+      const unbounded = new URL(target);
+      unbounded.searchParams.set("options", `-c search_path=${schema} -c statement_timeout=5000`);
+      const migrator = await makePgDb(unbounded.toString());
       await reader.query("BEGIN");
       await reader.query("SELECT id FROM lock_probe LIMIT 1");
       const late = new pg.Client({ connectionString: scoped("late") });
@@ -80,7 +85,7 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
       const lock = { waitMs: 150, tries: 3, pauseMs: 50 };
       try {
         const t0 = Date.now();
-        const pending = applyLedgerMigrations(db, ["ALTER TABLE lock_probe ADD COLUMN probe TEXT"], undefined, lock);
+        const pending = applyLedgerMigrations(migrator, ["ALTER TABLE lock_probe ADD COLUMN probe TEXT"], undefined, lock);
         await new Promise((r) => setTimeout(r, 60));
         // While the ADD is between tries or waiting, a new reader gets through promptly.
         const r0 = Date.now();
@@ -88,6 +93,8 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
         assert.ok(Date.now() - r0 < 400, `a reader waited ${Date.now() - r0} ms behind the ADD`);
         await assert.rejects(pending, (error) => (error as { code?: string }).code === "55P03");
         assert.ok(Date.now() - t0 < 2_000, "it gave up after its tries, not after the reader");
+        // The timeout ended with the ALTER: the pool's connections carry none.
+        assert.deepEqual(await migrator.prepare("SHOW lock_timeout").get(), { lock_timeout: "0" });
       } finally {
         await reader.query("ROLLBACK");
         await late.end();
@@ -96,6 +103,15 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
       await applyLedgerMigrations(db, ["ALTER TABLE lock_probe ADD COLUMN probe TEXT"], undefined, lock);
       const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = 'lock_probe'`).all() as { column_name: string }[];
+      assert.ok(cols.some((c) => c.column_name === "probe"));
+    });
+
+    await t.test("a Db that cannot open a transaction of its own still migrates (a caller's or a test's wrapper)", async () => {
+      await db.exec("CREATE TABLE notx_probe (id TEXT)");
+      const noTx: Db = { prepare: (sql) => db.prepare(sql), exec: (sql) => db.exec(sql), tx: async () => { throw new Error("not here"); } };
+      await applyLedgerMigrations(noTx, ["ALTER TABLE notx_probe ADD COLUMN probe TEXT"]);
+      const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'notx_probe'`).all() as { column_name: string }[];
       assert.ok(cols.some((c) => c.column_name === "probe"));
     });
 

@@ -52,10 +52,15 @@ export const ledgerMigrationSkipped = (index: number) =>
  * lock request waits behind every reader already on the table and blocks every
  * reader that arrives after it: behind one long query on `equity`, the whole
  * app stalls for as long as that query runs. So the ADD waits at most
- * `waitMs` for its lock (SET LOCAL lock_timeout, in its own transaction),
- * pauses and asks again, `tries` times. A table that stays busy past all of
- * them still fails setup (55P03), as an unmigrated ledger must; a reader is
- * never queued behind it for longer than one wait.
+ * `waitMs` for its lock, pauses and asks again, `tries` times. A table that
+ * stays busy past all of them still fails setup (55P03), as an unmigrated
+ * ledger must; a reader is never queued behind it for longer than one wait.
+ *
+ * ONE QUERY, NOT A TRANSACTION THE CALLER MUST OFFER: `SET LOCAL lock_timeout;
+ * ALTER …` sent together runs as one implicit transaction on one connection,
+ * so the timeout binds the ALTER, ends with it, and never stays on a pooled
+ * connection for an unrelated query. Every Db can run it, including one that
+ * cannot open a transaction of its own (a caller's or a test's wrapper).
  */
 export interface AddColumnLock {
   waitMs: number;
@@ -68,10 +73,7 @@ async function addColumn(db: Db, ddl: string, sqlite: boolean, lock: Readonly<Ad
   if (sqlite) return db.exec(ddl);
   for (let attempt = 1; ; attempt++) {
     try {
-      await db.tx(async (t) => {
-        await t.exec(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(lock.waitMs))}ms'`);
-        await t.exec(ddl);
-      });
+      await db.exec(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(lock.waitMs))}ms'; ${ddl}`);
       return;
     } catch (error) {
       if ((error as { code?: unknown })?.code !== "55P03" || attempt >= lock.tries) throw error;
