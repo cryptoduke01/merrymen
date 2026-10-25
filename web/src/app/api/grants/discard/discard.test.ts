@@ -84,9 +84,10 @@ describe("POST /api/grants/discard", () => {
   let grants: typeof import("../../../../../../worker/src/grant-store");
   let commandDir: (home: string) => string;
 
-  const grant = (): StoredGrant =>
+  // A tenant's agent account is its own: the store refuses a second login's claim on one.
+  const grant = (account: `0x${string}` = ACCOUNT): StoredGrant =>
     ({
-      smartAccount: ACCOUNT,
+      smartAccount: account,
       owner: "0x00000000000000000000000000000000000000b7",
       sessionKeyAddress: "0x00000000000000000000000000000000000000d7",
       serialized: "eyJ-a-zerodev-blob-start-over",
@@ -211,7 +212,7 @@ describe("POST /api/grants/discard", () => {
     process.env.MERRYMEN_HOSTED = "1";
     grants.resetGrantStoreForTest();
     const wallet = "0x00000000000000000000000000000000000000e8" as const;
-    await grants.getGrantStore("spot").put(wallet, grant());
+    await grants.getGrantStore("spot").put(wallet, grant(`0x${"e8".repeat(20)}`));
     const res = await POST(new Request("https://app.merrymen.dev/api/grants/discard", { method: "POST" }));
     assert.equal(res.status, 401);
     assert.ok(await grants.getGrantStore("spot").get(wallet), "still stored");
@@ -223,7 +224,7 @@ describe("POST /api/grants/discard", () => {
     const store = grants.getGrantStore("spot");
     const wallet = "0x00000000000000000000000000000000000000e9" as const;
     const other = "0x00000000000000000000000000000000000000ea" as const;
-    await store.put(wallet, grant());
+    await store.put(wallet, grant(`0x${"e9".repeat(20)}`));
     const get = mock.method(store, "get");
     const remove = mock.method(store, "remove");
     try {

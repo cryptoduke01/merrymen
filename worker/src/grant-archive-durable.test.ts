@@ -168,7 +168,9 @@ describe("the helper: durable means synced, renamed, and the directory synced", 
 
 describe("every archiver writes through the durable helper", () => {
   it("the worker's archiveCurrentGrant", () => {
-    const fn = body(GRANT, "export function archiveCurrentGrant(");
+    // archiveGrantFile does the work, for Spot's grant.json and a Perps wallet's (perps-kill.ts).
+    assert.match(body(GRANT, "export function archiveCurrentGrant("), /return archiveGrantFile\(grantFilePath\(\), homePaths\.grantsArchive\(\)\);/);
+    const fn = body(GRANT, "export function archiveGrantFile(");
     assert.doesNotMatch(fn, IN_PLACE_WRITE);
     assert.match(fn, /writeFileAtomicSync\(path\.join\(dir, `\$\{account\.toLowerCase\(\)\}\.json`\), raw, 0o600, \{ durable: true \}\);/);
     assert.match(fn, /if \(mkdirSync\(dir, \{ recursive: true, mode: 0o700 \}\) !== undefined\) fsyncDirSync\(path\.dirname\(dir\)\);/, "a new archive directory's own entry is synced too");
@@ -220,7 +222,7 @@ describe("grant.json changes only after the archive — and a kill without one d
     assert.doesNotMatch(kill, /rmSync\(homePaths\.grant\(\)/);
     assert.match(GRANT, /export function grantFilePath\(\): string \{\s*return process\.env\.MERRYMEN_GRANT_FILE \?\? homePaths\.grant\(\);/);
     assert.match(body(GRANT, "export function loadGrantFile("), /const file = grantFilePath\(\);/);
-    assert.match(body(GRANT, "export function archiveCurrentGrant("), /const file = grantFilePath\(\);/);
+    assert.match(body(GRANT, "export function archiveCurrentGrant("), /archiveGrantFile\(grantFilePath\(\),/);
   });
 
   it("merrymen kill: archive, then remove; a failed archive pauses and returns first", () => {
