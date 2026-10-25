@@ -717,8 +717,16 @@ async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
 /** What the Perps half did, said after a Robinhood grant the kill had to keep. */
 function perpsAfterKeptGrant(perps: PerpsHalf): string {
   if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
+  if (perps.state === "not-stopped" && perps.left === "paper") return " Your Perps wallet's practice perpetuals could not be switched off: try the kill again.";
   if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
   return "";
+}
+
+/** What a failed Perps half left undone, as the kill's sentence names it. */
+function perpsLeft(perps: PerpsHalf): string {
+  return perps.left === "paper"
+    ? "your Perps wallet's practice perpetuals could not be switched off yet"
+    : "your Perps wallet's grant could not be revoked yet";
 }
 /**
  * A kill that could not stop the Solana strategy or revoke the Perps grant is reported
@@ -728,8 +736,8 @@ function perpsAfterKeptGrant(perps: PerpsHalf): string {
 function killed(solana: boolean, perps: PerpsHalf): NextResponse {
   const perpsDown = perps.state === "not-stopped";
   if (!solana || perpsDown) {
-    const what = !solana && perpsDown ? "your Solana strategy could not be stopped and your Perps wallet's grant could not be revoked yet"
-      : !solana ? "your Solana strategy could not be stopped yet" : "your Perps wallet's grant could not be revoked yet";
+    const what = !solana && perpsDown ? `your Solana strategy could not be stopped and ${perpsLeft(perps)}`
+      : !solana ? "your Solana strategy could not be stopped yet" : perpsLeft(perps);
     return NextResponse.json({ error: `Kill incomplete: your Robinhood Chain agent is stopped, but ${what}.${perps.why ? ` ${perps.why}` : ""} Try the kill again.`,
       ownerFacing: true, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 503 });
   }

@@ -82,6 +82,10 @@ test("the Telegram answer has a Perps line after the Solana one, and none for an
   assert.match(killDoneText({ ok: true, archived: null, solana: "stopped", perps: "stopped" }), /Your Solana strategy is stopped too\.\nYour Perps wallet's grant is revoked too/);
   assert.match(killDoneText({ ok: false, reason: "no grant", perps: "stopped" }), /^nothing to kill: no grant\nYour Perps wallet's grant is revoked too/);
   assert.match(killDoneText({ ok: true, archived: null, perps: "not-stopped" }), /Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign\. \/kill again\.$/);
+  // The grant went, the paper strategy could not be switched off: incomplete, and never said to be a live grant.
+  const paper = killDoneText({ ok: true, archived: null, perps: "paper-not-stopped" });
+  assert.match(paper, /Kill incomplete: your Perps wallet's grant is revoked, so nothing trades on it, but its practice perpetuals could not be switched off\./);
+  assert.doesNotMatch(paper, /may still sign/);
   assert.doesNotMatch(killDoneText({ ok: true, archived: null, solana: "stopped" }), /Perps/);
 });
 
@@ -95,11 +99,33 @@ test("the worker's self-hosted Telegram kill runs the Perps half beside Solana's
 });
 
 test("the hosted half answers from the store, and refuses to guess", async () => {
+  const T = "0x00000000000000000000000000000000000000a1" as const;
   const store = (r: "removed" | "absent" | "newer") => ({ revokeForKill: async () => r });
-  assert.equal(await stopPerpsForKill("0x00000000000000000000000000000000000000a1", { store: store("removed") }), "stopped");
-  assert.equal(await stopPerpsForKill("0x00000000000000000000000000000000000000a1", { store: store("absent") }), "none");
-  assert.equal(await stopPerpsForKill("0x00000000000000000000000000000000000000a1", { store: store("newer"), coveredSec: 1 }), "newer");
-  await assert.rejects(stopPerpsForKill("0x00000000000000000000000000000000000000a1", { store: { revokeForKill: async () => { throw new Error("database unavailable"); } } }), /database unavailable/);
+  // The paper strategy is turned off on every kill that finds no newer grant (slice 3).
+  const asked: string[] = [];
+  const paper = (r: "disabled" | "none") => async (t: `0x${string}`) => {
+    asked.push(t);
+    return r;
+  };
+  assert.equal(await stopPerpsForKill(T, { store: store("removed"), paper: paper("disabled") }), "stopped");
+  assert.equal(await stopPerpsForKill(T, { store: store("absent"), paper: paper("none") }), "none");
+  // No grant, but perps were on: turned off, and the answer names no grant it did not revoke.
+  assert.equal(await stopPerpsForKill(T, { store: store("absent"), paper: paper("disabled") }), "none");
+  assert.deepEqual(asked, [T, T, T]);
+  // A grant signed after the kill is the owner's later decision, and so are its settings.
+  assert.equal(await stopPerpsForKill(T, { store: store("newer"), coveredSec: 1, paper: paper("disabled") }), "newer");
+  assert.equal(asked.length, 3, "the settings of a later decision are not touched");
+  await assert.rejects(stopPerpsForKill(T, { store: { revokeForKill: async () => { throw new Error("database unavailable"); } }, paper: paper("none") }), /database unavailable/);
+  // A settings store that cannot say makes the kill incomplete — after the grant was revoked.
+  let revoked = false;
+  await assert.rejects(
+    stopPerpsForKill(T, {
+      store: { revokeForKill: async () => { revoked = true; return "removed"; } },
+      paper: async () => { throw new Error("settings unavailable"); },
+    }),
+    /settings unavailable/,
+  );
+  assert.equal(revoked, true, "the grant first");
   const saved = process.env.MERRYMEN_HOSTED;
   process.env.MERRYMEN_HOSTED = "1";
   try { await assert.rejects(stopLocalPerpsForKill(), /hosted kill names its tenant/); }

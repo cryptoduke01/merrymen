@@ -55,6 +55,10 @@ before(async () => {
   mock.method(grants.getGrantStore("spot"), "stopForReplacement", async (...args: unknown[]) => { replacements.push(args); return "stopped"; });
   // The kill's Perps half runs on every phone stop too; this owner has no Perps wallet.
   mock.method(grants.getGrantStore("perps"), "revokeForKill", async (tenant: string) => { perpsAsked.push(tenant); return "absent" as const; });
+  // …and its paper strategy is turned off (slice 3): no Perps settings either, on a database never connected.
+  const settings = createRequire(import.meta.url)("../../../../../worker/src/settings-store.ts") as typeof import("../../../../../worker/src/settings-store");
+  settings.resetSettingsStoreForTest();
+  mock.method(settings.getSettingsStore("perps") as InstanceType<typeof settings.PgSettingsStore>, "disablePerpsForKill", async () => "none" as const);
   const solana = await import("@/lib/solana-binding-store");
   mock.method(solana.getSolanaBindingStore(), "disableForKill", async (tenant: string) => { solanaStopped.push(tenant); return true; });
   ({ DELETE } = await import("./route"));

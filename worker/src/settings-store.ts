@@ -374,6 +374,14 @@ export class FileSettingsStore implements SettingsStore {
   async remove(tenant: `0x${string}`): Promise<void> {
     await rm(this.file(tenant), { force: true });
   }
+  /** The kill's paper stand-down (disablePaperPerpsForKill). A missing file is "none", and nothing is made. */
+  async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
+    if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
+    const current = await this.get(tenant);
+    if (current?.perpsEnabled !== true) return "none";
+    await this.put(tenant, { ...current, perpsEnabled: false });
+    return "disabled";
+  }
 
   /**
    * HOLDER CLAIMS ON DISK — REAL, NOT "ALWAYS ALLOW".
@@ -1030,6 +1038,42 @@ export class PgSettingsStore implements SettingsStore {
     await c.query(`DELETE FROM ${this.table} WHERE tenant = $1`, [tenant.toLowerCase()]);
   }
   /**
+   * The kill's paper stand-down (disablePaperPerpsForKill), ON A CONNECTION OF
+   * ITS OWN, so the table is never made: client() creates every table it
+   * names, and an owner with no Perps wallet must cost a kill one catalog look
+   * and nothing more (to_regclass, as the grant store's revokeForKill). The
+   * blob is sealed, so the field cannot be set in SQL: read, unseal, reseal and
+   * write it back only if it is still the blob that was read (compare and
+   * swap). An owner's save landing in between makes the write miss, and it is
+   * read again, so neither that save nor the kill is lost.
+   */
+  async disablePerpsForKill(tenant: `0x${string}`): Promise<"disabled" | "none"> {
+    if (this.wallet !== "perps") throw new Error("Only the Perps wallet's settings hold perps.");
+    const c = await this.connect(this.url);
+    // The statements below fail on a dropped connection; its event must not end the process.
+    (c as { on?: (event: string, fn: () => void) => void }).on?.("error", () => {});
+    try {
+      const found = await c.query(`SELECT to_regclass($1) IS NOT NULL AS found`, [this.table]);
+      if (found.rows[0]?.found !== true) return "none";
+      const t = tenant.toLowerCase();
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { rows } = await c.query(`SELECT sealed FROM ${this.table} WHERE tenant = $1`, [t]);
+        if (!rows[0]) return "none";
+        const before = String(rows[0].sealed);
+        const current = unseal(before);
+        if (current.perpsEnabled !== true) return "none";
+        const swapped = await c.query(
+          `UPDATE ${this.table} SET sealed = $1, updated_at = $2 WHERE tenant = $3 AND sealed = $4 RETURNING tenant`,
+          [seal({ ...current, perpsEnabled: false }), Math.floor(Date.now() / 1000), t, before],
+        );
+        if (swapped.rows.length === 1) return "disabled";
+      }
+      throw new Error("the Perps wallet's settings kept changing under the kill");
+    } finally {
+      void Promise.resolve((c as { end?: () => unknown }).end?.()).catch(() => {});
+    }
+  }
+  /**
    * INSERT … ON CONFLICT DO NOTHING, THEN LOOK. The insert is the atomic
    * first-claim-wins — and only on a wallet with no release record, in the
    * same statement; RETURNING says whether it was ours. When it did not land,
@@ -1223,6 +1267,26 @@ export function getSettingsStore(wallet: GrantPurpose): SettingsStore {
   const store = url ? new PgSettingsStore(url, wallet) : new FileSettingsStore(wallet);
   cached.set(wallet, store);
   return store;
+}
+
+/**
+ * A KILL TURNS A PERPS WALLET'S PAPER STRATEGY OFF (perps-kill.ts): its
+ * `perpsEnabled` set false in that wallet's own settings, every other field as
+ * it was. "disabled" when perps were on and now are off; "none" when there are
+ * no Perps settings for the tenant, or perps were already off. Throws when it
+ * cannot say, and the kill is then incomplete. Retry-safe: a second call finds
+ * them off. A store that is not the Perps wallet's refuses.
+ */
+export async function disablePaperPerpsForKill(
+  tenant: `0x${string}`,
+  store: SettingsStore = getSettingsStore("perps"),
+): Promise<"disabled" | "none"> {
+  if (store instanceof PgSettingsStore || store instanceof FileSettingsStore) return store.disablePerpsForKill(tenant);
+  // A stand-in a test installed (useSettingsStoreForTest): its own get and put.
+  const current = await store.get(tenant);
+  if (current?.perpsEnabled !== true) return "none";
+  await store.put(tenant, { ...current, perpsEnabled: false });
+  return "disabled";
 }
 
 /** Test seam: drop the cached stores so a test can change the environment. */

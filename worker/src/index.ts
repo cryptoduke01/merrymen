@@ -15690,6 +15690,7 @@ async function main() {
       if (solana === "not-stopped") console.log("[kill] the local Solana strategy could not be stopped; the owner is told to /kill again");
       const perps = isHostedMode() ? null : await selfHostedPerpsKill();
       if (perps === "not-stopped") console.log("[kill] the local Perps wallet's grant could not be revoked; the owner is told to /kill again");
+      if (perps === "paper-not-stopped") console.log("[kill] the local Perps wallet's practice perpetuals could not be switched off; the owner is told to /kill again");
       const result = robinhoodKill();
       return { ...result, ...(solana ? { solana } : {}), ...(perps ? { perps } : {}) };
     },
