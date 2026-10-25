@@ -30,6 +30,7 @@ import { PC_CAPABILITIES, PROPOSAL_PARAM, isHostedMode, parseTailRequest, saysTa
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { rememberChatSetting } from "./state";
 import { ensureHome, homePaths, merrymenHome } from "../home";
+import { perpKeySecretForms } from "../perps/keystore";
 import { loadGrantFile } from "../grant";
 import {
   answerCallbackQuery,
@@ -1770,6 +1771,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         grant?.serialized,
         grant?.demoOwnerPrivateKey,
         grant?.demoSessionPrivateKey,
+        // The Lighter API private key is not in the grant (only its public half
+        // is): it lives in its own key file (docs/perps.md rule 5), which a
+        // custom MERRYMEN_HOME can put where no path guard expects. Every
+        // spelling, 0x and bare, either case; the 80-hex shape backs it up.
+        ...perpKeySecretForms(merrymenHome(), grant?.perp?.apiPublicKey),
         // Solana's server secrets, from the environment and a self-hosted .env.solana.local.
         ...solanaSecretValues(process.env, [path.join(process.cwd(), ".env.solana.local"), path.join(merrymenHome(), ".env.solana.local")]),
       ].filter((s): s is string => typeof s === "string" && s.length >= 8);

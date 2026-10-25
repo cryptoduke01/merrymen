@@ -95,7 +95,10 @@ export function isDestructive(cmd: string): boolean {
 /** Secret-bearing paths the agent's FILE tools refuse even inside the files
  * root, and its shell refuses to name outright. Defense in depth, not a vault —
  * the durable control is redactSecrets() on all output, which is value-based. */
-const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret|\bid\.json|keypair\.json/i;
+// `perp-key` covers both homes of the Lighter API private key (docs/perps.md
+// rule 5): self-hosted `perp-keys/<pubkey>.json` and a hosted child's
+// `perp-key.json`. `\.merr` alone does not: MERRYMEN_HOME may be any path.
+const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|perp-key|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret|\bid\.json|keypair\.json/i;
 
 export function isSensitivePath(p: string): boolean {
   return SENSITIVE_PATH.test(p);
@@ -143,6 +146,33 @@ const SECRET_SHAPES: RegExp[] = [
   // the fee payer's seed, the store DEK, the Jupiter key, keyed RPC URLs), whatever its value.
   /\bMERRYMEN_[A-Z0-9_]{0,64}(?:SEED|DEK|KEY|SECRET|TOKEN|RPC[A-Z0-9_]{0,32})[ \t]{0,16}=[ \t]{0,16}["']?[^\s"'#]{8,4096}/g,
 ];
+/**
+ * A Lighter auth token, `<deadline>:<account>:<keyIndex>:<160 hex>`, whole, so
+ * the account it authenticates goes with it (docs/perps.md rule 5). Run before
+ * LONG_HEX_RUN, which would otherwise take only its signature.
+ */
+const LIGHTER_AUTH_TOKEN = /\b\d{9,11}:\d{1,16}:\d{1,3}:[0-9a-fA-F]{160}/g;
+
+/**
+ * A Lighter API private key is 40 bytes: 80 hex, 0x or bare, either case
+ * (docs/perps.md rule 5). Run BEFORE the 64-hex shape, which would otherwise
+ * eat the first 66 characters of a 0x key and leave its last 16 hex, a whole
+ * 64-bit limb, on show, and which never sees a bare key at all. Greedy, so a
+ * key inside a longer hex run is never half-shown; bounded like every shape
+ * above, and a longer run is taken in consecutive pieces. Lighter tx hashes
+ * are 80 hex too and go with it: over-redacting is the safe side here.
+ */
+const LONG_HEX_RUN = /(?:0x)?[0-9a-fA-F]{80,65536}/g;
+
+/**
+ * A digit AND a letter: a key, not somebody holding a key down. A random
+ * 80-hex key lacks one of the two with probability ~(10/16)^80 + (6/16)^80.
+ */
+function isKeyLikeHexRun(run: string): boolean {
+  const hex = run.startsWith("0x") ? run.slice(2) : run;
+  return /[0-9]/.test(hex) && /[a-fA-F]/.test(hex);
+}
+
 // Solana secret keys (a 64-byte keypair as base58, or the CLI's id.json byte
 // array) belong in this list too, but a shape alone would also take every
 // 64-byte transaction signature. So they are found by their own public key
@@ -190,6 +220,8 @@ export function redactSecrets(text: string, knownSecrets: string[], budget?: Sec
   for (const s of [...solanaSecretsIn(text, budget), ...knownSecrets]) {
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
+  out = out.replace(LIGHTER_AUTH_TOKEN, "[redacted]");
+  out = out.replace(LONG_HEX_RUN, (m) => (isKeyLikeHexRun(m) ? "[redacted]" : m));
   for (const re of SECRET_SHAPES) out = out.replace(re, "[redacted]");
   return out;
 }
@@ -199,7 +231,8 @@ export function redactSecrets(text: string, knownSecrets: string[], budget?: Sec
 export function containsSecret(text: string, knownSecrets: string[]): boolean {
   if (knownSecrets.some((s) => s && s.length >= 8 && text.includes(s))) return true;
   if (solanaSecretIn(text)) return true;
-  return SECRET_SHAPES.some((re) => {
+  for (const m of text.matchAll(LONG_HEX_RUN)) if (isKeyLikeHexRun(m[0])) return true;
+  return [LIGHTER_AUTH_TOKEN, ...SECRET_SHAPES].some((re) => {
     re.lastIndex = 0;
     return re.test(text);
   });

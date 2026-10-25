@@ -53,13 +53,14 @@ const GUARDED = Symbol.for("merrymen.redactUrls.guarded");
 
 /**
  * Route everything this process writes to stdout and stderr through
- * `redactUrls` — `console.*` of an error object included, since console
+ * `redactUrls` (keyed URLs and Lighter key material) — `console.*` of an
+ * error object included, since console
  * formats it (stack, `url: '…'`, metaMessages, cause chain) to a string and
  * then calls the stream's `write`.
  *
  * Installed once at each production entry point, before anything can fail.
- * Idempotent. A Buffer is decoded only when it may hold a URL, and written
- * untouched when nothing in it changed.
+ * Idempotent. A Buffer is decoded only when it may hold a URL or a key, and
+ * written untouched when nothing in it changed.
  */
 export function guardStdio(streams: NodeJS.WriteStream[] = [process.stdout, process.stderr]): void {
   for (const stream of streams) {
@@ -69,7 +70,8 @@ export function guardStdio(streams: NodeJS.WriteStream[] = [process.stdout, proc
     s.write = ((chunk: unknown, ...rest: unknown[]) => {
       if (typeof chunk === "string") return write(redactUrls(chunk), ...rest);
       const bytes = chunk instanceof Uint8Array ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : null;
-      if (bytes?.includes("://")) {
+      // A URL, or a run long enough to be a Lighter key (redactLighterSecrets).
+      if (bytes && (bytes.includes("://") || bytes.length >= 80)) {
         const text = bytes.toString("utf8");
         const safe = redactUrls(text);
         if (safe !== text) {
