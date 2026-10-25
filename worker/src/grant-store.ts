@@ -757,8 +757,9 @@ export class PgGrantStore implements GrantStore {
     const rec = toRecord(tenant, grant, this.wallet);
     const keyHash = sessionKeyHash(grant.demoSessionPrivateKey);
     const account = grant.smartAccount.toLowerCase();
-    // Spot's tables exist before any transaction below reads or writes them.
-    await this.client();
+    // Spot's tables (made by its shared connection) exist before the transaction
+    // below writes them; Perps makes its own table in that transaction.
+    if (this.wallet === "spot") await this.client();
     const t = this.table;
     const other = WALLET_TABLE[otherWallet(this.wallet)];
     await this.transaction(async (c) => {
