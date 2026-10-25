@@ -752,6 +752,21 @@ data class ChatReply(
 @Serializable
 data class OrderBody(val side: String, val symbol: String, val usdgAmount: Double, val owner: String? = null)
 
+/**
+ * THE KILL SWITCH'S BODY, the web's own (web/src/lib/stop-agent.ts). Hosted
+ * refuses a DELETE /api/grants that does not name its `purpose` with 400 and
+ * deletes nothing, so an old renewal tab cannot discard a grant by accident;
+ * the `{}` this app sent was refused that way. `expectedTenant` is the wallet
+ * that tapped Stop: hosted, a session that has become another wallet since is
+ * refused 409 and nothing is removed. Null omits the key (explicitNulls =
+ * false); self-hosted has no session, and its DELETE reads no body.
+ *
+ * NO DEFAULT FOR `purpose`: this Json does not encode defaults, so a
+ * defaulted "delete-agent" would leave the phone as `{}` again.
+ */
+@Serializable
+data class StopBody(val purpose: String, val expectedTenant: String? = null)
+
 @Serializable
 data class OrderResult(
   val id: String? = null,
