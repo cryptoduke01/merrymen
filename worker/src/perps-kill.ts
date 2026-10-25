@@ -92,6 +92,21 @@ export async function stopLocalPerpsForKill(): Promise<"stopped" | "none"> {
 }
 
 /**
+ * A kill's Perps half as a route answers for it: `stopped` when a Perps grant
+ * was revoked, `none` when there is none (or only one signed after the kill),
+ * `not-stopped` when it could not be revoked, with the owner-facing reason when
+ * there is one they can act on (PerpsKillIncomplete). Never throws.
+ */
+export type PerpsHalf = { state: "stopped" | "none" | "not-stopped"; why?: string };
+export async function perpsHalf(stop: () => Promise<"stopped" | "newer" | "none">): Promise<PerpsHalf> {
+  try {
+    return { state: (await stop()) === "stopped" ? "stopped" : "none" };
+  } catch (e) {
+    return { state: "not-stopped", ...(e instanceof PerpsKillIncomplete ? { why: e.message } : {}) };
+  }
+}
+
+/**
  * A self-hosted kill's Perps half for Telegram's answer (kill-confirm.ts):
  * "stopped" when a Perps grant was revoked, null when there was none, and
  * "not-stopped" when it could not be, so the kill is said to be incomplete.

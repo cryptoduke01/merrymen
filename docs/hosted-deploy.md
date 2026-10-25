@@ -896,9 +896,9 @@ one is built to be safe alone with perps off.
 
 - **Every kill already reaches a Perps wallet** (slice 2). "Kill all agents",
   the phone apps' Stop (both through `DELETE /api/grants`), a hosted Telegram
-  /kill and `merrymen kill` revoke the tenant's Perps grant beside its Spot
-  grant and Solana strategy, and report the kill incomplete, never done, when
-  the Perps half fails. A tenant with no Perps wallet costs a kill one catalog
+  /kill, `merrymen kill` and Start over revoke the tenant's Perps grant beside
+  its Spot grant (and, all but Start over, its Solana strategy), and report the
+  kill incomplete, never done, when the Perps half fails. A tenant with no Perps wallet costs a kill one catalog
   read of `perps_grants`, with no lock and no schema written.
 - **The tables are additive.** `perps_grants` and `perps_tenant_settings` hold
   the Perps wallets' grants and settings beside `grants` and `tenant_settings`,

@@ -15,7 +15,8 @@
  *  - one profile keeps both accounts, Spot first, across two services;
  *  - a Perps wallet can be renewed (stop, fresh key, old key fenced) and
  *    revoked, and a kill's lookup waits on no lock;
- *  - a Perps removal leaves a staged Spot ledger import alone.
+ *  - a Perps removal leaves a staged Spot ledger import alone;
+ *  - through getGrantStore, the Perps store opens no connection of its own.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -23,7 +24,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { privateKeyToAccount } from "viem/accounts";
 import type { StoredGrant } from "../../packages/core/src/index";
-import { GrantReplacementConflict, GrantWalletConflict, PgGrantStore } from "./grant-store";
+import { getGrantStore, GrantReplacementConflict, GrantWalletConflict, PgGrantStore, resetGrantStoreForTest } from "./grant-store";
 import { PgIdentityStore } from "./identity-store";
 import { PgSettingsStore } from "./settings-store";
 import { sealSecret } from "./store-crypto";
@@ -198,6 +199,25 @@ test("Postgres: two wallets per login, beside an untouched Spot fleet", { skip: 
     assert.equal(await perps.get(T), null);
     assert.equal(await perps.revokeForKill(T), "absent", "a retry finds nothing left");
     assert.deepEqual(await row("grants", T), spotBefore, "and Spot is as it was");
+  });
+
+  await t.test("through getGrantStore, the Perps store reads on the Spot store's connection and opens none of its own", async () => {
+    const savedUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = scoped("shared-reads");
+    resetGrantStoreForTest();
+    try {
+      const viaSpot = getGrantStore("spot"), viaPerps = getGrantStore("perps");
+      await viaSpot.get(T);
+      assert.equal((await viaPerps.get(T))?.smartAccount, undefined, "revoked above");
+      assert.equal(await viaPerps.revokeForKill(addr(0x150)), "absent");
+      assert.deepEqual(await viaPerps.listTenants(), (await perps.listTenants()));
+      const { rows } = await admin.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'shared-reads'`);
+      assert.equal(rows[0]!.n, 1, "one connection for both wallets' statements");
+      await (await (viaSpot as PgGrantStore).sharedConnection()).end?.();
+    } finally {
+      resetGrantStoreForTest();
+      if (savedUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = savedUrl;
+    }
   });
 
   await t.test("a Perps removal leaves a staged Spot ledger import alone; a Spot removal fences it", async () => {

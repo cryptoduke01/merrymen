@@ -657,13 +657,30 @@ export class PgGrantStore implements GrantStore {
   private readonly table: (typeof WALLET_TABLE)[GrantPurpose];
   /** Is this wallet's table known to exist? Tables are never dropped, so yes is final. */
   private present: boolean;
-  constructor(private url: string, readonly wallet: GrantPurpose, private connect: PgGrantConnect = connectPgGrant) {
+  /**
+   * `reads`: the connection this store's single statements go on, when another
+   * store's is shared. getGrantStore gives the Perps store the Spot store's, so a
+   * Spot-only owner's kill needs no connection of its own for its Perps half and
+   * cannot fail on one: that half then fails only where the Spot half would. The
+   * shared connection is never given a BEGIN (transaction, below).
+   */
+  constructor(
+    private url: string,
+    readonly wallet: GrantPurpose,
+    private connect: PgGrantConnect = connectPgGrant,
+    private reads?: () => Promise<PgClientLike>,
+  ) {
     if (!isGrantPurpose(wallet)) throw new Error("Unrecognised wallet purpose");
     this.table = WALLET_TABLE[wallet];
     this.present = wallet === "spot";
     requireDek(); // fail fast: hosted Postgres without a DEK is a plaintext-at-rest bug
   }
+  /** This store's statement connection, for another store to share (getGrantStore). */
+  sharedConnection(): Promise<PgClientLike> {
+    return this.client();
+  }
   private async client(): Promise<PgClientLike> {
+    if (this.reads) return this.reads();
     if (!this.ready) {
       const started = (this.ready = (async () => {
         const c = await this.connect(this.url);
@@ -732,6 +749,10 @@ export class PgGrantStore implements GrantStore {
       }
       await c.query("BEGIN");
       try {
+        // A lock held elsewhere (another put for this tenant or account) is
+        // waited for, but not for ever: the put fails, nothing is written, and
+        // the owner signs again.
+        await c.query("SET LOCAL lock_timeout = '10s'");
         const out = await fn(c);
         await c.query("COMMIT");
         return out;
@@ -948,7 +969,10 @@ export function getGrantStore(wallet: GrantPurpose): GrantStore {
   const found = cached.get(wallet);
   if (found) return found;
   const url = process.env.DATABASE_URL;
-  const store = url ? new PgGrantStore(url, wallet) : new FileGrantStore(wallet);
+  const store = !url ? new FileGrantStore(wallet)
+    // The Perps store's statements share the Spot store's connection (see PgGrantStore).
+    : wallet === "perps" ? new PgGrantStore(url, wallet, connectPgGrant, () => (getGrantStore("spot") as PgGrantStore).sharedConnection())
+    : new PgGrantStore(url, wallet);
   cached.set(wallet, store);
   return store;
 }

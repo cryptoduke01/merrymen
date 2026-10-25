@@ -40,7 +40,7 @@ import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
-import { PerpsKillIncomplete, stopLocalPerpsForKill, stopPerpsForKill } from "../../../../../worker/src/perps-kill";
+import { perpsHalf, stopLocalPerpsForKill, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
 import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
@@ -631,11 +631,22 @@ export async function DELETE(req: Request) {
     let removal: unknown = null;
     try { await getGrantStore("spot").remove(tenant); } catch (e) { removal = e ?? new Error("grant removal failed"); }
     const solana = await solanaStopped(() => stopSolanaForKill(tenant));
-    const perps = await perpsStopped(() => stopPerpsForKill(tenant));
+    const perps = await perpsHalf(() => stopPerpsForKill(tenant));
     if (removal !== null) throw removal;
     return killed(solana, perps);
   }
   if (walletNamed) return killNamesWallet();
+  // A SELF-HOSTED RENEWAL STOPS THE SPOT GRANT, NOT THE PERPS WALLET. Every
+  // self-hosted DELETE has always removed grant.json, renewals too (the new grant
+  // is posted straight after), so the body was never read. It is now, only so a
+  // Spot renewal leaves the Perps wallet's grant alone: neither wallet's authority
+  // reaches the other. Anything but a readable permission replacement, an
+  // unreadable or oversized body included, is the kill it always was.
+  let renewal = false;
+  try {
+    const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES);
+    renewal = text !== null && (JSON.parse(text) as { purpose?: unknown } | null)?.purpose === "permission-replacement";
+  } catch { /* a kill */ }
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
   // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
@@ -643,7 +654,7 @@ export async function DELETE(req: Request) {
   // instead), and must never leave autonomous Solana trading or a Perps grant behind a
   // "paused" answer.
   const solana = await solanaStopped(() => stopLocalSolanaForKill());
-  const perps = await perpsStopped(() => stopLocalPerpsForKill());
+  const perps: PerpsHalf = renewal ? { state: "none" } : await perpsHalf(() => stopLocalPerpsForKill());
   try {
     await removeSelfHostedGrant();
   } catch (e) {
@@ -683,20 +694,8 @@ function killNamesWallet(): NextResponse {
 async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
   try { await stop(); return true; } catch { return false; }
 }
-/**
- * The kill's Perps half (perps-kill.ts): `stopped` when a Perps grant was revoked,
- * `none` when there is no Perps wallet, `not-stopped` when it could not be revoked,
- * with the reason when it is one the owner can act on.
- */
-async function perpsStopped(stop: () => Promise<"stopped" | "newer" | "none">): Promise<{ state: "stopped" | "none" | "not-stopped"; why?: string }> {
-  try {
-    return { state: (await stop()) === "stopped" ? "stopped" : "none" };
-  } catch (e) {
-    return { state: "not-stopped", ...(e instanceof PerpsKillIncomplete ? { why: e.message } : {}) };
-  }
-}
 /** What the Perps half did, said after a Robinhood grant the kill had to keep. */
-function perpsAfterKeptGrant(perps: { state: "stopped" | "none" | "not-stopped" }): string {
+function perpsAfterKeptGrant(perps: PerpsHalf): string {
   if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
   if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
   return "";
@@ -706,7 +705,7 @@ function perpsAfterKeptGrant(perps: { state: "stopped" | "none" | "not-stopped" 
  * incomplete, never as done. A retry is safe. An owner with neither sees exactly what
  * they always saw.
  */
-function killed(solana: boolean, perps: { state: "stopped" | "none" | "not-stopped"; why?: string }): NextResponse {
+function killed(solana: boolean, perps: PerpsHalf): NextResponse {
   const perpsDown = perps.state === "not-stopped";
   if (!solana || perpsDown) {
     const what = !solana && perpsDown ? "your Solana strategy could not be stopped and your Perps wallet's grant could not be revoked yet"

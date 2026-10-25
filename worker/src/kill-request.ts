@@ -497,5 +497,9 @@ export async function honourKillRequest(
       return { outcome: "failed", request, error: e instanceof Error ? e.message : String(e) };
     }
   }
+  // A SUPERSEDED KILL CONFIRMS NOTHING: the owner signed again after it. A ✅
+  // an earlier pass of this kill owed is dropped here, so it can never ride on a
+  // later, unrelated kill (nor tell that one it deleted a Perps grant).
+  takeKillConfirm(home);
   return { outcome: "superseded", request, perps: perpsRemoved };
 }

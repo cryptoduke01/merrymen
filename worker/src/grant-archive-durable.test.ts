@@ -206,7 +206,8 @@ describe("grant.json changes only after the archive — and a kill without one d
     before_(remove, 'if (kept.kind === "failed") throw new GrantArchiveError(kept.why, pauseForKeptGrant());', "await rm(homePaths.grant()", "refuse and pause before deleting");
     before_(remove, "await rm(homePaths.grant(), { force: true });", "liftKillPause();", "lift only a kill's pause after removal");
     for (const route of [ROUTE, DISCARD]) assert.match(route, /removeSelfHostedGrant/);
-    assert.match(DISCARD, /if \(e instanceof GrantArchiveError\) return NextResponse\.json\(\{ error: e\.message, paused: e\.paused \}, \{ status: 409 \}\);/);
+    // Start over answers the archive refusal the same way, and says what its Perps half did.
+    assert.match(DISCARD, /if \(e instanceof GrantArchiveError\) \{\s*return NextResponse\.json\(\{ error: e\.message, paused: e\.paused, \.\.\.\(perps\.state === "none" \? \{\} : \{ perps: perps\.state \}\) \}, \{ status: 409 \}\);/);
     // The kill switch says whether it stopped the local Solana strategy and the local Perps
     // wallet too, which it does first.
     assert.match(ROUTE, /if \(e instanceof GrantArchiveError\) \{\s*return NextResponse\.json\(\{ error: `\$\{e\.message\}[^`]*`,\s*paused: e\.paused, solana: solana \? "stopped" : "not-stopped", \.\.\.\(perps\.state === "none" \? \{\} : \{ perps: perps\.state \}\) \}, \{ status: 409 \}\);/);

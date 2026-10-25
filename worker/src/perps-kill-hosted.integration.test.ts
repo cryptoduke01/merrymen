@@ -14,7 +14,7 @@
  * MERRYMEN_HOME is per process (node --test forks per file).
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
@@ -140,6 +140,29 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
     await honourPendingKills();
     assert.ok(await perpsStore.get(T), "the owner's later Perps grant is kept");
     assert.deepEqual(confirmed, []);
+  });
+
+  it("a kill superseded by a Spot re-sign drops the ✅ it owed, so a later kill never claims its Perps revocation", async () => {
+    // The Perps grant predates the kill; the Spot one was signed after it.
+    await owner("two-wallet");
+    const perpsFile = path.join(FLEET, "tenants-perps", `${T}.json`);
+    const record = JSON.parse(readFileSync(perpsFile, "utf8")) as { updatedAt: number };
+    record.updatedAt = nowSec() - 300;
+    writeFileSync(perpsFile, JSON.stringify(record));
+    telegramKill(nowSec() - 120);
+    solanaDown = true;
+    await honourPendingKills();
+    assert.equal(await perpsStore.hasStoredGrant(T), false, "the Perps grant the kill covered is revoked");
+    assert.ok(existsSync(path.join(childHome(T), KILL_CONFIRM_OWED)), "and a ✅ is owed while Solana's half fails");
+    solanaDown = false;
+    await honourPendingKills();
+    assert.ok(await spotStore.get(T), "superseded: the Spot grant signed after the kill arms");
+    assert.equal(existsSync(path.join(childHome(T), KILL_CONFIRM_OWED)), false, "and the superseded kill's owed ✅ is gone");
+    assert.deepEqual(confirmed, []);
+    // A later kill, of the Spot grant alone, says nothing about a Perps wallet.
+    telegramKill(nowSec());
+    await honourPendingKills();
+    assert.deepEqual(confirmed, [{ tenant: T, perps: false }]);
   });
 
   it("the ✅'s Perps line claims only the grant, nothing about where the money is", () => {

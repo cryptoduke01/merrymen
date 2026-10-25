@@ -354,7 +354,12 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     (`DELETE /api/grants`, `delete-agent`, hosted and self-hosted, which the
     phone apps' Stop sends too), the orchestrator's `honourKill` for a hosted
     Telegram /kill or a recorded one, the self-hosted Telegram /kill, and
-    `merrymen kill` (through `perps-kill-cli.ts`). Hosted it is a stop by
+    `merrymen kill` (through `perps-kill-cli.ts`). Start over
+    (`/api/grants/discard`) calls it too, because owners are told it is the
+    kill switch (the MCP control list, the hosted Telegram kill's fallback); it
+    still does not stop Solana, which it never did. A self-hosted Spot
+    permission replacement does not: neither wallet's renewal touches the
+    other wallet. Hosted it is a stop by
     tenant; self-hosted it stops every local Perps wallet, and Telegram gets a
     three-way answer (stopped, none, not stopped). Its guarantees are Solana's:
     a half that fails is reported incomplete, never done, and the kill stays
@@ -874,11 +879,17 @@ before all six are merged and deployed with perps off.
   owner-key recover path for the venue exists.
 - Any future turnover fee on perps (v1 charges none; the performance fee applies
   through rule 12).
-- Whether "discard & start over" should stop the Perps wallet too. Today it is
-  the Spot wallet's alone, as it is Solana-blind (Honest limits).
+- Whether Start over (`/api/grants/discard`) should stop the Solana strategy
+  too. It revokes the Perps grant, because owners are told it is the kill
+  switch, but it never stopped Solana.
 - Whether the Perps desk gets a stop of its own that leaves the Spot wallet
-  running (slice 5). The kill stops every wallet, and refuses to be aimed at
-  one, so such a stop would be a new control with its own name.
+  running (slice 5). The kill stops every wallet, so such a stop would be a
+  new control with its own name.
+- Whether a kill that names a wallet (`?wallet=`) should run anyway. Today it
+  is refused with nothing deleted, as main refuses a stop whose intent is
+  ambiguous, so no client comes to depend on a meaning it never had. The
+  alternative is to fail open and stop every wallet: a kill should never be
+  the thing that is refused. No client sends one yet.
 
 ## Honest limits
 
@@ -914,7 +925,6 @@ before all six are merged and deployed with perps off.
   answering the owner's bot, and until the Perps worker exists (slice 4) that
   is the Spot agent's. A Perps-only owner's kill paths are the web and the
   phones until then.
-- "Discard & start over" (`/api/grants/discard`) is the Spot wallet's: it
-  removes the Spot grant and resets its paper book, and reaches neither Solana
-  nor the Perps wallet. "Kill all agents" is the control that stops every
-  wallet.
+- Start over (`/api/grants/discard`) revokes both wallets' grants and resets
+  the Spot paper book, but does not stop the Solana strategy. "Kill all agents"
+  is the control that stops everything.

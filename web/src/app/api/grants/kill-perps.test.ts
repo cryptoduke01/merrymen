@@ -1,10 +1,11 @@
 /**
  * THE KILL MATRIX, WEB: "Kill all agents" (DELETE /api/grants, delete-agent)
- * against a Spot-only, a Perps-only and a two-wallet owner, hosted and
- * self-hosted. The phone apps send this same request (PR #358's body), so
- * the hosted rows are theirs too. worker/src/perps-kill.test.ts holds the
- * rest of the matrix: the hosted Telegram kill, the self-hosted Telegram kill
- * and `merrymen kill`.
+ * and Start over (POST /api/grants/discard, which owners are told is the kill
+ * switch) against a Spot-only, a Perps-only and a two-wallet owner, hosted and
+ * self-hosted. The phone apps send the kill's same request (PR #358's body),
+ * so the hosted rows are theirs too. worker/src/perps-kill.test.ts and
+ * perps-kill-hosted.integration.test.ts hold the rest of the matrix: the
+ * hosted and self-hosted Telegram kills and `merrymen kill`.
  *
  * Every row: each wallet the owner has is stopped, the answer says what was
  * done, a half that fails is reported incomplete (never done) and a retry
@@ -28,6 +29,7 @@ const ENV = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_GRANT_FILE", "MERRYME
 const saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
 let home = "";
 let route: typeof import("./route");
+let discard: typeof import("./discard/route");
 let auth: typeof import("@/lib/auth");
 let stores: typeof import("../../../../../worker/src/grant-store");
 
@@ -38,6 +40,7 @@ before(async () => {
   process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
   process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 7).toString("base64");
   route = await import("./route");
+  discard = await import("./discard/route");
   auth = await import("@/lib/auth");
   // Through require: the route reaches the worker's stores by require, and a
   // stub on the ESM instance is one the route never calls.
@@ -130,6 +133,39 @@ describe("hosted: Kill all agents (and the phones' Stop) reaches every wallet", 
     assert.equal((await kill()).status, 200);
     assert.ok(await stores.getGrantStore("perps").get(U));
   });
+
+  /** The web's Start over, which owners are told is the kill switch. */
+  const startOver = () => discard.POST(new Request(`${ORIGIN}/api/grants/discard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(T)}` },
+    body: JSON.stringify({ expectedTenant: T }),
+  }));
+  for (const owner of OWNERS) {
+    it(`Start over, ${owner}: every wallet's grant is revoked too, and a Spot-only owner's answer is unchanged`, async () => {
+      await set(owner);
+      const res = await json(await startOver());
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      // No Postgres here, so the practice reset is not queued: said, and not thrown.
+      assert.deepEqual(res.body, hasPerps(owner) ? { ok: true, paperReset: hasSpot(owner) ? "failed" : "no-agent", perps: "stopped" }
+        : { ok: true, paperReset: "failed" });
+      assert.equal(await stores.getGrantStore("spot").hasStoredGrant(T), false);
+      assert.equal(await stores.getGrantStore("perps").hasStoredGrant(T), false);
+      if (!hasPerps(owner)) assert.equal(existsSync(path.join(home, "tenants-perps")), false);
+    });
+  }
+
+  it("Start over whose Perps half fails is incomplete, never done; the Spot grant still goes; a retry finishes it", async () => {
+    await set("two-wallet");
+    const down = mock.method(stores.getGrantStore("perps"), "revokeForKill", async () => { throw new Error("database unavailable"); });
+    let res: Awaited<ReturnType<typeof json>>;
+    try { res = await json(await startOver()); } finally { down.mock.restore(); }
+    assert.equal(res.status, 503);
+    assert.match(String(res.body.error), /^Start over incomplete: .*your Perps wallet's grant could not be revoked yet\. Try again\.$/);
+    assert.equal(res.body.perps, "not-stopped");
+    assert.equal(await stores.getGrantStore("spot").hasStoredGrant(T), false);
+    assert.equal((await json(await startOver())).body.perps, "stopped");
+    assert.equal(await stores.getGrantStore("perps").hasStoredGrant(T), false);
+  });
 });
 
 describe("self-hosted: Kill all agents reaches the local Perps wallet", () => {
@@ -161,6 +197,36 @@ describe("self-hosted: Kill all agents reaches the local Perps wallet", () => {
       if (hasSpot(owner)) assert.equal(readFileSync(path.join(home, "grants", `${SPOT}.json`), "utf8"), local(SPOT), "Spot's owner key is kept");
       if (hasPerps(owner)) assert.equal(readFileSync(path.join(perpsHome(), "grants", `${PERPS}.json`), "utf8"), local(PERPS, { purpose: "perps" }), "and the Perps wallet's, in its own home");
       else assert.equal(existsSync(path.join(home, "accounts")), false, "a Spot-only kill makes no Perps home");
+    });
+  }
+
+  it("a Spot permission replacement removes only the Spot grant: the Perps wallet is not a renewal's to touch", async () => {
+    set("two-wallet");
+    const res = await json(await route.DELETE(new Request(`${ORIGIN}/api/grants`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ purpose: "permission-replacement", expectedAccount: SPOT }),
+    })));
+    assert.deepEqual(res, { status: 200, body: { ok: true } });
+    assert.equal(existsSync(spotFile()), false, "a self-hosted renewal still removes grant.json, as it always did");
+    assert.equal(readFileSync(perpsFile(), "utf8"), local(PERPS, { purpose: "perps" }), "and leaves the Perps grant exactly as it was");
+    // Anything else, an unreadable body included, is the kill it always was.
+    set("two-wallet");
+    const killed = await json(await route.DELETE(new Request(`${ORIGIN}/api/grants`, { method: "DELETE", body: "{ not json" })));
+    assert.deepEqual(killed, { status: 200, body: { ok: true, perps: "stopped" } });
+    assert.equal(existsSync(perpsFile()), false);
+  });
+
+  const startOver = () => discard.POST(new Request(`${ORIGIN}/api/grants/discard`, { method: "POST" }));
+  for (const owner of OWNERS) {
+    it(`Start over, ${owner}: every local wallet's grant is archived, then removed`, async () => {
+      set(owner);
+      const res = await json(await startOver());
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(res.body.perps, hasPerps(owner) ? "stopped" : undefined);
+      assert.equal(existsSync(spotFile()), false);
+      assert.equal(existsSync(perpsFile()), false);
+      if (hasPerps(owner)) assert.ok(existsSync(path.join(perpsHome(), "grants", `${PERPS}.json`)));
+      else assert.equal(existsSync(path.join(home, "accounts")), false);
     });
   }
 

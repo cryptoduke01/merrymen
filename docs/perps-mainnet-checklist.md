@@ -435,9 +435,9 @@ written).
 **Probe.** With an open BTC position on the Perps wallet, its resting stop,
 free collateral, and the Spot wallet's agent running beside it: `merrymen kill`
 (self-hosted). Repeat on an allowlisted hosted tenant from every kill path:
-the dashboard's "Kill all agents", Telegram /kill, and the Stop of both phone
-apps. ("Discard & start over" is the Spot wallet's alone and is not a kill
-drill.) Repeat once more with a Perps-only owner (no Spot grant).
+the dashboard's "Kill all agents", Telegram /kill, "discard & start over"
+(which owners are told is the kill switch), and the Stop of both phone apps.
+Repeat once more with a Perps-only owner (no Spot grant).
 
 **Record.** The `standdown-result` file: which positions closed (reduce-only
 IOC within `max(perpsMaxSlippageBps, 150)` of mark, at most three attempts),
