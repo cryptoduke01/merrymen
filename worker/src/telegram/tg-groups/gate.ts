@@ -678,6 +678,19 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\[\s*[0-9]{1,3}(?:\s*,\s*[0-9]{1,3}){31,}\s*\]/,
 ];
 
+/**
+ * A Lighter API private key (docs/perps.md rule 5): 80 hex, bare or 0x, any
+ * case, anywhere: the bare-64 shape needs a word boundary at 64, which an
+ * 80-hex run never has. Also a Lighter auth token's 160-hex signature. A digit
+ * AND a letter, because "aaaa…" is somebody holding a key down, not a key.
+ */
+function hasLighterKeyRun(t: string): boolean {
+  for (const m of t.matchAll(/[0-9a-f]{80,}/gi)) {
+    if (/[0-9]/.test(m[0]) && /[a-f]/i.test(m[0])) return true;
+  }
+  return false;
+}
+
 /** A base58 keypair: 80+ characters, mixed case and a digit. */
 function hasKeypairRun(t: string): boolean {
   for (const m of t.matchAll(/[1-9A-HJ-NP-Za-km-z]{80,}/g)) {
@@ -1850,7 +1863,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (Array.from(lines.join("\n")).length > TG_LINE_MAX) return refuse("too-long");
   if (lines.length > TG_LINE_MAX_SENTENCES || sentenceCount(lines) > TG_LINE_MAX_SENTENCES) return refuse("too-long");
 
-  if (containsSecret(s, []) || r.cased.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasKeypairRun(t) || hasMnemonicRun(t))) {
+  if (containsSecret(s, []) || r.cased.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasLighterKeyRun(t) || hasKeypairRun(t) || hasMnemonicRun(t))) {
     return refuse("secret");
   }
   if (r.cased.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t)) || r.joined.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) {
@@ -2138,7 +2151,7 @@ export function admitDeskText(raw: unknown, ctx: TgDeskGateCtx): TgVerdict {
   if (Array.from(text).length > max) return refuse("too-long");
   if (sentenceCount([text]) > TG_DESK_MAX_SENTENCES) return refuse("too-long");
 
-  if (containsSecret(s, []) || r.cased.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasKeypairRun(t) || hasMnemonicRun(t))) return refuse("secret");
+  if (containsSecret(s, []) || r.cased.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasLighterKeyRun(t) || hasKeypairRun(t) || hasMnemonicRun(t))) return refuse("secret");
   if (r.cased.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t)) || r.joined.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) {
     return refuse("address");
   }

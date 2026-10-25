@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { ContractFunctionExecutionError, HttpRequestError, createPublicClient, erc20Abi, http } from "viem";
 import { classifyRpcError, DECLINED_MARKER } from "./rpc-error";
-import { REDACTED, errorText, redactUrls } from "./redact-urls";
+import { REDACTED, errorText, redactLighterSecrets, redactUrls } from "./redact-urls";
 import { guardStdio, lineRedactor } from "./redact-stdio";
 
 /**
@@ -257,5 +257,42 @@ describe("lineRedactor", () => {
     ended.push(`${"x".repeat(20)} ${KEYED.slice(0, -16)}`);
     ended.push(KEYED.slice(-16));
     assert.deepEqual(ended.flush(), []);
+  });
+});
+
+/**
+ * Lighter key material (docs/perps.md rule 5) at #347's choke points. Made-up
+ * values in the venue's shapes: a 40-byte API private key (80 hex) and an auth
+ * token, `<deadline>:<account>:<keyIndex>:<160 hex>`.
+ */
+describe("Lighter key material", () => {
+  const PERP_KEY = "0123456789abcdef".repeat(4) + "a1b2c3d4e5f60718";
+  const AUTH = `1790700000:22149:16:${"ab12".repeat(40)}`;
+
+  it("removes an API private key in every spelling, and an auth token whole", () => {
+    for (const k of [`0x${PERP_KEY}`, PERP_KEY, `0x${PERP_KEY.toUpperCase()}`, PERP_KEY.toUpperCase()]) {
+      assert.equal(redactUrls(`perps: key ${k} failed`), `perps: key ${REDACTED} failed`, k);
+    }
+    assert.equal(redactUrls(`perp-key.json: {"privateKey":"0x${PERP_KEY}"}`), `perp-key.json: {"privateKey":"${REDACTED}"}`);
+    assert.equal(redactUrls(`Authorization: ${AUTH}`), `Authorization: ${REDACTED}`);
+    assert.equal(redactUrls(`https://api.rh.lighter.xyz/api/v1/trades?auth=${AUTH}`), `https://api.rh.lighter.xyz/${REDACTED}`);
+  });
+
+  it("leaves hashes, addresses, calldata and signatures as they were", () => {
+    const hash = `0x${"9f".repeat(32)}`;
+    const calldata = `0xa9059cbb${"00".repeat(12)}${"5f".repeat(20)}${"00".repeat(31)}01`;
+    const signature = `0x${"1c".repeat(65)}`;
+    const line = `tx ${hash} to 0x${"ab".repeat(20)} data ${calldata} sig ${signature}`;
+    assert.equal(redactUrls(line), line);
+    assert.equal(redactLighterSecrets(`${"a".repeat(80)} ${"0".repeat(80)}`), `${"a".repeat(80)} ${"0".repeat(80)}`, "one character held down is not a key");
+  });
+
+  it("reaches stdout and stderr through guardStdio, string or Buffer", () => {
+    const seen: string[] = [];
+    const sink = new Writable({ write(chunk, _enc, cb) { seen.push(String(chunk)); cb(); } }) as unknown as NodeJS.WriteStream;
+    guardStdio([sink]);
+    sink.write(`a ${PERP_KEY} b\n`);
+    sink.write(Buffer.from(`c ${AUTH} d\n`));
+    assert.deepEqual(seen, [`a ${REDACTED} b\n`, `c ${REDACTED} d\n`]);
   });
 });

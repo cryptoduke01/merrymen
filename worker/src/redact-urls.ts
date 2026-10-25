@@ -177,13 +177,51 @@ function redactOne(raw: string): string {
 
 /**
  * THE helper. Text in, the same text out with every credential-bearing URL
- * reduced to its scheme and host. Never throws; non-strings are stringified.
+ * reduced to its scheme and host, and Lighter key material removed
+ * (redactLighterSecrets). Never throws; non-strings are stringified.
  */
 export function redactUrls(text: string): string {
   const s = typeof text === "string" ? text : String(text);
-  // The cheap test first: most log lines carry no URL at all.
-  if (!s.includes("://")) return s;
-  return s.replace(URL_IN_TEXT, redactOne);
+  // The cheap test first: most log lines carry no URL at all. URLs before key
+  // shapes, so a token in a query goes with its URL as one marker.
+  return redactLighterSecrets(s.includes("://") ? s.replace(URL_IN_TEXT, redactOne) : s);
+}
+
+/**
+ * A Lighter auth token, `<deadline>:<account>:<keyIndex>:<160 hex>`, taken
+ * whole so the account it authenticates goes with it (docs/perps.md rule 5).
+ * Matched before the key shape, which would otherwise take only its signature.
+ */
+const LIGHTER_AUTH_TOKEN = /\b\d{9,11}:\d{1,16}:\d{1,3}:[0-9a-fA-F]{160}(?![0-9a-fA-F])/g;
+
+/**
+ * A Lighter API private key is 40 bytes: exactly 80 hex, 0x or bare, either
+ * case, standing alone (docs/perps.md rule 5). Exactly 80 and bounded on both
+ * sides, so the calldata and signatures a log line carries (0x plus 8 + 64k
+ * hex, 130-hex signatures) keep reading as they did; Lighter tx hashes are 80
+ * hex too and go with it, which costs nothing. The Telegram agent's redactor,
+ * whose output reaches a model, takes every run of 80 or more instead.
+ */
+const LIGHTER_KEY = /(^|[^0-9A-Za-z])((?:0x)?[0-9a-fA-F]{80})(?![0-9A-Za-z])/g;
+
+/** A digit AND a letter: a key, not a run of one character (a test's `aaaa…`, a padded zero). */
+function keyLike(run: string): boolean {
+  const hex = run.startsWith("0x") ? run.slice(2) : run;
+  return /[0-9]/.test(hex) && /[a-fA-F]/.test(hex);
+}
+
+/**
+ * Lighter key material out of text that leaves a process (#347's choke
+ * points: stdout and stderr, the orchestrator's relay, events and
+ * reject_rule). Its URL query twin, `?auth=`, is removed by SECRET_PARAM.
+ * Never throws.
+ */
+export function redactLighterSecrets(text: string): string {
+  // The cheap test first: no run of 80 hex, nothing to do.
+  if (!/[0-9a-fA-F]{80}/.test(text)) return text;
+  // The character before the key is captured, not looked behind at: this file
+  // is browser-safe, and older Safari has no lookbehind.
+  return text.replace(LIGHTER_AUTH_TOKEN, REDACTED).replace(LIGHTER_KEY, (m, before: string, key: string) => (keyLike(key) ? `${before}${REDACTED}` : m));
 }
 
 /**

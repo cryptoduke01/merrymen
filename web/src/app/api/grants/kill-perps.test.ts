@@ -119,6 +119,27 @@ describe("hosted: Kill all agents (and the phones' Stop) reaches every wallet", 
     });
   }
 
+  // ── SLICE 3: the paper stand-down, from the dashboard ─────────────────
+  it("perps-only with practice perpetuals on: the kill revokes the grant and switches them off; the rest of its settings stay", async () => {
+    const settings = createRequire(import.meta.url)("../../../../../worker/src/settings-store.ts") as typeof import("../../../../../worker/src/settings-store");
+    await set("perps-only");
+    const owner = { perpsEnabled: true, perpsMarkets: ["BTC-PERP"], perpsMaxLeverage: 2 };
+    await settings.getSettingsStore("perps").put(T, owner);
+    assert.deepEqual(await json(await kill()), { status: 200, body: { ok: true, perps: "stopped" } });
+    assert.deepEqual(await settings.getSettingsStore("perps").get(T), { ...owner, perpsEnabled: false });
+    // Perps settings that cannot be read: the grant still goes, the kill says
+    // what is left — never that a revoked grant may still sign.
+    await set("perps-only");
+    writeFileSync(path.join(home, "tenant-settings-perps", `${T.toLowerCase()}.json`), "{ torn");
+    const res = await json(await kill());
+    assert.equal(res.status, 503);
+    assert.match(String(res.body.error), /^Kill incomplete: your Robinhood Chain agent is stopped, but your Perps wallet's practice perpetuals could not be switched off yet\./);
+    assert.doesNotMatch(String(res.body.error), /grant could not be revoked/);
+    assert.equal(res.body.perps, "not-stopped");
+    assert.equal(await stores.getGrantStore("perps").hasStoredGrant(T), false, "the grant went regardless");
+    rmSync(path.join(home, "tenant-settings-perps"), { recursive: true, force: true });
+  });
+
   it("a kill whose Spot store fails still revokes the Perps grant, and is still an error", async () => {
     await set("two-wallet");
     const down = mock.method(stores.getGrantStore("spot"), "remove", async () => { throw new Error("database unavailable"); });

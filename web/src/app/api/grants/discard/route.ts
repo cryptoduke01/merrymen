@@ -79,7 +79,7 @@ export async function POST(req: Request) {
 function startedOver(paperReset: StartOverReset, perps: PerpsHalf): NextResponse {
   if (perps.state === "not-stopped") {
     return NextResponse.json({
-      error: `Start over incomplete: your agent's grant is discarded, but your Perps wallet's grant could not be revoked yet.${perps.why ? ` ${perps.why}` : ""} Try again.`,
+      error: `Start over incomplete: your agent's grant is discarded, but your Perps wallet's ${perps.left === "paper" ? "practice perpetuals could not be switched off" : "grant could not be revoked"} yet.${perps.why ? ` ${perps.why}` : ""} Try again.`,
       ownerFacing: true, paperReset, perps: "not-stopped",
     }, { status: 503 });
   }

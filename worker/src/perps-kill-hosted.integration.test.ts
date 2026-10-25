@@ -31,6 +31,7 @@ const { honourPendingKills, childHome, setKillConfirmForTest, setSolanaKillForTe
 const { getGrantStore } = await import("./grant-store");
 const { KILL_CLOCK_SLACK_SEC, KILL_CONFIRM_OWED, KILL_DONE_PERPS_TEXT, honourKillRequest, killRequested, writeKillRequest } = await import("./kill-request");
 const { stopPerpsForKill } = await import("./perps-kill");
+const { getSettingsStore } = await import("./settings-store");
 after(() => rmSync(FLEET, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 const T = "0x00000000000000000000000000000000000000a1" as const;
@@ -82,6 +83,7 @@ beforeEach(async () => {
   await spotStore.remove(T);
   await perpsStore.remove(T);
   rmSync(path.join(FLEET, "tenants-perps"), { recursive: true, force: true });
+  rmSync(path.join(FLEET, "tenant-settings-perps"), { recursive: true, force: true });
   rmSync(childHome(T), { recursive: true, force: true });
   confirmed.length = 0;
   solanaStops.length = 0;
@@ -100,6 +102,7 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
       assert.deepEqual(solanaStops, [T]);
       assert.deepEqual(confirmed, [{ tenant: T, perps: hasPerps(o) }]);
       if (!hasPerps(o)) assert.equal(existsSync(path.join(FLEET, "tenants-perps")), false, "a Spot-only kill makes no Perps directory");
+      if (!hasPerps(o)) assert.equal(existsSync(path.join(FLEET, "tenant-settings-perps")), false, "nor a Perps settings directory");
       // A later pass finds both gone: safe, and no second ✅.
       await honourPendingKills();
       assert.equal(confirmed.length, 1);
@@ -122,6 +125,49 @@ describe("a hosted Telegram /kill, carried out by the orchestrator", () => {
       assert.deepEqual(confirmed, [{ tenant: T, perps: true }]);
     });
   }
+
+  // ── SLICE 3: the paper stand-down ─────────────────────────────────────
+  //
+  // Hosted, a paper book lives in the tenant's Perps child (slice 4), so here
+  // the kill's part is what the stores hold: the Perps grant revoked and the
+  // Perps wallet's paper strategy turned off in its own settings, every other
+  // setting as the owner left it.
+  const perpsSettings = getSettingsStore("perps");
+  const OWNER_PERPS = { perpsEnabled: true, perpsMarkets: ["BTC-PERP"], perpsMaxLeverage: 2, agentName: "Little John" };
+
+  it("perps-only, practice perpetuals on: the kill revokes the grant and switches them off, nothing else touched", async () => {
+    await owner("perps-only");
+    await perpsSettings.put(T, OWNER_PERPS);
+    telegramKill();
+    await honourPendingKills();
+    assert.equal(await perpsStore.hasStoredGrant(T), false);
+    assert.deepEqual(await perpsSettings.get(T), { ...OWNER_PERPS, perpsEnabled: false });
+    assert.deepEqual(confirmed, [{ tenant: T, perps: true }]);
+  });
+
+  it("a Perps grant signed after the kill keeps the settings that came with it", async () => {
+    await owner("perps-only");
+    await perpsSettings.put(T, OWNER_PERPS);
+    telegramKill(nowSec() - 120);
+    await honourPendingKills();
+    assert.ok(await perpsStore.get(T), "the later grant is kept");
+    assert.deepEqual(await perpsSettings.get(T), OWNER_PERPS, "and so is the owner's later decision to trade");
+  });
+
+  it("Perps settings it cannot read keep the kill pending, never done; the next pass finishes it and owes one ✅", async () => {
+    await owner("perps-only");
+    mkdirSync(path.join(FLEET, "tenant-settings-perps"), { recursive: true });
+    writeFileSync(path.join(FLEET, "tenant-settings-perps", `${T}.json`), "{ torn");
+    telegramKill();
+    await honourPendingKills();
+    assert.equal(await perpsStore.hasStoredGrant(T), false, "the grant went first");
+    assert.deepEqual(confirmed, [], "no ✅ while the paper strategy may still be on");
+    assert.equal(killRequested(childHome(T)), true, "the request stays pending");
+    await perpsSettings.put(T, OWNER_PERPS);
+    await honourPendingKills();
+    assert.equal((await perpsSettings.get(T))?.perpsEnabled, false);
+    assert.deepEqual(confirmed, [{ tenant: T, perps: true }], "told once, about the grant it revoked");
+  });
 
   it("two-wallet: the Perps grant removed while Solana failed is remembered for the ✅ the next pass sends", async () => {
     await owner("two-wallet");

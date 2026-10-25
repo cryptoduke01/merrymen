@@ -56,10 +56,13 @@ describe("the tick's wiring", () => {
 
   it("judges every peak and the fee on equity with sampled holdings held to cost", () => {
     assert.match(INDEX, /const peakEquityUsdg = equityUsdg - sampledGainUsdg\(/);
-    assert.match(INDEX, /ratchet\.paperPeak\(bookRow, usdgNum\(peakEquityUsdg\)/);
-    assert.match(INDEX, /ratchet\.riskPeak\(usdgNum\(peakEquityUsdg\)/);
-    assert.match(INDEX, /accrueAboveHwm\(peakEquityUsdg, highWaterMarkUsdg/);
+    // …and no open perp gain either (docs/perps.md rule 12): the peak basis is
+    // peakEquityUsdg less each open perp gain, and IS peakEquityUsdg with no perps.
+    assert.match(INDEX, /const peakBasis = peakBasisUsdg\(peakEquityUsdg, perpRead\);/);
+    assert.match(INDEX, /ratchet\.paperPeak\(bookRow, usdgNum\(peakBasis\)/);
+    assert.match(INDEX, /ratchet\.riskPeak\(usdgNum\(peakBasis\)/);
+    assert.match(INDEX, /accrueAboveHwm\(peakBasis, highWaterMarkUsdg/);
     // A held look still observes the breaker: on the same figure.
-    assert.match(INDEX, /breakerObservationUsdg: heldBreakerObservationUsdg\(\{[\s\S]{0,300}?equityUsdg: peakEquityUsdg,/);
+    assert.match(INDEX, /breakerObservationUsdg: heldBreakerObservationUsdg\(\{[\s\S]{0,400}?equityUsdg: peakBasis,/);
   });
 });

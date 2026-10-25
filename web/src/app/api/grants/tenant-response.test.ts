@@ -51,6 +51,10 @@ before(async () => {
   // The kill's Perps half (perps-kill.ts) reads the Perps grant store, which here
   // has no database either. Stood in like the Spot one: a Spot-only owner.
   mock.method(grants.getGrantStore("perps"), "revokeForKill", async (tenant: string) => { perpsAsked.push(tenant); return "absent" as const; });
+  // …and its paper strategy is turned off (slice 3): no Perps settings either, on a database never connected.
+  const settings = createRequire(import.meta.url)("../../../../../worker/src/settings-store.ts") as typeof import("../../../../../worker/src/settings-store");
+  settings.resetSettingsStoreForTest();
+  mock.method(settings.getSettingsStore("perps") as InstanceType<typeof settings.PgSettingsStore>, "disablePerpsForKill", async () => "none" as const);
   const solana = await import("@/lib/solana-binding-store");
   mock.method(solana.getSolanaBindingStore(), "disableForKill", async (tenant: string) => {
     if (solanaDown) throw new Error("database unavailable");

@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { makePgDb, type Db } from "./db";
-import { applyLedgerSchema } from "./store";
+import { PERP_EQUITY_ALTERS, PERP_LEDGER_ALTERS, applyLedgerSchema } from "./store";
 import { applyLedgerMigrations } from "./ledger-migrations";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
@@ -65,6 +65,78 @@ test("Postgres: repeated ledger setup does not queue exclusive locks behind publ
         WHERE table_schema = current_schema() AND table_name = 'agents' AND column_name = 'hwm_withdrawn_usdg'`).get() as Record<string, unknown>;
       assert.equal(column.is_nullable, "NO");
       assert.match(String(column.column_default), /0/);
+    });
+
+    await t.test("a missing column's ADD waits a bounded time for its lock, so readers never queue behind it for long", async () => {
+      // The perp ledger's equity columns are the first ADD COLUMN on `equity`
+      // since the catalog guard, and `equity` is the shared ledger's hottest
+      // table. A held reader makes the ADD give up after waitMs, pause, and try
+      // again; a second reader arriving meanwhile is not queued behind it.
+      await db.exec("CREATE TABLE lock_probe (id TEXT)");
+      // A migrator with NO lock_timeout of its own (unlike `scoped`), as the
+      // production pool has none: only the runner's SET LOCAL can bound it.
+      const unbounded = new URL(target);
+      unbounded.searchParams.set("options", `-c search_path=${schema} -c statement_timeout=5000`);
+      const migrator = await makePgDb(unbounded.toString());
+      await reader.query("BEGIN");
+      await reader.query("SELECT id FROM lock_probe LIMIT 1");
+      const late = new pg.Client({ connectionString: scoped("late") });
+      await late.connect();
+      const lock = { waitMs: 150, tries: 3, pauseMs: 50 };
+      try {
+        const t0 = Date.now();
+        const pending = applyLedgerMigrations(migrator, ["ALTER TABLE lock_probe ADD COLUMN probe TEXT"], undefined, lock);
+        await new Promise((r) => setTimeout(r, 60));
+        // While the ADD is between tries or waiting, a new reader gets through promptly.
+        const r0 = Date.now();
+        await late.query("SELECT COUNT(*) FROM lock_probe");
+        assert.ok(Date.now() - r0 < 400, `a reader waited ${Date.now() - r0} ms behind the ADD`);
+        await assert.rejects(pending, (error) => (error as { code?: string }).code === "55P03");
+        assert.ok(Date.now() - t0 < 2_000, "it gave up after its tries, not after the reader");
+        // The timeout ended with the ALTER: the pool's connections carry none.
+        assert.deepEqual(await migrator.prepare("SHOW lock_timeout").get(), { lock_timeout: "0" });
+      } finally {
+        await reader.query("ROLLBACK");
+        await late.end();
+      }
+      // The table free again, the same migration lands.
+      await applyLedgerMigrations(db, ["ALTER TABLE lock_probe ADD COLUMN probe TEXT"], undefined, lock);
+      const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'lock_probe'`).all() as { column_name: string }[];
+      assert.ok(cols.some((c) => c.column_name === "probe"));
+    });
+
+    await t.test("a Db that cannot open a transaction of its own still migrates (a caller's or a test's wrapper)", async () => {
+      await db.exec("CREATE TABLE notx_probe (id TEXT)");
+      const noTx: Db = { prepare: (sql) => db.prepare(sql), exec: (sql) => db.exec(sql), tx: async () => { throw new Error("not here"); } };
+      await applyLedgerMigrations(noTx, ["ALTER TABLE notx_probe ADD COLUMN probe TEXT"]);
+      const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'notx_probe'`).all() as { column_name: string }[];
+      assert.ok(cols.some((c) => c.column_name === "probe"));
+    });
+
+    await t.test("the perp ledger lands over the shared schema: its tables, and equity's venue columns NULL on old rows", async () => {
+      // Built as the shared ledger stands before this change: the real schema,
+      // stripped of what the perp ledger adds.
+      for (const tbl of ["perp_orders", "perp_order_legs", "perp_fills", "perp_funding", "perp_transfers", "perp_positions", "perp_accounts", "perp_carries"]) {
+        await db.exec(`DROP TABLE IF EXISTS ${tbl}`);
+      }
+      for (const ddl of PERP_EQUITY_ALTERS) await db.exec(`ALTER TABLE equity DROP COLUMN IF EXISTS ${/ADD COLUMN (\w+)/.exec(ddl)![1]}`);
+      await db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, mode, at) VALUES ('0xa', '0', 10, 0, 0, 10, 'live', 1)").run();
+      // Two processes booting at once, as a deploy does.
+      const other = await makePgDb(scoped("perp-other"));
+      await Promise.all([applyLedgerSchema(db), applyLedgerSchema(other)]);
+      const tables = await db.prepare(`SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE 'perp_%'`).all() as { table_name: string }[];
+      assert.equal(tables.length, 8, JSON.stringify(tables));
+      const row = await db.prepare("SELECT perp_collateral_micro, cash_read_block FROM equity WHERE agent_id = '0xa'").get() as Record<string, unknown>;
+      assert.deepEqual({ ...row }, { perp_collateral_micro: null, cash_read_block: null }, "an old row predates the question: NULL, never 0");
+      // A perp_positions an earlier build made, without the recorded-stop columns: they are added.
+      for (const ddl of PERP_LEDGER_ALTERS) await db.exec(`ALTER TABLE perp_positions DROP COLUMN ${/ADD COLUMN (\w+)/.exec(ddl)![1]}`);
+      await Promise.all([applyLedgerSchema(db), applyLedgerSchema(other)]);
+      const cols = await db.prepare(`SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'perp_positions' AND column_name LIKE 'recorded_stop_%' ORDER BY column_name`).all() as { column_name: string }[];
+      assert.deepEqual(cols.map((c) => c.column_name), ["recorded_stop_price", "recorded_stop_trigger"]);
+      await db.prepare("DELETE FROM equity WHERE agent_id = '0xa'").run();
     });
 
     await t.test("catalog lookup honors search-path shadowing rather than a namesake in another schema", async () => {

@@ -25,9 +25,9 @@ the finished product; this table says how much of it main carries.
 
 | slice | what it lands | on main |
 |---|---|---|
-| 1. Core and permission wall | the Lighter route, market and ABI constants, the `perp-lighter-v1` wall option, the canonical-wall marker, the signers' carry-forward. `POST /api/grants` refuses every perps grant (`perp-not-offered`) | in review (#359) |
-| 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | in review |
-| 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets; the stand-down of paper books | not yet |
+| 1. Core and permission wall | the Lighter route, market and ABI constants, the `perp-lighter-v1` wall option, the canonical-wall marker, the signers' carry-forward. `POST /api/grants` refuses every perps grant (`perp-not-offered`) | merged (#359) |
+| 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
+| 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | in review |
 | 4. Orchestrator and hosted operation | per-wallet worker slots, the hosted stand-down, the final mirror | not yet |
 | 5. Web API, desk and CLI | making and funding a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet | not yet |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
@@ -37,6 +37,26 @@ production; every kill path already reaches one (rule 13), so that from the day
 one can exist it is stopped by every kill. Perps stays off in production while
 the slices land: an unset `MERRYMEN_PERPS` means off (rule 1), and each slice
 is safe to deploy alone with perps off.
+
+**What slice 3 carries, and what it does not.** The engine is the perps
+branch's paper engine (codex/perps-mode-samples at c7071662, before its live
+executor), reconciled with main. A worker serves one wallet: whatever starts a
+Perps wallet's worker sets `MERRYMEN_WALLET_PURPOSE=perps` (slices 4 and 5;
+unset is Spot), and the worker refuses a grant whose signed `purpose` is the
+other wallet's. Only a Perps worker arms the perp lane, and it runs no spot
+producer (`perps-only`). A Spot worker never starts the lane or its feed and
+shows its strategist no perps; its budget readers and paper reset touch the
+perp tables, which hold nothing for it, so they add nothing. Nothing on main
+starts a Perps worker yet. There is no live executor, reconciler or on-chain leg in this build:
+`MERRYMEN_PERPS=live` is off, and a live account with perps on is refused
+`perp-live-not-yet`. The signer is vendored and hash-checked but loaded only by
+its own tests. The hosted checkpoint of paper perp state and the mirror of the
+perp ledger are slice 4's. The style profiles (`perpsStyle`) and the Brain
+driver came later on the branch and are not in this build: `perpsDriver` is
+`perp-trend`, `strategist` or `manual`, and `perp-trend` trades the 4 h
+`swing-trend` signal. A Perps worker builds no LLM strategist (its strategy is
+`perps-only`), so `strategist` resolves to `manual` there, never to
+`perp-trend`.
 
 ## One login, two wallets
 
@@ -368,12 +388,25 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     what it always was; it runs whatever `MERRYMEN_PERPS` says. A Telegram kill
     carried out later revokes only a Perps grant stored at or before it, as the
     Spot half does: one signed after the kill is the owner's later decision.
-    In slice 2 the half revokes the Perps grant (self-hosted, archived first so
+    The half revokes the Perps grant (slice 2; self-hosted, archived first so
     its owner key survives; an archive it cannot write keeps the grant and
-    pauses that wallet's home). The stand-down below arrives with the worker in
-    slices 3 and 4, and the kill answer gains a third state then, `closing`,
-    because closing positions takes up to 15 minutes hosted and can end with
-    money left at Lighter; Telegram and `get_attention` report how it ended.
+    pauses that wallet's home). From slice 3 it also stands the **paper** book
+    down: the Perps wallet's paper strategy is turned off (`perpsEnabled`
+    false in that wallet's own settings, every other setting kept; hosted by a
+    compare-and-swap on the sealed row, with no schema made for an owner who
+    has no Perps wallet), and its paper positions are frozen where they are.
+    With the grant gone no worker arms on that wallet, so nothing opens,
+    trades, protects or values them. Nothing is closed at a price, because a
+    paper close needs a fresh mark the kill does not have. Signed again, the
+    lane finds them held with perps off: nothing new opens, and what is held
+    keeps its stops and closes on its own rules. A grant signed after a
+    Telegram kill keeps its settings too. A paper strategy that could not be
+    turned off makes the kill incomplete, said as that and never as a grant
+    that may still sign. The live stand-down below arrives with the hosted
+    worker in slice 4, and the kill answer gains a third state then,
+    `closing`, because closing positions takes up to 15 minutes hosted and can
+    end with money left at Lighter; Telegram and `get_attention` report how it
+    ended.
 
     *The stand-down.* Order: close each position with a
     reduce-only IOC within `perpsMaxSlippageBps` of mark (up to three
@@ -797,8 +830,9 @@ required before claiming the live venue lifecycle has been verified.
 - **CLI** — `status` and `doctor` show perps (signer hash, venue reachability,
   key registration, account index, exposure); `kill` reaches the Perps wallet
   (slice 2: it archives and revokes `accounts/perps/grant.json`, asking first
-  even when there is no Spot grant; from slice 3 it writes the stand-down
-  request and waits); `recover` has a venue leg, selected with
+  even when there is no Spot grant; slice 3: it also turns that home's paper
+  strategy off, and says each part; with the live stand-down it will write the
+  stand-down request and wait); `recover` has a venue leg, selected with
   `MERRYMEN_HOME="$HOME/.merrymen/accounts/perps" MERRYMEN_WALLET_PURPOSE=perps`.
 - **Recover** — every platform shows a read-only venue disclosure (fetch and
   `eth_call` only, each field unreadable-not-zero). The owner-key unwind is L1

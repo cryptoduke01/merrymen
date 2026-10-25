@@ -477,7 +477,13 @@ export async function honourKillRequest(
     try { await halves.solana(); } catch (e) { failures.push(`the Solana strategy could not be stopped: ${message(e)}`); }
   }
   if (halves.perps) {
-    try { perpsRemoved = await halves.perps(coveredSec); } catch (e) { failures.push(`the Perps wallet could not be stopped: ${message(e)}`); }
+    try { perpsRemoved = await halves.perps(coveredSec); } catch (e) {
+      // A Perps half that revoked the grant and then failed (its paper strategy,
+      // perps-kill.ts PerpsPaperNotStopped) did remove one: owed in the ✅ the
+      // finishing pass sends, though this pass is a failure.
+      if ((e as { perpsRemoved?: unknown } | null)?.perpsRemoved === true) perpsRemoved = true;
+      failures.push(`the Perps wallet could not be stopped: ${message(e)}`);
+    }
   }
   if (typeof result === "object" || failures.length > 0) {
     // Owed by this call alone: the DELETE that removed a grant happens once.

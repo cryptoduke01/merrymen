@@ -40,7 +40,7 @@ import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { stopLocalSolanaForKill, stopSolanaForKill } from "../../../../../worker/src/solana-kill";
-import { perpsHalf, stopLocalPerpsForKill, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
+import { perpsHalf, stopLocalPerpsForKill, stopLocalPerpsGrantForRenewal, stopPerpsForKill, type PerpsHalf } from "../../../../../worker/src/perps-kill";
 import { readWalletParam, WALLET_PARAM } from "@/lib/wallet-param";
 import { readFleetRecoveryView, type FleetRecoveryView } from "../../../../../worker/src/fleet-recovery";
 import { resolveConfig } from "../../../../../worker/src/settings";
@@ -688,7 +688,8 @@ function perpsWalletNotOffered(nothing: string): NextResponse {
  * slice 5, so no client sends this yet.)
  */
 async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
-  const perps = await perpsHalf(() => stopLocalPerpsForKill());
+  // The grant alone: a renewal keeps the wallet trading, so its paper strategy stays as the owner set it.
+  const perps = await perpsHalf(() => stopLocalPerpsGrantForRenewal());
   if (perps.state === "not-stopped") {
     return NextResponse.json(
       { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },
@@ -717,8 +718,16 @@ async function solanaStopped(stop: () => Promise<unknown>): Promise<boolean> {
 /** What the Perps half did, said after a Robinhood grant the kill had to keep. */
 function perpsAfterKeptGrant(perps: PerpsHalf): string {
   if (perps.state === "stopped") return " Your Perps wallet's grant was revoked.";
+  if (perps.state === "not-stopped" && perps.left === "paper") return " Your Perps wallet's practice perpetuals could not be switched off: try the kill again.";
   if (perps.state === "not-stopped") return " Your Perps wallet's grant could not be revoked either: try the kill again.";
   return "";
+}
+
+/** What a failed Perps half left undone, as the kill's sentence names it. */
+function perpsLeft(perps: PerpsHalf): string {
+  return perps.left === "paper"
+    ? "your Perps wallet's practice perpetuals could not be switched off yet"
+    : "your Perps wallet's grant could not be revoked yet";
 }
 /**
  * A kill that could not stop the Solana strategy or revoke the Perps grant is reported
@@ -728,8 +737,8 @@ function perpsAfterKeptGrant(perps: PerpsHalf): string {
 function killed(solana: boolean, perps: PerpsHalf): NextResponse {
   const perpsDown = perps.state === "not-stopped";
   if (!solana || perpsDown) {
-    const what = !solana && perpsDown ? "your Solana strategy could not be stopped and your Perps wallet's grant could not be revoked yet"
-      : !solana ? "your Solana strategy could not be stopped yet" : "your Perps wallet's grant could not be revoked yet";
+    const what = !solana && perpsDown ? `your Solana strategy could not be stopped and ${perpsLeft(perps)}`
+      : !solana ? "your Solana strategy could not be stopped yet" : perpsLeft(perps);
     return NextResponse.json({ error: `Kill incomplete: your Robinhood Chain agent is stopped, but ${what}.${perps.why ? ` ${perps.why}` : ""} Try the kill again.`,
       ownerFacing: true, solana: solana ? "stopped" : "not-stopped", ...(perps.state === "none" ? {} : { perps: perps.state }) }, { status: 503 });
   }

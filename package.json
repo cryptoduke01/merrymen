@@ -34,7 +34,8 @@
     "!**/.env",
     "!**/.env.*",
     "!**/*.test.ts",
-    "!**/*.test.mjs"
+    "!**/*.test.mjs",
+    "!worker/src/perps/fixtures"
   ],
   "scripts": {
     "onboard": "node cli/bin.mjs onboard",

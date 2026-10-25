@@ -440,7 +440,11 @@ describe("AND DRAINING IS ASKED AGAIN AT EACH BROADCAST — a signal can land mi
     assert.ok(check > hook && row > check, "the draining check is the hook's first statement, before the submitted row");
     assert.doesNotMatch(BODY.slice(hook, check), /\bawait\b/);
     // Every send carries these hooks — the plain send and the vault deploy.
-    const sends = [...BODY.matchAll(/\.execute\(([^)]*)\)/g)].map((m) => m[1] ?? "");
+    // NOT the perp lane's execute: in this build it books paper only and sends
+    // nothing (perps/lane.ts; a live account is refused perp-live-not-yet), and
+    // a draining worker refused the perp intent at admission. The live lane
+    // must take its own last-moment check when it lands.
+    const sends = [...BODY.matchAll(/(?<!perpLane)\.execute\(([^)]*)\)/g)].map((m) => m[1] ?? "");
     assert.ok(sends.length >= 2);
     for (const args of sends) assert.match(args, /\bsubmitHooks\b/, `a send without the hook that refuses it: execute(${args})`);
   });
