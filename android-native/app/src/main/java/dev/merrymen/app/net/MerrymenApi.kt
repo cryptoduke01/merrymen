@@ -644,7 +644,9 @@ class MerrymenApi(
    * THE KILL SWITCH. Removes the grant, which stands the worker down.
    *
    * Kept beside the reads rather than hidden, because a stop control that is
-   * hard to find is not a stop control.
+   * hard to find is not a stop control. [expectedTenant] is the wallet on
+   * screen when Stop was tapped, null where there is no session; see [StopBody].
    */
-  suspend fun revokeGrant(): ApiResult<JsonElement> = sendJson("/api/grants", "DELETE", null)
+  suspend fun revokeGrant(expectedTenant: String?): ApiResult<JsonElement> =
+    sendJson("/api/grants", "DELETE", json.encodeToString(StopBody.serializer(), StopBody("delete-agent", expectedTenant)))
 }
