@@ -635,18 +635,21 @@ export async function DELETE(req: Request) {
     if (removal !== null) throw removal;
     return killed(solana, perps);
   }
-  if (walletNamed) return killNamesWallet();
-  // A SELF-HOSTED RENEWAL STOPS THE SPOT GRANT, NOT THE PERPS WALLET. Every
+  // A SELF-HOSTED RENEWAL STOPS THE WALLET IT NAMES, NOT THE OTHER ONE. Every
   // self-hosted DELETE has always removed grant.json, renewals too (the new grant
   // is posted straight after), so the body was never read. It is now, only so a
-  // Spot renewal leaves the Perps wallet's grant alone: neither wallet's authority
+  // renewal leaves the other wallet's grant alone: neither wallet's authority
   // reaches the other. Anything but a readable permission replacement, an
-  // unreadable or oversized body included, is the kill it always was.
+  // unreadable or oversized body included, is the kill it always was. Read before
+  // the wallet is judged: a renewal may name its wallet, as it may hosted, and
+  // only a kill that names one is refused.
   let renewal = false;
   try {
     const text = await readGrantBody(req, GRANT_DELETE_BODY_MAX_BYTES);
     renewal = text !== null && (JSON.parse(text) as { purpose?: unknown } | null)?.purpose === "permission-replacement";
   } catch { /* a kill */ }
+  if (walletNamed && !renewal) return killNamesWallet();
+  if (renewal && wallet === "perps") return selfHostedPerpsRenewalStop();
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
   // The local Solana strategy and the local Perps wallet are stopped first, whatever happens to
@@ -678,6 +681,23 @@ function perpsWalletNotOffered(nothing: string): NextResponse {
     { status: 403 },
   );
 }
+/**
+ * A self-hosted Perps renewal's first step, as hosted's stopForReplacement of the
+ * Perps grant: the Perps home's grant.json archived, then removed. Nothing of the
+ * Spot wallet's, or Solana's, is touched. (No new Perps grant can be posted until
+ * slice 5, so no client sends this yet.)
+ */
+async function selfHostedPerpsRenewalStop(): Promise<NextResponse> {
+  const perps = await perpsHalf(() => stopLocalPerpsForKill());
+  if (perps.state === "not-stopped") {
+    return NextResponse.json(
+      { error: `Your Perps wallet's permission could not be stopped for renewal.${perps.why ? ` ${perps.why}` : ""} Nothing else was changed; try again.`, ownerFacing: true },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ ok: true, replacement: true, state: perps.state === "stopped" ? "stopped" : "absent" });
+}
+
 /** "Kill all agents" stops every wallet; a kill naming one is a client that means something else. */
 function killNamesWallet(): NextResponse {
   return NextResponse.json(

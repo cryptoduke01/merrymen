@@ -18,12 +18,13 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { PerpsKillIncomplete, selfHostedPerpsKill, stopLocalPerpsForKill, stopPerpsForKill } from "./perps-kill";
+import { selfHostedSolanaKill } from "./solana-kill";
 import { killDoneText } from "./telegram/kill-confirm";
 
 type Owner = "spot-only" | "perps-only" | "two-wallet";
@@ -142,6 +143,68 @@ test("`merrymen kill` with a Perps grant it cannot archive removes Spot's, keeps
   assert.doesNotMatch(said, /the band stands down on the next tick/);
   assert.equal(existsSync(path.join(dir, "grant.json")), false, "the Spot grant is still torn down");
   assert.ok(existsSync(path.join(perpsHome, "grant.json")), "the Perps owner key is not lost");
+});
+
+/**
+ * A home this process cannot read is not an empty one. Made unreadable with
+ * mode 000 for the test (root reads through any mode, so it is skipped there),
+ * and given its mode back by the test itself, before the temp home is removed.
+ */
+const asRoot = process.getuid?.() === 0;
+function unreadable(dir: string): () => void {
+  chmodSync(dir, 0o000);
+  return () => chmodSync(dir, 0o700);
+}
+
+test("self-hosted Telegram /kill on a home it cannot read: Solana and Perps both answer not-stopped, never none", { skip: asRoot }, async (t) => {
+  const { dir } = install(t, "two-wallet");
+  const restore = unreadable(dir);
+  try {
+    assert.equal(await selfHostedPerpsKill(), "not-stopped");
+    assert.equal(await selfHostedSolanaKill(), "not-stopped", "an accounts file that cannot be looked for may be a strategy that is on");
+  } finally {
+    restore();
+  }
+});
+
+for (const owner of ["two-wallet", "perps-only"] as const) {
+  test(`\`merrymen kill\`, ${owner}, with a Perps home it cannot read: incomplete and exit 1, never done, and the grant is not lost`, { skip: asRoot, timeout: 120_000 }, (t) => {
+    const { dir, perpsHome } = install(t, owner);
+    const restore = unreadable(perpsHome);
+    let said: string;
+    let status: number | null;
+    try {
+      const run = cli(dir, "y\n");
+      said = run.stdout + run.stderr;
+      status = run.status;
+    } finally {
+      restore();
+    }
+    assert.equal(status, 1, said);
+    assert.doesNotMatch(said, /already home|the band stands down on the next tick/);
+    assert.match(said, /Kill incomplete: your Perps wallet's grant could not be revoked and it may still sign\. The local Perps wallet's grant could not be read or revoked \(EACCES\)/);
+    if (owner === "two-wallet") assert.match(said, /grant destroyed and the Robinhood band stands down, but the kill is incomplete: the Perps wallet's grant was not revoked/);
+    assert.ok(existsSync(path.join(perpsHome, "grant.json")), "the Perps grant is still there, and the kill said so");
+  });
+}
+
+test("`merrymen kill` on a home it cannot read says nothing is done: Solana, Perps and the grant all incomplete", { skip: asRoot, timeout: 120_000 }, (t) => {
+  const { dir } = install(t, "two-wallet");
+  const restore = unreadable(dir);
+  let said: string;
+  let status: number | null;
+  try {
+    const run = cli(dir, "y\n");
+    said = run.stdout + run.stderr;
+    status = run.status;
+  } finally {
+    restore();
+  }
+  assert.equal(status, 1, said);
+  assert.doesNotMatch(said, /already home|the band stands down on the next tick/);
+  assert.match(said, /Kill incomplete: your Solana strategy could not be stopped/);
+  assert.match(said, /Kill incomplete: your Perps wallet's grant could not be revoked/);
+  assert.match(said, /grant NOT destroyed — grant\.json could not be read \(EACCES\)/);
 });
 
 test("`merrymen kill` answered no touches neither wallet", { timeout: 120_000 }, (t) => {

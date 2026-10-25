@@ -12,6 +12,8 @@ guardStdio();
 try {
   console.log(await stopLocalPerpsForKill());
 } catch (e) {
-  console.error(e instanceof PerpsKillIncomplete ? e.message : "The local Perps wallet's grant could not be revoked. Check ~/.merrymen/accounts/perps/.");
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  console.error(e instanceof PerpsKillIncomplete ? e.message
+    : `The local Perps wallet's grant could not be read or revoked${typeof code === "string" ? ` (${code})` : ""}. Check ~/.merrymen/accounts/perps/, and run the kill as the user that owns it.`);
   process.exitCode = 1;
 }

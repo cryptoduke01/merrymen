@@ -9,13 +9,14 @@
  *  - a permission replacement stops exactly the wallet it names, so a Perps
  *    renewal's first step never touches the Spot grant, and the other way round;
  *  - a kill names no wallet (it stops all of them), so a kill that names one
- *    is refused as ambiguous, with nothing deleted.
+ *    is refused as ambiguous, with nothing deleted; a renewal may name its
+ *    wallet, self-hosted as hosted.
  *
  * Hosted runs through the real route over real file-backed stores (the
  * single-service hosted deploy), with a real signed-in session.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
@@ -106,6 +107,35 @@ describe("self-hosted: no Perps wallet is made, and the kill names none", () => 
       assert.match(String((await res.json() as { error: string }).error), /Nothing was deleted/);
       assert.equal(readFileSync(grantFile(), "utf8"), kept);
     }
+  });
+
+  // A renewal may name its wallet, as it may hosted, and stops only that one.
+  const perpsGrantFile = () => path.join(home, "accounts", "perps", "grant.json");
+  const perpsKept = `{"smartAccount":"${addr(0xc3)}","purpose":"perps"}\n`;
+  const renew = (query: string) => route.DELETE(new Request(`${ORIGIN}/api/grants${query}`, {
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purpose: "permission-replacement" }),
+  }));
+  const withPerpsGrant = () => {
+    rmSync(path.join(home, "accounts"), { recursive: true, force: true });
+    mkdirSync(path.dirname(perpsGrantFile()), { recursive: true });
+    writeFileSync(perpsGrantFile(), perpsKept);
+  };
+
+  it("a renewal that names the Spot wallet stops Spot's grant only", async () => {
+    withPerpsGrant();
+    const res = await json(await renew("?wallet=spot"));
+    assert.deepEqual(res, { status: 200, body: { ok: true } });
+    assert.equal(existsSync(grantFile()), false, "Spot's grant.json is archived and removed, as a self-hosted renewal always did");
+    assert.equal(readFileSync(perpsGrantFile(), "utf8"), perpsKept, "and the Perps grant is left exactly as it was");
+  });
+
+  it("a renewal that names the Perps wallet stops the Perps grant only, and none there is absent", async () => {
+    withPerpsGrant();
+    assert.deepEqual(await json(await renew("?wallet=perps")), { status: 200, body: { ok: true, replacement: true, state: "stopped" } });
+    assert.equal(existsSync(perpsGrantFile()), false);
+    assert.equal(readFileSync(path.join(home, "accounts", "perps", "grants", `${addr(0xc3)}.json`), "utf8"), perpsKept, "its owner key is kept in its own home");
+    assert.equal(readFileSync(grantFile(), "utf8"), kept, "the Spot grant is untouched");
+    assert.deepEqual(await json(await renew("?wallet=perps")), { status: 200, body: { ok: true, replacement: true, state: "absent" } });
   });
 });
 

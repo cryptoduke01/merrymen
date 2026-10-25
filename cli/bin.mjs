@@ -21,7 +21,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1106,13 +1106,28 @@ function selftest() {
 }
 
 /**
+ * IS THERE SOMETHING HERE A KILL MUST STOP? "absent" only when the file is not
+ * there (ENOENT). Anything else, EACCES on a home another user owns among them,
+ * is "unknown": a grant or strategy that may still be live, which the kill must
+ * try and fail at rather than call done. existsSync answers false to both.
+ */
+function killTarget(file) {
+  try {
+    statSync(file);
+    return "present";
+  } catch (e) {
+    return e?.code === "ENOENT" ? "absent" : "unknown";
+  }
+}
+
+/**
  * The kill's Solana half: every local Solana strategy off (worker/src/solana-kill-cli.ts,
  * stopLocalSolanaForKill), before the grant is touched, as the dashboard's and Telegram's
  * self-hosted kills do. Nothing to run without a Solana accounts database. False, with the
  * exit code set, when it could not be stopped: the kill is incomplete, never said done.
  */
 function stopLocalSolana() {
-  if (!process.env.DATABASE_URL && !existsSync(path.join(HOME, "solana-accounts.sqlite"))) return true;
+  if (!process.env.DATABASE_URL && killTarget(path.join(HOME, "solana-accounts.sqlite")) === "absent") return true;
   const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "solana-kill-cli.ts")], {
     cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1133,7 +1148,7 @@ function stopLocalSolana() {
  * revoked: the kill is incomplete, never said done.
  */
 function stopLocalPerps() {
-  if (!existsSync(PERPS_GRANT)) return true;
+  if (killTarget(PERPS_GRANT) === "absent") return true;
   const child = spawnSync(process.execPath, ["--import", "tsx", path.join(ROOT, "worker", "src", "perps-kill-cli.ts")], {
     cwd: ROOT, encoding: "utf8", shell: false, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1148,9 +1163,12 @@ function stopLocalPerps() {
 }
 
 async function kill() {
-  if (!existsSync(GRANT)) {
+  // Not there, or cannot tell (killTarget): a grant this cannot see may still sign,
+  // so only a missing file counts as no grant.
+  const perpsTarget = killTarget(PERPS_GRANT);
+  if (killTarget(GRANT) === "absent") {
     // No Spot grant: the other halves still run. Asked first only when a Perps grant would go.
-    if (existsSync(PERPS_GRANT)) {
+    if (perpsTarget !== "absent") {
       const p = makePrompter();
       const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — revoke your Perps wallet's grant? [y/N]: `)).trim().toLowerCase();
       p.close();
@@ -1167,7 +1185,7 @@ async function kill() {
     return;
   }
   const p = makePrompter();
-  const both = existsSync(PERPS_GRANT);
+  const both = perpsTarget !== "absent";
   const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant${both ? "s of both wallets (Spot and Perps)" : ""}? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
   p.close();
   if (answer === "y" || answer === "yes") {

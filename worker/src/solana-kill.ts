@@ -1,8 +1,23 @@
 /** Kill switches reach the separate Solana worker through the tenant's binding. */
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isHostedMode } from "../../packages/core/src/hosted";
 import { getSolanaBindingStore, type SolanaBindingStore } from "../../web/src/lib/solana-binding-store";
 import { solanaRuntimeDbFile } from "./solana-runtime-db";
+
+/**
+ * No accounts file (ENOENT): nothing Solana can be running here. Anything else
+ * that stops it being read (EACCES on a home another user owns, say) throws,
+ * so the kill says the Solana half could not be stopped instead of none.
+ */
+function noAccountsFile(): boolean {
+  try {
+    statSync(solanaRuntimeDbFile());
+    return false;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw e;
+  }
+}
 
 /**
  * "Kill all agents" and Telegram /kill stop the tenant's Solana strategy too.
@@ -15,7 +30,7 @@ import { solanaRuntimeDbFile } from "./solana-runtime-db";
  * Solana schema and takes no Solana lock (SqlSolanaBindingStore killDb).
  */
 export async function stopSolanaForKill(tenant: `0x${string}`, store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
-  if (!process.env.DATABASE_URL && (isHostedMode() || !existsSync(solanaRuntimeDbFile()))) return "none";
+  if (!process.env.DATABASE_URL && (isHostedMode() || noAccountsFile())) return "none";
   return await store.disableForKill(tenant) ? "stopped" : "none";
 }
 /**
@@ -30,7 +45,7 @@ export async function selfHostedSolanaKill(store?: SolanaBindingStore): Promise<
 /** Self-hosted is one owner's install: its kill stops every local strategy. */
 export async function stopLocalSolanaForKill(store: SolanaBindingStore = getSolanaBindingStore()): Promise<"stopped" | "none"> {
   if (isHostedMode()) throw new Error("A hosted kill names its tenant.");
-  if (!process.env.DATABASE_URL && !existsSync(solanaRuntimeDbFile())) return "none";
+  if (!process.env.DATABASE_URL && noAccountsFile()) return "none";
   let stopped = false;
   for (const tenant of await store.strategyTenants()) stopped = await store.disableForKill(tenant) || stopped;
   return stopped ? "stopped" : "none";
