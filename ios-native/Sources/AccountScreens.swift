@@ -3,6 +3,7 @@ import PhotosUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 import ImageIO
+import MerrymenPolicy
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
@@ -177,7 +178,8 @@ struct PermissionsScreen: View {
             Button("Stand down", role: .destructive) {
                 guard !busy else { return }; busy = true; let owner = store.owner
                 Task { defer { busy = false }; do {
-                    _ = try await store.perform("/api/grants", method: "DELETE", body: .object([:]), expectedOwner: owner)
+                    guard let owner, let body = StandDown.body(owner: owner) else { throw APIError(status: 401, message: "Sign in again before confirming this action.") }
+                    _ = try await store.perform("/api/grants", method: "DELETE", body: body, expectedOwner: owner)
                     revision += 1; store.notice = "Stand-down request accepted. Existing assets remain in the smart account."
                 } catch { store.notice = error.localizedDescription } }
             }
