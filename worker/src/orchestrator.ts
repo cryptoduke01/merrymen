@@ -4850,14 +4850,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // (recovery-reply-arm.ts): a kill is carried out against the store before
     // grant.json could be written, and a pause is in the home before the
     // worker's first tick reads it. A hold here is this tenant's alone.
-    if (perpsSlot) {
-      // A PERPS WORKER'S CONTROLS ARE ITS OWNER'S (perpsOwnerControlsHold, the
+    if (perpsSlot && storedGrant) {
+      // A PERPS WORKER'S CONTROLS ARE ITS OWNER'S (perpsOwnerControls, the
       // pause mirror): never applied from here, and never with its own key.
-      const held = await perpsOwnerControlsHold(slotOf(tenant).owner);
-      if (held) {
-        sayTenantAlert(tenant, `${tenant}: held by its owner's recorded controls (${held}) — not spawning`);
+      const controls = await perpsOwnerControls(slotOf(tenant).owner, storedGrant.smartAccount as `0x${string}`, storedGrant.chainId);
+      if (controls.hold) {
+        sayTenantAlert(tenant, `${tenant}: held by its owner's recorded controls (${controls.hold}) — not spawning`);
         return;
       }
+      if (controls.paused) {
+        perpsPausedByRecord.add(tenant);
+        log(`${tenant}: its owner's recorded pause stands — the Perps worker starts paused`);
+      } else perpsPausedByRecord.delete(tenant);
       mirrorLoginPause(tenant);
     } else if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
     const grantForChild = await writeGrantForChild(tenant);
@@ -6365,12 +6369,28 @@ export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unkn
  * pending until a later pass gets through, exactly as the Solana stop does.
  */
 let stopPerps: (tenant: `0x${string}`, coveredSec: number) => Promise<boolean> = async (tenant, coveredSec) => {
-  const perps = await stopPerpsForKill(tenant, { coveredSec });
+  let perps: Awaited<ReturnType<typeof stopPerpsForKill>> | undefined;
+  try {
+    perps = await stopPerpsForKill(tenant, { coveredSec });
+  } finally {
+    // AND ITS RUNNING WORKER, before the ✅ can go: revoked in the store is not
+    // stopped here, and the reconcile that would stand it down may be a pass
+    // away. Unless a grant signed after the kill was kept — and ON A FAILED
+    // HALF TOO: a revoke or a paper switch-off that could not finish is no
+    // reason to leave the worker trading on its copy, and failing closed costs
+    // a restart the latch holds anyway (killPendingFor). Only a 0x owner can
+    // have a Perps worker. A copy that will not go throws, owing the ✅ that
+    // names the Perps grant when this call revoked it.
+    if (perps !== "newer" && evmFleetId(tenant) !== null) {
+      try {
+        standDownForKill(workerKey(tenant, "perps"));
+      } catch (e) {
+        // The half's own failure, when it had one, is the one reported.
+        if (perps !== undefined) throw Object.assign(e instanceof Error ? e : new Error(String(e)), { perpsRemoved: perps === "stopped" });
+      }
+    }
+  }
   if (perps === "newer") log(`${tenant}: a Perps grant signed after the Telegram kill is kept`);
-  // AND ITS RUNNING WORKER, before the ✅ can go: revoked in the store is not
-  // stopped here, and the reconcile that would stand it down may be a pass
-  // away. Throws when it cannot, and the kill stays pending.
-  else standDownForKill(workerKey(tenant, "perps"));
   return perps === "stopped";
 };
 
@@ -6423,23 +6443,41 @@ async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promis
   };
   const kill = await honourKillRequest(perpsStore, owner, home, nowSec, {
     spot: async (coveredSec) => {
-      spot = await getGrantStore("spot").removeUnlessNewer(owner, coveredSec);
-      if (spot !== "newer") standDownForKill(owner);
+      try {
+        spot = await getGrantStore("spot").removeUnlessNewer(owner, coveredSec);
+      } finally {
+        // Stood down unless a newer Spot grant was kept — a failed read too.
+        if (spot !== "newer") standDownForKill(owner);
+      }
       return spot === "removed";
     },
     solana: () => stopSolana(owner),
     perps: async (coveredSec) => {
       // Its grant was this request's store's, above: what is left is the paper
-      // strategy (perps-kill.ts), judged by what that store answered.
-      const r = await stopPerpsForKill(owner, { coveredSec, store: { revokeForKill: async () => perpsResult ?? "absent" } });
-      if (r !== "newer") standDownForKill(key);
+      // strategy (perps-kill.ts), judged by what that store answered. The
+      // worker is stood down whatever the switch-off came to, unless a newer
+      // Perps grant replaced the one killed.
+      let r: Awaited<ReturnType<typeof stopPerpsForKill>> | undefined;
+      try {
+        r = await stopPerpsForKill(owner, { coveredSec, store: { revokeForKill: async () => perpsResult ?? "absent" } });
+      } finally {
+        if (perpsResult !== "newer" && r !== "newer") {
+          try {
+            standDownForKill(key);
+          } catch (e) {
+            if (r !== undefined) throw Object.assign(e instanceof Error ? e : new Error(String(e)), { perpsRemoved: perpsResult === "removed" });
+          }
+        }
+      }
       return perpsResult === "removed";
     },
   });
   if (kill.outcome === "revoked" && kill.removed) {
     log(`${owner}: Telegram kill (sent to its Perps worker's bot) honoured — grants removed from the store`);
     void confirmKillDone(owner, { perps: kill.perps, perpsHome: true });
-    await forgetTgGroups(owner);
+    // The login's stored memory only when its Spot grant went too: a Spot
+    // grant signed after the kill is a running agent whose memory it is.
+    if (spot !== "newer") await forgetTgGroups(owner);
   }
   if (kill.outcome === "superseded") log(`${owner}: a Perps grant signed after the Telegram kill replaces it — arming that one`);
   if (kill.outcome === "failed") log(`${owner}: Telegram kill (sent to its Perps worker's bot) pending, not carried out yet (${kill.error}) — nothing arms meanwhile`);
@@ -6463,12 +6501,31 @@ async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promis
  * before every Perps spawn. A home whose file cannot be written or removed is
  * said once an hour and tried again on the next tick.
  */
+/**
+ * Perps workers started paused by their owner's recorded controls
+ * (perpsOwnerControls): kept paused until the Spot home is armed and its own
+ * `paused` file speaks for the login.
+ */
+const perpsPausedByRecord = new Set<string>();
+
 function mirrorLoginPause(key: string): void {
   if (!isPerpsWorkerKey(key)) return;
-  const spot = path.join(childHome(workerOwner(key)), PAUSED_FILE);
+  const spotHome = childHome(workerOwner(key));
+  const spot = path.join(spotHome, PAUSED_FILE);
   const home = childHome(key);
   const mine = path.join(home, PAUSED_FILE);
   try {
+    if (perpsPausedByRecord.has(key)) {
+      if (!existsSync(path.join(spotHome, CONTROLS_ARMED_FILE))) {
+        if (!existsSync(mine)) {
+          mkdirSync(home, { recursive: true, mode: 0o700 });
+          writeFileAtomicSync(mine, "paused", 0o600);
+        }
+        return;
+      }
+      // Armed since: the Spot arm has applied (or lifted) the recorded pause.
+      perpsPausedByRecord.delete(key);
+    }
     if (existsSync(spot)) {
       if (existsSync(mine)) return;
       mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -6491,41 +6548,60 @@ function mirrorLoginPauses(): void {
 export { mirrorLoginPauses as mirrorLoginPausesForTest };
 
 /**
- * A RECORDED CONTROL NOT YET APPLIED HOLDS A PERPS WORKER, or null.
+ * WHAT THE OWNER'S RECORDED CONTROLS SAY OF THEIR PERPS WORKER BEFORE IT
+ * STARTS: a reason to hold it, and whether it must start paused.
  *
- * While a login's Spot worker is held, the recovery-reply listener answers
- * its bot and journals a /pause or a confirmed /kill (recovery-reply-arm.ts);
- * they are applied at that Spot worker's next arm — the kill carried out as
- * the owner's (honourKill: both wallets), the pause into the Spot home, which
- * the pause mirror then carries here. The Perps worker must not run ahead of
- * either: so while the owner's journal holds a kill awaiting its /confirm, a
- * confirmed kill or a pause that no receipt says was applied, it does not
- * start. Read only — it never applies one itself, because a receipt written
- * here would stop the Spot arm applying that control to the Spot home.
- * Unreadable is a hold: fail closed.
+ * While a login's Spot worker is held, the recovery-reply listener answers its
+ * bot and journals a /pause or a confirmed /kill (recovery-reply-arm.ts); a
+ * Spot home rebuilt by a redeploy or a resume archive gets its standing pause
+ * back from Postgres (the durable stamp, or the legacy pause event). All of
+ * it is applied at the Spot worker's arm — the kill carried out as the
+ * owner's (honourKill: both wallets), the pause into the Spot home, which the
+ * pause mirror then carries here. The Perps worker never applies one itself:
+ * a receipt written here would stop the Spot arm applying that control to the
+ * Spot home. So, read only:
+ *
+ *  - HELD while a kill waits for its /confirm or a confirmed kill has no
+ *    receipt, and while the controls cannot be read: fail closed;
+ *  - STARTED PAUSED while a journalled pause has no receipt, or the Spot home
+ *    has never been armed here and a durable or legacy pause stands — the
+ *    same evidence the Spot arm would restore from (previewStartsPaused).
+ *    Paused, not held, because a paused worker still closes at its stops and
+ *    a held one closes nothing. The mirror keeps that pause until the Spot
+ *    home is armed and speaks for itself (mirrorLoginPause).
  */
-async function perpsOwnerControlsHold(owner: `0x${string}`): Promise<string | null> {
+async function perpsOwnerControls(owner: `0x${string}`, account: `0x${string}`, chainId: number): Promise<{ hold: string | null; paused: boolean }> {
   const url = process.env.DATABASE_URL;
-  if (!url && !retirementMemoryStoreForTest) return null;
+  if (!url && !retirementMemoryStoreForTest) return { hold: null, paused: false };
   try {
     const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
-    const journal = await readRecoveryControls(shared, { tenant: owner, smartAccount: owner, chainId: 1 });
-    if ("absent" in journal || journal.rows.length === 0) return null;
-    const fold = foldRecoveryControls(journal.rows, Date.now());
-    if (fold.malformed) return "its owner's recorded controls cannot be read";
-    if (fold.pendingKills > 0) return "a /kill its owner sent is waiting for its /confirm";
-    let receipts: Set<string>;
+    // The owner's Spot account when there is one: the legacy pause and the
+    // durable stamp's lift are read across the owner's accounts from it.
+    let spotAccount: `0x${string}` | null = null;
+    try { spotAccount = ((await getGrantStore("spot").get(owner))?.smartAccount as `0x${string}` | undefined) ?? null; } catch { /* the Perps account stands in */ }
+    const scope: ControlScope = { tenant: owner, smartAccount: spotAccount ?? account, chainId };
+    const controls = await readControlsEvidence(shared, scope, Date.now());
+    if (!controls.readable || !controls.fold) return { hold: `its owner's recorded controls could not be read (${controls.why ?? "unreadable"})`, paused: false };
+    if (controls.fold.pendingKills > 0) return { hold: "a /kill its owner sent is waiting for its /confirm", paused: false };
+    let receipts = new Set<string>();
     try {
       receipts = new Set(((await shared.prepare("SELECT bot_id, update_id FROM recovery_reply_control_receipts WHERE tenant = ?").all(owner)) as
-        Array<{ bot_id: unknown; update_id: unknown }>).map((r) => `${String(r.bot_id)}:${String(r.update_id)}`));
-    } catch {
-      receipts = new Set();
+        Array<{ bot_id: unknown; update_id: unknown }>).map((r) => `${String(r.bot_id)}:${String(Number(r.update_id))}`));
+    } catch (e) {
+      if (!/no such table|does not exist|42P01/.test(`${(e as { code?: unknown }).code ?? ""} ${(e as Error).message}`)) {
+        return { hold: `its owner's control receipts could not be read (${errorKind(e)})`, paused: false };
+      }
     }
-    if (fold.confirmedKills.some((k) => !receipts.has(`${k.botId}:${k.requestUpdateId}`))) return "a /kill its owner confirmed is carried out at its Spot worker's arm first";
-    if (fold.pauses.some((p) => !receipts.has(`${p.botId}:${p.updateId}`))) return "a /pause its owner sent is applied at its Spot worker's arm first";
-    return null;
+    if (controls.fold.confirmedKills.some((k) => !receipts.has(`${k.botId}:${k.requestUpdateId}`))) {
+      return { hold: "a /kill its owner confirmed is carried out at its Spot worker's arm first", paused: false };
+    }
+    if (controls.fold.pauses.some((p) => !receipts.has(`${p.botId}:${p.updateId}`))) return { hold: null, paused: true };
+    if (existsSync(path.join(childHome(owner), CONTROLS_ARMED_FILE))) return { hold: null, paused: false };
+    if (controls.legacy && !receipts.has(`${LEGACY_EVENTS_BOT}:${controls.legacy.eventId}`)) return { hold: null, paused: true };
+    const durable = await readDurablePause(shared, owner);
+    return { hold: null, paused: durable !== null && !(await durablePauseLifted(shared, scope, durable)) };
   } catch (e) {
-    return `its owner's recorded controls could not be read (${errorKind(e)})`;
+    return { hold: `its owner's recorded controls could not be read (${errorKind(e)})`, paused: false };
   }
 }
 
@@ -6628,6 +6704,9 @@ function perpsSpawnable(): boolean {
   return perpsCeilingOf(process.env.MERRYMEN_PERPS) === "paper";
 }
 
+/** Perps workers stood down to give a Spot worker their process slot: final-passed and released, then started again only in room no Spot worker needs. */
+const perpsYielded = new Set<string>();
+
 /** One pass's Perps roster: the workers wanted, their expiries, when each grant was stored, and whether it read. */
 interface PerpsPass {
   keys: `0x${string}`[];
@@ -6681,8 +6760,14 @@ async function perpsRosterForPass(nowSec: number, spotOwners: ReadonlySet<string
     }
     if (!spotOwners.has(owner) && killRequestedAnywhere(owner)) {
       const kill = await honourKill(owner, nowSec);
-      // Its Perps half revoked this very grant: nothing left to want.
-      if (kill.outcome === "revoked" && kill.perps) continue;
+      // GONE ONLY IF THE STORE SAYS SO: the outcome's `perps` also counts a
+      // grant an earlier pass of the kill revoked, and a Perps grant signed
+      // after the kill survives it. Unreadable keeps it wanted (no cleanup).
+      if (kill.outcome === "revoked") {
+        let still = true;
+        try { still = (await getGrantStore("perps").get(owner)) !== null; } catch { /* kept */ }
+        if (!still) continue;
+      }
     }
     const key = workerKey(owner, "perps");
     pass.keys.push(key);
@@ -7161,13 +7246,16 @@ export async function reconcile(): Promise<void> {
    * positions up where they stand. Not on a pass whose roster did not read:
    * that pass changes nothing for any Perps worker.
    */
-  if (perps.readable && !perpsSpawnable()) {
+  const perpsOff = perps.readable && !perpsSpawnable();
+  if (perpsOff) {
     for (const key of [...children.keys(), ...restartPending.keys()]) {
       if (!isPerpsWorkerKey(key)) continue;
       cancelRestart(key);
       if (children.has(key)) log(`${key}: MERRYMEN_PERPS is not paper — its Perps worker is stood down; its book is kept and its paper positions are frozen`);
       killChild(key);
     }
+  }
+  if (perpsOff || perpsYielded.size > 0) {
     /**
      * AND ITS LAST ROWS UP, THEN ITS LEASE BACK. A stood-down Perps worker is
      * still wanted, so no removed-home cleanup will ever copy what it booked
@@ -7181,12 +7269,14 @@ export async function reconcile(): Promise<void> {
      */
     for (const [key, lease] of [...leases]) {
       if (!isPerpsWorkerKey(key) || retiringExpired.has(key)) continue;
+      if (!perpsOff && !perpsYielded.has(key)) continue;
       if (children.has(key) || exitingChildren.has(key) || spawning.has(key) || restartPending.has(key)) continue;
       if (!lease.healthy()) continue;
       if (existsSync(path.join(childHome(key), "merrymen.db")) && !(await mirrorRetiredWorker(key, lease, true, false))) continue;
       if (leases.get(key) !== lease) continue;
       await releaseLease(key);
-      log(`${key}: stood-down Perps worker's final mirror pass completed — its lease is released while MERRYMEN_PERPS is not paper`);
+      perpsYielded.delete(key);
+      log(`${key}: stood-down Perps worker's final mirror pass completed — its lease is released`);
     }
   }
   // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: of expiry retirement,
@@ -7325,6 +7415,27 @@ export async function reconcile(): Promise<void> {
     // Nor is one whose hold process was told to stop and has not gone, handed
     // over or stood down: it may still be polling the bot (handHoldBack).
     if (holders.has(lc)) continue;
+    /**
+     * A PERPS WORKER STARTS ONLY BESIDE ITS OWNER'S SPOT WORKER, AND ONLY IN
+     * ROOM NO SPOT WORKER NEEDS.
+     *
+     * One replica per login: while the owner has an unexpired Spot grant, its
+     * Perps worker runs only on the replica holding that Spot lease, because
+     * the pause mirror and a kill's stand-down read and act on this replica's
+     * disk and maps. A Perps-only login has nothing to sit beside.
+     *
+     * Spot first, across passes as well as within one (Perps workers already
+     * go last): none starts in a pass where a Spot worker waited for a slot,
+     * nor into a slot a Spot worker waiting out its restart here will need.
+     * A running one gives its slot back when a Spot worker is deferred
+     * (perpsYielded, after this loop).
+     */
+    if (isPerpsWorkerKey(lc)) {
+      const owner = workerOwner(lc);
+      if (eligible.has(owner) && leases.get(owner)?.healthy() !== true) continue;
+      const spotRestarting = [...restartPending.keys()].filter((t) => !isPerpsWorkerKey(t)).length;
+      if (capacityDeferred > 0 || localChildProcessCount() + spotRestarting >= MAX_LOCAL_CHILD_PROCESSES) continue;
+    }
     // A capacity handoff must not release an uncertain source's recovery
     // lease before spawnChild has a chance to see its tenant-local fence.
     // The importer, under this tenant's lease, is allowed to finish its own
@@ -7400,6 +7511,20 @@ export async function reconcile(): Promise<void> {
       continue;
     }
     await spawnChild(lc, cool?.restarts ?? 0);
+  }
+  // A SPOT WORKER WAITED FOR A SLOT: as many running Perps workers give theirs
+  // back, newest first, and are final-passed and released as a ceiling
+  // stand-down is (above, on the next pass). They start again only in room no
+  // Spot worker needs.
+  if (capacityDeferred > 0) {
+    let owed = capacityDeferred;
+    for (const key of [...children.keys()].filter((k) => isPerpsWorkerKey(k)).reverse()) {
+      if (owed-- <= 0) break;
+      cancelRestart(key);
+      killChild(key);
+      perpsYielded.add(key);
+      log(`${key}: Perps worker stood down so a Spot worker can have its process slot; its book is kept and its paper positions are frozen`);
+    }
   }
   if (capacityDeferred > 0 && (!lastCapacityLog || lastCapacityLog.deferred !== capacityDeferred || Date.now() - lastCapacityLog.at > 60_000)) {
     log(`[alert] local process cap ${MAX_LOCAL_CHILD_PROCESSES} reached: ${capacityDeferred} unexpired grants deferred; capacity review required`);
