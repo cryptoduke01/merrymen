@@ -83,7 +83,7 @@ import { merrymenHome } from "./home";
 import { isPerpsWorkerKey, parseWorkerKey, PERPS_CHILDREN_DIR, perpsChildHome, workerKey, workerOwner } from "./worker-key";
 import { perpsCeilingOf } from "./settings";
 import { createFleetPerpFeed, type FleetPerpFeed, type FleetPerpFeedOptions } from "./perps/fleet-feed";
-import { recordPerpsWallet } from "./perps-wallets";
+import { perpsWalletOf, recordPerpsWallet } from "./perps-wallets";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import {
   drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
@@ -1099,10 +1099,18 @@ function grantFileFor(grant: StoredGrant): StoredGrant {
 /**
  * Each Perps worker's smart account, as this process last handed its grant
  * over: what its final mirror pass copies under once the grant itself is gone
- * (mirrorGuardedLedger). In memory only — after a restart with the grant gone,
- * a persistent Perps home is kept rather than final-passed (fail closed).
+ * (mirrorGuardedLedger). Recorded from the stored grant as soon as a spawn
+ * reads it, before anything can turn that spawn away. In memory only: after a
+ * restart the final pass takes the account from the durable perps_wallets
+ * record instead, cross-checked against the book; with neither, a persistent
+ * Perps home is kept rather than final-passed (fail closed).
  */
 const perpsSlotAccounts = new Map<string, `0x${string}`>();
+
+/** Test seam: what a restarted process knows of its Perps workers' accounts — nothing. */
+export function forgetPerpsSlotAccountsForTest(): void {
+  perpsSlotAccounts.clear();
+}
 
 /** True when a grant's own signed purpose is the wallet this worker serves. */
 function grantFitsSlot(tenant: string, grant: StoredGrant): boolean {
@@ -3668,14 +3676,24 @@ async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home =
     // shared position on the second pass, once its rewind evidence is gone.
     await assertLedgerSourceContinuity(child, shared, tenant);
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror ownership changed during its continuity proof.");
-    const marker = path.join(home, LEDGER_SOURCE_BLOCK);
-    writeFileAtomicSync(marker, JSON.stringify({ version: 1, state: "pending-mirror" }), 0o600, { durable: true });
     // A PERPS WORKER'S ACCOUNT, AS THIS PROCESS HANDED IT OVER (perpsSlotAccounts):
     // the mirror copies only that account's perp rows, and once the Perps
     // grant is gone — a kill, an expiry, the final pass of a stood-down worker
     // — the store can no longer name it. While the grant stands the two must
     // agree (ledger-mirror.ts agreedAccount). A Spot worker's is the grant's.
-    const account = isPerpsWorkerKey(tenant) ? children.get(tenant)?.smartAccount ?? perpsSlotAccounts.get(tenant) : undefined;
+    let account = isPerpsWorkerKey(tenant) ? children.get(tenant)?.smartAccount ?? perpsSlotAccounts.get(tenant) : undefined;
+    // NOT IN THIS PROCESS'S MEMORY (a restart since): the durable record the
+    // orchestrator wrote before the worker first ran (perps-wallets.ts), and
+    // only when it names exactly one account and the book itself is that
+    // account's. Read before the pending marker, so a record that cannot be
+    // read leaves no recovery barrier behind.
+    if (isPerpsWorkerKey(tenant) && !account) {
+      const recorded = await perpsWalletOf(shared, workerOwner(tenant));
+      const own = recorded ? (await child.prepare("SELECT smart_account FROM agents").all()) as Array<{ smart_account: string }> : [];
+      if (recorded && own.length === 1 && own[0]!.smart_account.toLowerCase() === recorded) account = recorded;
+    }
+    const marker = path.join(home, LEDGER_SOURCE_BLOCK);
+    writeFileAtomicSync(marker, JSON.stringify({ version: 1, state: "pending-mirror" }), 0o600, { durable: true });
     const report = await mirrorTenant({ tenant, child, shared, ...(account ? { account } : {}) });
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror ownership changed during its copy; retain the recovery barrier.");
     if (report.restarted && Object.keys(report.restarted).length) {
@@ -4844,6 +4862,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       return;
     }
     const storedGrant = await slotGrant(tenant);
+    // A Perps worker's account, known from here on: its final pass needs it
+    // even when this spawn is turned away below (mirrorGuardedLedger).
+    if (isPerpsWorkerKey(tenant) && storedGrant && grantFitsSlot(tenant, storedGrant)) perpsSlotAccounts.set(tenant, storedGrant.smartAccount.toLowerCase() as `0x${string}`);
     if (storedGrant && (!Number.isFinite(storedGrant.expiresAt) || storedGrant.expiresAt <= Math.floor(Date.now() / 1000))) {
       const cause = await pausedSourceCause(tenant);
       if (cause) await reportFleetSource(tenant, storedGrant, lease, cause);
@@ -7284,7 +7305,8 @@ export async function reconcile(): Promise<void> {
       killChild(key);
     }
   }
-  if (perpsOff || perpsYielded.size > 0) {
+  // Never on a pass whose Perps roster did not read: that pass changes nothing for any Perps worker.
+  if (perps.readable && (perpsOff || perpsYielded.size > 0)) {
     /**
      * AND ITS LAST ROWS UP, THEN ITS LEASE BACK. A stood-down Perps worker is
      * still wanted, so no removed-home cleanup will ever copy what it booked
@@ -7545,7 +7567,7 @@ export async function reconcile(): Promise<void> {
   // back, newest first, and are final-passed and released as a ceiling
   // stand-down is (above, on the next pass). They start again only in room no
   // Spot worker needs.
-  if (capacityDeferred > 0) {
+  if (capacityDeferred > 0 && perps.readable) {
     let owed = capacityDeferred;
     for (const key of [...children.keys()].filter((k) => isPerpsWorkerKey(k)).reverse()) {
       if (owed-- <= 0) break;

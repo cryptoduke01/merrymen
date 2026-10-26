@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -262,6 +262,33 @@ describe("process slots: Spot first", () => {
     await settle();
     assert.equal(live(perpsKey(b)).length, 0, "the Perps worker does not take a slot back while none is free");
     assert.ok(await perps.get(b), "its grant is kept");
+  });
+
+  it("on a pass whose Perps roster did not read, no Perps worker yields its slot or its lease", async () => {
+    orch.setPhantomProcessesForTest(46);
+    const a = ownerAt(0xb3), b = ownerAt(0xc3), c = ownerAt(0xd3);
+    await spot.put(a, grant(a, address(0xb4)));
+    await perps.put(b, grant(b, address(0xc4), { purpose: "perps" }));
+    await orch.reconcile();
+    await settle();
+    const running = live(perpsKey(b));
+    assert.equal(running.length, 1);
+    await spot.put(c, grant(c, address(0xd4)));
+    const dir = path.join(fleet, "tenants-perps");
+    chmodSync(dir, 0o000);
+    try {
+      await orch.reconcile();
+      await settle();
+      await orch.reconcile();
+      await settle();
+      assert.deepEqual(running[0]!.signals, [], "an unreadable roster changes nothing for any Perps worker");
+      assert.equal(orch.hasLeaseForTest(perpsKey(b) as `0x${string}`), true, "its lease is kept");
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    await orch.reconcile();
+    await settle();
+    assert.equal(live(perpsKey(b)).length, 0, "read again, Spot first applies as before");
   });
 });
 
