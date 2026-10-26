@@ -2435,11 +2435,12 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
     return;
   }
   if (!grant) return;
-  // The other wallet's grant is never written under a running Perps worker:
-  // it is stood down instead (writeGrantForChild says why this cannot be).
+  // The other wallet's grant is never written under a running Perps worker
+  // (writeGrantForChild says why this cannot be). Like an unreadable store,
+  // it is no reason to stand the child down here: it keeps the wall it has,
+  // and the worker refuses such a grant at arm itself (index.ts syncGrant).
   if (slotOf(tenant).perps && !grantFitsSlot(tenant, grant)) {
-    log(`${tenant}: the Perps store returned a grant that is not the Perps wallet's — worker stood down`);
-    killChild(tenant);
+    log(`${tenant}: the Perps store returned a grant that is not the Perps wallet's — not handed over`);
     return;
   }
 

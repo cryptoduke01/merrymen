@@ -190,6 +190,8 @@ const RULE_STAGE: Readonly<Record<string, FunnelStage>> = {
   // lane.ts). A perp refusal never writes a `trades` row, so the tick's funnel
   // does not hear one today; mapped so the table stays the whole vocabulary.
   "perp-not-enabled": "PERMISSION_BLOCKED",
+  // A token trade asked of a Perps wallet's worker (policy.ts perpsWalletRefusal).
+  "perps-wallet-spot": "PERMISSION_BLOCKED",
   "perp-live-not-enabled": "PERMISSION_BLOCKED",
   "perp-live-not-yet": "PERMISSION_BLOCKED",
   "perp-not-granted": "PERMISSION_BLOCKED",
