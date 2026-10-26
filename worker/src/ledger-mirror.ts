@@ -128,9 +128,36 @@ const LOG_TABLES = [
   // Left behind in the child, every mirrored held mark would land here as an
   // ordinary one and become the anchor. And `cash_read_at`, when that cash was
   // read, which is the anchor's `since` for the hosted resume.
+  //
+  // AND THE VENUE'S TERMS (docs/perps.md rule 12; store.ts PERP_EQUITY_ALTERS),
+  // the same omission a third time if left out: an equity row whose total
+  // includes a perp book but whose perp columns arrive NULL is a row whose
+  // identity no longer closes on the shared side — cash + vault + positions
+  // falls short of the total by the whole perp book — and the hosted P&L and
+  // peak would read "no perp term" for a book that had one. The paper
+  // restore's upgrade path checks exactly that identity (paper-checkpoint.ts),
+  // so these columns and its perp term land together. `cash_read_block` is
+  // the block the cash was read at.
+  //
+  // OPTIONAL, unlike the columns above: copied when the child has them. A
+  // child ledger opened before its own worker ran the ALTER (a rolling deploy;
+  // a persistent home the previous release wrote, read by the new
+  // orchestrator's final pass before its child has run) would otherwise fail
+  // this table's SELECT and stall the equity curve — every tenant's, while
+  // nobody trades perps. Absent from the child means absent from the copy,
+  // never a failed pass. A Spot child writes them NULL (store.ts addEquity).
   {
     table: "equity", probe: true, stamp: "at",
     cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "flows_held", "cash_read_at", "at"],
+    optional: [
+      "perp_collateral_micro",
+      "perp_isolated_margin_micro",
+      "perp_unrealized_micro",
+      "perp_unrealized_gain_micro",
+      "perp_in_transit_micro",
+      "perp_snapshot_time",
+      "cash_read_block",
+    ],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
   // arithmetically indistinguishable from a gain — the bug that once reported
@@ -727,12 +754,22 @@ export async function mirrorTenant(args: {
   };
 
   // ── append-only tables ────────────────────────────────────────────────────
-  for (const { table, cols: declaredCols, stamp, probe } of LOG_TABLES) {
+  for (const entry of LOG_TABLES) {
+    const { table, cols: declaredCols, stamp, probe } = entry;
     try {
       let cols: readonly string[] = declaredCols;
       if (table === "trades") {
         if (!await hasBudgetSettlement()) cols = cols.filter((column) => column !== "budget_settled_at");
         if (!await hasTradeFee()) cols = cols.filter((column) => column !== "trade_fee_usdg");
+      }
+      // The optional columns this child actually has — see the equity entry.
+      // Asked of the child alone, by name.
+      const optional: readonly string[] = "optional" in entry ? entry.optional : [];
+      if (optional.length) {
+        const present = new Set(
+          ((await child.prepare(`SELECT name FROM pragma_table_info('${table}')`).all()) as { name: string }[]).map((c) => String(c.name)),
+        );
+        cols = [...cols, ...optional.filter((c) => present.has(c))];
       }
       const mark = (await shared
         .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
-import { PAPER_CHECKPOINT_SCHEMA, mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, resetBlockedPaperBook, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
+import { PAPER_CHECKPOINT_SCHEMA, ensurePaperCheckpointSchema, mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, resetBlockedPaperBook, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
 import { applyLedgerSchema } from "./store";
+import { MIRROR_STATE_DDL } from "./ledger-mirror";
+import { readPgEvidence } from "./ledger-resume";
 
 test("paper cash, inventory and basis survive a fresh child without resetting or overwriting a running book", async()=>{
   const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
@@ -568,5 +570,27 @@ test("THE NEW EPOCH IS ONE NOTHING WAS FILED UNDER, even when rows ran ahead of 
     assert.equal(await restorePaperCheckpoint((await freshHome()).db, shared.db, blocked), "no durable checkpoint");
   } finally {
     shared.raw.close();
+  }
+});
+
+test("THE perp_json COLUMN ARRIVES WITHOUT MOVING ANY SPOT EVIDENCE: a NULL leaves the resume digest as it was, a perp book moves it", async () => {
+  // ledger-resume.ts reads paper_checkpoints with SELECT *, so the column's
+  // arrival alone would otherwise change every tenant's evidence digest and
+  // send every open approval back for a re-preview.
+  const raw = new DatabaseSync(":memory:");
+  try {
+    const shared = wrapSqlite(raw);
+    await applyLedgerSchema(shared);
+    await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+    await shared.exec(MIRROR_STATE_DDL);
+    await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at) VALUES(?,1,900,0,1000,'{}','[]',10)`).run(blocked);
+    const args = { tenant: "0x00000000000000000000000000000000000000aa", account: blocked, nowSec: 2_000_000_000 };
+    const before = JSON.stringify(await readPgEvidence(shared, args));
+    await ensurePaperCheckpointSchema(shared);
+    assert.equal(JSON.stringify(await readPgEvidence(shared, args)), before, "a NULL perp_json is the evidence a row from before the column was");
+    await shared.prepare("UPDATE paper_checkpoints SET perp_json = ?").run(JSON.stringify({ v: 1, collateral_micro: "0", positions: [] }));
+    assert.notEqual(JSON.stringify(await readPgEvidence(shared, args)), before, "a perp book is evidence");
+  } finally {
+    raw.close();
   }
 });

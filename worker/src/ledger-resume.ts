@@ -282,7 +282,16 @@ const FINANCIAL = ["flows", "equity", "fee_accruals", "positions", "cost_basis",
 async function snapshotDigest(db: Db, table: string, account: string): Promise<{ n: number; digest: string } | "absent"> {
   try {
     const rows = (await db.prepare(`SELECT * FROM ${table} WHERE LOWER(agent_id) = ?`).all(account) as Array<Record<string, unknown>>)
-      .map((r) => canonical(r)).sort();
+      // A NULL perp_json is a checkpoint with no paper perp book (every Spot
+      // agent's), the same evidence as a row from before the column existed:
+      // left in, the column's arrival alone would change every tenant's
+      // digest and send every open approval back for a re-preview.
+      .map((r) => {
+        if (table !== "paper_checkpoints" || (r.perp_json !== null && r.perp_json !== undefined)) return canonical(r);
+        const { perp_json: _none, ...rest } = r;
+        void _none;
+        return canonical(rest);
+      }).sort();
     return { n: rows.length, digest: hash(rows.join("\n")) };
   } catch (e) {
     if (/no such table|does not exist|42P01/.test(`${(e as { code?: unknown }).code ?? ""} ${(e as Error).message}`)) return "absent";
