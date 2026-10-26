@@ -263,9 +263,13 @@ describe("a tenant being spawned is not a tenant that isn't running", () => {
     );
     assert.ok(late.getEnd() < started.getStart(), "and before the worker starts");
     const refusal = fn("lateSpawnRefusal").body!.getText();
-    for (const asked of ["stopping", "haltRequested()", "leases.get(tenant) !== lease", "lease.healthy()", "killRequested(childHome(tenant))"]) {
+    for (const asked of ["stopping", "haltRequested()", "leases.get(tenant) !== lease", "lease.healthy()", "killPendingFor(tenant)"]) {
       assert.ok(refusal.includes(asked), `it asks ${asked}`);
     }
+    // A kill pending in its own home latches it outright, as it always did;
+    // one in its owner's other worker's home, for a grant that kill covers.
+    const pending = fn("killPendingFor").body!.getText();
+    assert.ok(pending.indexOf("if (killRequested(childHome(tenant))) return true;") === pending.indexOf("if ("), "its own home first, and outright");
   });
 
   it("A SPAWN THAT NEVER SETTLES IS SAID OUT LOUD, AND ITS CLAIM IS NEVER TAKEN BACK", () => {
@@ -298,7 +302,8 @@ describe("a stood-down tenant's access is cleared while its original source stay
 
   it("RECONCILE WALKS THE HOMES ON DISK, AND KEEPS HOMES WITH AN EXIT OR EXPIRY DRAIN", () => {
     const text = rec.body!.getText();
-    const walk = text.indexOf("for (const tenant of childHomeTenants())");
+    // Every home on disk: Spot's under children/, and the Perps workers' under children-perps/.
+    const walk = text.indexOf("for (const tenant of [...childHomeTenants(), ...perpsChildHomeKeys()])");
     assert.ok(walk > 0, "the homes on disk, not the running set");
     const loop = text.slice(walk);
     assert.match(loop, /if \(wanted\.has\(tenant\) \|\| children\.has\(tenant\) \|\| spawning\.has\(tenant\) \|\| retiringExpired\.has\(tenant\) \|\| exitingChildren\.has\(tenant\) \|\| holders\.has\(tenant\)\) continue;/);
@@ -311,7 +316,8 @@ describe("a stood-down tenant's access is cleared while its original source stay
     // Asked again after the await: a spawn that started meanwhile keeps its home.
     const recheck = loop.indexOf("if (children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;", firstAwait);
     assert.ok(recheck > firstAwait && recheck < clear, "and it excludes every active writer again before clearing access");
-    assert.match(loop, /const retained = \(await getGrantStore\("spot"\)\.listTenants\(\)\)\.some/);
+    // Each home against its own wallet's store, by owner (slotOf).
+    assert.match(loop, /const slot = slotOf\(tenant\);\s*const retained = \(await getGrantStore\(slot\.purpose\)\.listTenants\(\)\)\.some\(t => t\.toLowerCase\(\) === slot\.owner\);/);
     assert.match(loop, /if \(retained \|\| localMemoryWriterPresent\(tenant\)\) continue;/);
     assert.match(loop, /if \(current \|\| localMemoryWriterPresent\(tenant\)\) continue;/);
     const keepBook = loop.indexOf('if (existsSync(path.join(home, "merrymen.db")))');
@@ -324,7 +330,7 @@ describe("a stood-down tenant's access is cleared while its original source stay
   });
 
   it("AND CARRIES ITS LEDGER UP FIRST, BUT ONLY UNDER THE LEASE", () => {
-    const loop = rec.body!.getText().slice(rec.body!.getText().indexOf("for (const tenant of childHomeTenants())"));
+    const loop = rec.body!.getText().slice(rec.body!.getText().indexOf("for (const tenant of [...childHomeTenants(), ...perpsChildHomeKeys()])"));
     const mirror = loop.indexOf("await finalMirrorBeforeAnchor(tenant,");
     assert.ok(mirror > 0 && mirror < loop.indexOf("scrubHostedGrantCache(home, current,"));
     assert.match(loop, /const expectedLease = leases\.get\(tenant\);\s*if \(\(url \|\| retirementMemoryStoreForTest\) && expectedLease\?\.healthy\(\) && !holders\.has\(tenant\)\) \{/);

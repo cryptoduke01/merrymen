@@ -4,6 +4,7 @@ import { isProvenance } from "../../../worker/src/provenance";
 import { getSettingsStore } from "../../../worker/src/settings-store";
 import { classifyDrop, publishableThesis, rejectRuleLabel } from "../../../worker/src/thesis-policy";
 import { withReadDb } from "./ledger";
+import { readPerpsWallets } from "../../../worker/src/perps-wallets";
 
 type Identity = { tenant: `0x${string}`; accounts: readonly string[] };
 
@@ -32,6 +33,9 @@ export async function readPublicDecisionLifecycle(
       if (!db) return null;
       const life = await readDecisionLifecycle(db, id);
       if (!life || !/^0x[0-9a-f]{40}$/i.test(life.decision.agent_id)) return null;
+      // Never a Perps wallet's decision (docs/perps.md rule 17; perps-wallets.ts):
+      // the same unpublished shape as a missing one. Unreadable throws, below.
+      if ((await readPerpsWallets(db)).has(life.decision.agent_id.toLowerCase())) return null;
       const owner = await db.prepare("SELECT name, x_handle, mode FROM agents WHERE LOWER(smart_account) = LOWER(?) LIMIT 1")
         .get(life.decision.agent_id) as { name: string; x_handle: string | null; mode: string } | undefined;
       if (!owner || !["live", "paper"].includes(owner.mode)) return null;

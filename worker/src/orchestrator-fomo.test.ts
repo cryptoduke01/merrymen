@@ -2023,8 +2023,8 @@ describe("the orchestrator's wiring", () => {
     const spawnChild = SRC.slice(SRC.indexOf("async function spawnChild("), SRC.indexOf("export type PaperRestore"));
     assert.ok(spawnChild.length > 0, "spawnChild found");
     assert.ok(
-      /WORKER_ENTRY\][\s\S]*?stdio: fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\]/.test(spawnChild),
-      "the worker child gets an ipc channel whenever the pass can answer on it",
+      /WORKER_ENTRY\][\s\S]*?stdio: perpsSlot \|\| fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\]/.test(spawnChild),
+      "the worker child gets an ipc channel whenever the pass can answer on it (a Perps worker never: it asks nothing)",
     );
     assert.ok(/attachFomoBroker\(tenant, proc\);/.test(spawnChild), "and its broker is attached after spawn");
     const attach = SRC.slice(SRC.indexOf("function attachFomoBroker("), SRC.indexOf("function noteFomoFailure("));

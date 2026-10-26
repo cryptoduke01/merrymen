@@ -72,8 +72,9 @@ describe("the flow broker flag — a child asks only when somebody will answer",
 
   it("spawnChild says it exactly when the broker is attached: the lane is on and the child has the channel", () => {
     const spawn = SRC.slice(SRC.indexOf("async function spawnChild("), SRC.indexOf("attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);"));
-    assert.match(spawn, /flowBroker: !fomoBootNow\(\)\.off && flowRuntimeNow\(\)\.service !== null,/);
-    assert.match(spawn, /stdio: fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\],/);
+    // And never for a Perps worker, which asks the flow lane nothing and gets no channel.
+    assert.match(spawn, /flowBroker: !perpsSlot && !fomoBootNow\(\)\.off && flowRuntimeNow\(\)\.service !== null,/);
+    assert.match(spawn, /stdio: perpsSlot \|\| fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\],/);
   });
 });
 

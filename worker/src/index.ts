@@ -217,7 +217,7 @@ import { ensureHome, homePaths, liftKillPause, merrymenHome, pauseForKeptGrant }
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
-import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+import { checkPolicy, perpsWalletRefusal, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 import { entryGateLatch, entryGatesOf } from "./entry-gates";
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
@@ -3725,6 +3725,10 @@ async function main() {
     start: () =>
       startLighterFeed({
         marketIds: () => perpLane.feedMarketIds(),
+        // Funding history for every HELD market, not only perp-trend's
+        // universe: a position's funding never stalls on a market the route
+        // does not trade (feed.ts heldMarketIds).
+        heldMarketIds: () => perpLane.heldMarketIds(),
         outPath: lighterFeedPath(merrymenHome()),
         home: merrymenHome(),
         // THE PUBLIC CLIENT: market data never bills a tenant's L1 bucket.
@@ -9186,6 +9190,26 @@ async function main() {
     const perpIntent = intent.kind === "perp-order" || intent.kind === "perp-margin";
     const tradeTarget = intent.kind === "equity-order" ? intent.ticker : perpIntent ? "" : intent.target;
 
+    // ── A PERPS WALLET TRADES PERPETUALS, AND NOTHING ELSE ──────────────────
+    //
+    // Its paper cash is the perp book's collateral, and its Spot producers are
+    // off (settings.ts mergeSettings) — but an owner's own orders are not
+    // producers. A Telegram /buy, a plain-words trade, a /transfer, an app or
+    // MCP trade file, the self-test probe or an energy buy would all reach the
+    // queue as a swap, a curve trade, a transfer or an energy buy, and spend
+    // that collateral on tokens. So every non-perp intent is refused here,
+    // first, before admission, a reservation or a read: nothing is held open
+    // and nothing could replay. NO `trades` ROW, as for a perp refusal: that
+    // table is the public tape, and a Perps wallet's agent never appears on it
+    // (docs/perps.md rule 17). The owner who asked is told, from
+    // lastTradeOutcome (thesis-policy.ts "perps-wallet-spot").
+    const walletRefusal = perpsWalletRefusal(cfg.workerWallet, intent);
+    if (walletRefusal) {
+      console.log(`[perps] REFUSED ${intent.kind}: a Perps wallet's worker trades perpetuals only`);
+      lastTradeOutcome = { status: "rejected", rejectRule: walletRefusal.rule };
+      return;
+    }
+
     // ── ADMISSION, BEFORE ANYTHING ELSE IS ASKED ────────────────────────────
     //
     // A tenant brought back after a hold may be at `observe` (start nothing)
@@ -13375,6 +13399,11 @@ async function main() {
     // stay in the owner's events.
     quietReview = async () => {
       if (isPaused()) return;
+      // NEVER ON A PERPS WALLET'S WORKER. A market review is a published
+      // thesis (source `market-review`) about the basket's tokens, and a Perps
+      // wallet's agent publishes nothing (docs/perps.md rule 17): its rows
+      // would reach the public theses feed under its own name.
+      if (cfg.workerWallet === "perps") return;
       const now = Math.floor(Date.now() / 1000);
       reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
       const clock = reviewClock(agentId);
@@ -13443,7 +13472,12 @@ async function main() {
     // `book-incomplete` in particular was a silence that lasted as long as
     // one holding's cost stayed unknown.
     if (fastTrencher) funnel.block(trenchReviewBlock({ brainConfigured: !!(cfg.brainUrl && cfg.brainToken), bookIncomplete, brainTick: plan.brain, reviewsOpen: energyNow.reviews.open }));
-    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
+    // NEVER ON A PERPS WALLET'S WORKER. The Brain reviews tokens and its live
+    // mode submits Spot buys; both of its variables accept `all`, so a fleet- or
+    // machine-wide value would otherwise have the Perps wallet spend its perp
+    // collateral on tokens. The hosted child is not even given the variables
+    // (orchestrator.ts childEnv); this is the worker's own refusal.
+    if (cfg.workerWallet !== "perps" && (fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await durableNetContributions(agentId);
@@ -16204,6 +16238,7 @@ async function main() {
   process.on("SIGTERM", () => {
     if (draining) return;
     draining = true;
+    const drainStartedAt = Date.now();
     console.log(`[worker] SIGTERM — draining: nothing new starts; waiting up to ${DRAIN_INTENT_CHAIN_MS / 1000}s for the trade already on the chain`);
     tickClock.stop();
     // Guarded: a throw here would leave the handler before the drain, and the
@@ -16213,6 +16248,19 @@ async function main() {
     } catch (e) {
       console.error("[worker] stopping the Telegram poll failed:", e);
     }
+    /**
+     * AND THE PERPS PROTECTIVE LOOP, which no drain refusal reaches.
+     *
+     * Its closes are exits, so they skip the `draining` refusal on purpose
+     * (perps/lane.ts executeLocked), and its paper venue books fills, funding
+     * and carries in the ledger on its own clock. Left running, a pass could be
+     * mid-booking when closeStore() runs below. Stopped now — no new pass, the
+     * one in flight aborted — and waited for before the ledger closes, inside
+     * the same budget; a pass that outlives it is cut off by exit as a crash
+     * would be, and the next arm reads the book as it stands. A Spot worker's
+     * loop idles on a lane that is never active, and stops the same way.
+     */
+    const protectStopped = perpLane.stopProtect().catch((e) => console.error("[worker] stopping the perps protective loop failed:", e));
     void drainIntentChain({
       tail: () => intentChain,
       tick: () => tickClock.settled(),
@@ -16222,7 +16270,16 @@ async function main() {
       clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
     })
       .catch(() => false)
-      .then((emptied) => {
+      .then(async (emptied) => {
+        // The protective loop's stop, bounded by what is left of the budget.
+        const left = Math.max(0, drainStartedAt + DRAIN_INTENT_CHAIN_MS - Date.now());
+        let protectTimer: ReturnType<typeof setTimeout> | undefined;
+        const protectDone = await Promise.race([
+          protectStopped.then(() => true),
+          new Promise<boolean>((resolve) => { protectTimer = setTimeout(() => resolve(false), left); }),
+        ]);
+        clearTimeout(protectTimer);
+        if (!protectDone) console.log("[worker] the perps protective pass was still running when the drain budget ran out");
         console.log(
           emptied
             ? "[worker] drained — nothing left on the intent chain and no tick running; closing the ledger"

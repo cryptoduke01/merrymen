@@ -340,7 +340,7 @@ export type PerpsCeiling = (typeof PERPS_CEILINGS)[number];
  * Anything else it does not recognise is OFF: a typo in a variable that exists
  * to take capability away must not hand it back.
  */
-function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
+export function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
   const v = (raw ?? "").trim().toLowerCase();
   return v === "paper" ? "paper" : "off";
 }
@@ -837,6 +837,11 @@ export function mergeSettings(
           trencherLiveEnabled: false,
           trencherFastEnabled: false,
           fomoFollowEnabled: false,
+          // NO BOT AND NO GROUPS, whatever the file says: a Perps wallet's
+          // worker runs none in this build (the orchestrator hands it no
+          // token either). The bot seat a Perps-only login needs is slice 6a's.
+          telegramEnabled: false,
+          telegramGroupsEnabled: false,
         }
       : {}),
   };

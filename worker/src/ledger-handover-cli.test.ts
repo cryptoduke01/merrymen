@@ -17,6 +17,7 @@ import { inspectMemorySource } from "./memory-safeguard-cli";
 import { ensurePersonalMemorySchema } from "./personal-memory-ferry";
 import { ensureTgGroupsSchema, publishTgGroups } from "./tg-groups-ferry";
 import { PERSISTENT_HOME_MANIFEST, preparePersistentHomeForHandover } from "./persistent-home";
+import { PerpsBooksNotHandedOver } from "./perps-handover-refusal";
 import {
   HISTORICAL_GAP_PROOF_FILE, openFleetLedgerHandover, runLedgerHandoverCli, sealFleetLedgerHandover, writeLedgerHandoverArtifact,
   type LedgerHandoverDependencies,
@@ -349,4 +350,34 @@ test("completed-receipt crash retries tolerate device renumbering for owned hist
   assert.equal(lstatSync(marker, { bigint: true }).ino, heldMarker.ino);
   assert.equal(readFileSync(marker, "utf8"), markerText, "the reviewed gap remains blocked on its original inode");
   assert.equal(f.sharedRaw.prepare("SELECT * FROM tenant_ledger_import WHERE tenant=?").get(GAP_TENANT), undefined);
+});
+
+test("A PERPS PAPER BOOK IS NOT COVERED YET: every mode refuses while children-perps holds one, and says why without naming anyone", async t => {
+  const f = await fixture(t);
+  const preflightArgs = ["preflight", "--expected-deployment", "source-deployment", "--expected-commit", SOURCE_SHA, "--orchestrator-pid", "41",
+    "--quiescent", "--single-replica-confirmed"];
+  // A Perps home with no book in it holds nothing to leave behind, and stops nothing.
+  const perpsHome = path.join(f.sourceHome, "children-perps", OWNER);
+  mkdirSync(perpsHome, { recursive: true, mode: 0o700 });
+  assert.equal((await runLedgerHandoverCli(preflightArgs, f.deps)).operation, "preflight-read-only");
+  writeFileSync(path.join(perpsHome, "merrymen.db"), "a paper perps book", { mode: 0o600 });
+  const refused = (e: unknown) => {
+    assert.ok(e instanceof PerpsBooksNotHandedOver, String(e));
+    assert.match(e.message, /1 Perps paper book\(s\) under children-perps\/, and Perps paper books are not covered by the fleet handover yet/);
+    for (const secret of [OWNER, TENANT, ACCOUNT]) assert.equal(e.message.includes(secret), false, "public counts only");
+    return true;
+  };
+  await assert.rejects(runLedgerHandoverCli(preflightArgs, f.deps), refused);
+  await assert.rejects(f.capture(), refused);
+  assert.equal(existsSync(f.artifact), false, "nothing was captured");
+  await assert.rejects(f.sourceMode("verify"), refused);
+  await assert.rejects(f.sourceMode("stage"), refused);
+  assert.equal(f.sharedRaw.prepare("SELECT name FROM sqlite_master WHERE name='tenant_ledger_import'").get(), undefined, "nothing was staged");
+  assert.equal(f.getReleases(), 0, "refused before any lease was taken");
+  // A target home that holds one refuses too.
+  const targetPerps = path.join(f.targetHome, "children-perps", OWNER);
+  mkdirSync(targetPerps, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(targetPerps, "merrymen.db"), "a paper perps book", { mode: 0o600 });
+  await assert.rejects(f.targetMode("restore"), refused);
+  await assert.rejects(f.targetMode("complete"), refused);
 });
