@@ -1787,7 +1787,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
  * bring back.
  */
 export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
-  // A PERPS WORKER'S BOT, WHEN IT HAS ONE, IS ITS OWNER'S (BOT SEAT, below): never by its own key.
+  // A PERPS WORKER RUNS NO BOT in this build (its owner's bot seat is slice 6a's), and nothing of a bot is ever done under its key.
   if (isPerpsWorkerKey(tenant)) return;
   const file = path.join(childHome(tenant), "telegram.json");
   if (existsSync(file)) return;
@@ -1911,7 +1911,7 @@ export function restoredTelegramFile(
 }
 
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childState: string): Promise<void> {
-  // A PERPS WORKER'S BOT, WHEN IT HAS ONE, IS ITS OWNER'S (BOT SEAT, below): never by its own key.
+  // A PERPS WORKER RUNS NO BOT in this build (its owner's bot seat is slice 6a's), and nothing of a bot is ever done under its key.
   if (isPerpsWorkerKey(tenant)) return;
   const tg = readChildTelegram(tenant);
   if (!tg) {
@@ -2115,7 +2115,7 @@ export function setPersonalMemoryStoreForTest(store: typeof personalMemoryStoreF
 
 /** No personal-memory writer starts until its stored notes and DM history are readable. */
 async function restorePersonalMemoryForChild(tenant: `0x${string}`): Promise<boolean> {
-  // A PERPS WORKER'S BOT, WHEN IT HAS ONE, IS ITS OWNER'S (BOT SEAT, below): never by its own key.
+  // A PERPS WORKER RUNS NO BOT in this build (its owner's bot seat is slice 6a's), and nothing of a bot is ever done under its key.
   if (isPerpsWorkerKey(tenant)) return true;
   const url = process.env.DATABASE_URL;
   if (!url && !personalMemoryStoreForTest) return true;
@@ -2919,7 +2919,8 @@ async function writeSettingsForChild(
  *    the Spot worker gets, from the Spot settings' holder proof — holder
  *    claims belong to the login (docs/perps.md) — and no claim is ever made
  *    or written from here.
- *  - No bot token, unless this worker is its owner's bot slot (bot-slot.ts).
+ *  - No bot token: a Perps worker runs no bot in this build (the bot seat a
+ *    Perps-only login needs is slice 6a's).
  *
  * Unreadable stores return null and write nothing, as the Spot path's catch
  * does: the worker then runs on its defaults, which for a Perps worker are
@@ -6241,7 +6242,7 @@ async function retireExpiredGrants(
       const wasHeld = holders.has(lc) || readRestoreBlocked(childHome(lc)) !== null;
       retiringExpired.set(lc, {
         mirror: children.has(lc) || exitingChildren.has(lc) || (!wasHeld && existsSync(path.join(childHome(lc), "merrymen.db"))),
-        // A Perps worker's memory ferries are its bot's (bot-slot.ts), never its own key's.
+        // A Perps worker has no memory ferry: it runs no bot (slice 6a's bot seat).
         memory: !isPerpsWorkerKey(lc) && (!!process.env.DATABASE_URL || retirementMemoryStoreForTest !== null) && existsSync(childHome(lc)),
         held: wasHeld,
         lease: leases.get(lc) ?? null,
@@ -11722,9 +11723,8 @@ async function mirrorLedgers(): Promise<void> {
       }
     } else unavailableLiveLedger(tenant);
     if (leases.get(tenant.toLowerCase()) !== lease || !lease.healthy()) continue;
-    // A PERPS WORKER STOPS HERE: it has no groups, no memory of its own key,
-    // follows nobody and learns nothing public (docs/perps.md rule 17). Its
-    // bot's memory, when it is its owner's bot seat, is the bot seat's below.
+    // A PERPS WORKER STOPS HERE: it has no groups and no bot (slice 6a's bot
+    // seat), follows nobody and learns nothing public (docs/perps.md rule 17).
     if (isPerpsWorkerKey(tenant)) continue;
     // THE CHILD'S TELEGRAM GROUPS, beside the telegram link and under the same
     // lease: only the replica that owns this child may speak for it, and a

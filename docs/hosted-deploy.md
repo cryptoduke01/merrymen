@@ -918,15 +918,31 @@ change. They limit trading, never a kill.
 | `MERRYMEN_HALT_PERP_ENTRIES` *(optional)* | `orchestrator` | `1`: no perp opens for any tenant; exits, the protective loop, stand-downs, withdrawals and claims keep running. Only an empty value, `0`, `false`, `no` or `off` means not halted — any other spelling halts. Children read it at spawn, so it takes effect when Railway restarts the service on the variable change (seconds). This is the lever to reach for first in a perps incident (section 8) |
 | `MERRYMEN_LIGHTER_VENDOR_DIR` *(optional)* | `orchestrator` | A directory holding `lighter-signer.wasm` and `wasm_exec.js`. Unset, the signer is found at `worker/vendor/lighter/`, which the image carries. Both files are hash-checked before a byte runs, and a known-answer test must pass, whatever the path; an override that points at the wrong place fails closed (live perps stay unarmed). Paper never loads the signer |
 
+**Perps workers on the orchestrator (slice 4, paper only).** With
+`MERRYMEN_PERPS=paper` on the orchestrator, each login with a Perps grant gets
+a second child, keyed `0x<owner>:perps` in the logs and leased under that key,
+with its home at `children-perps/<owner>` beside `children/`. Nothing Perps is
+started, leased or made at any other value — the Perps roster is still read
+(a catalog probe while `perps_grants` does not exist), so turning perps off
+never deletes a Perps book, lease or home: a running Perps worker is stood
+down, its last rows mirrored, its lease given back, and its paper positions
+frozen until `paper` returns. A Perps worker runs no Telegram bot (slice 6a).
+The orchestrator publishes one public Lighter feed, `lighter-feed.json` in its
+own `MERRYMEN_HOME`, which every hosted Perps worker reads and none opens a
+socket for; it runs only at `paper`, pauses under FLEET_HALT and stops before
+the drain signals children. Watch for `perps roster:` and `[perps feed]`
+lines. **The fleet handover refuses while `children-perps/` holds a book**:
+the handover CLI does not carry Perps books yet, so do not run a persistent-
+volume handover with Perps workers on the volume.
+
 > **What the later slices add here** (from the branch, to be checked again as
 > each lands): the Lighter key sealed under `MERRYMEN_STORE_DEK` in the Perps
 > wallet's grant and written as `perp-key.json` (0600) into that wallet's
-> child home, never the Spot wallet's; the hosted kill's exits-only stand-down
-> with a use deadline no more than 15 minutes later, reported as closing until
-> it ends; and the one fleet feed file, `lighter-feed.json`, in the
-> orchestrator's `MERRYMEN_HOME`, which children read and never open a socket
-> for. Hosted children share one OS user, so per-child isolation is a
-> prerequisite for general availability.
+> child home, never the Spot wallet's; and the hosted kill's exits-only
+> stand-down with a use deadline no more than 15 minutes later, reported as
+> closing until it ends — both with the live executor. Hosted children share
+> one OS user, so per-child isolation is a prerequisite for general
+> availability.
 
 ## 5b. The AI gateway (its own Railway project)
 

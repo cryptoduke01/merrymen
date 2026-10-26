@@ -26,9 +26,11 @@
  * made up here would book P&L that never happened. If the owner later signs a
  * new permission, the lane finds them held with perps off: nothing new opens,
  * and what is held keeps its stops and closes on its own rules (perps/lane.ts).
- * The live stand-down (closing positions at Lighter and bringing the money
- * home) arrives with the hosted worker in slice 4, and this half grows a third
- * answer then: closing.
+ * Hosted, the orchestrator also stands the running Perps worker down before
+ * the ✅ (orchestrator.ts standDownForKill). The live stand-down (closing
+ * positions at Lighter and bringing the money home) arrives with the live
+ * executor, after the paper slices, and this half grows a third answer then:
+ * closing.
  *
  * THE SAME GUARANTEES AS SOLANA'S HALF:
  *  - a half that fails throws (or, for self-hosted Telegram, answers
