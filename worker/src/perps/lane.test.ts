@@ -510,6 +510,26 @@ describe("the wiring in index.ts", () => {
     assert.match(CODE, /\.\.\.\(c\.workerWallet === "perps"\s*\?\s*\{\s*perps: \{/);
   });
 
+  it("A PERPS WALLET'S WORKER NEVER RUNS THE BRAIN, whatever MERRYMEN_BRAIN_LIVE or _SHADOW say", () => {
+    // The Brain reviews tokens and its live mode submits Spot buys.
+    const tick = fn("tick");
+    const gate = tick.indexOf("shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)");
+    assert.ok(gate > 0, "found the Brain block's gate");
+    const line = tick.slice(tick.lastIndexOf("\n", gate), tick.indexOf("\n", gate));
+    assert.match(line, /^\s*if \(cfg\.workerWallet !== "perps" && \(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\)/);
+  });
+
+  it("SIGTERM stops the protective loop and waits for it, within the drain budget, before the ledger closes", () => {
+    const at = CODE.indexOf('process.on("SIGTERM", () => {');
+    const handler = CODE.slice(at, CODE.indexOf("\n  });\n", at));
+    const stop = handler.indexOf("const protectStopped = perpLane.stopProtect()");
+    const drain = handler.indexOf("drainIntentChain({");
+    const waited = handler.indexOf("protectStopped.then(() => true)");
+    const close = handler.indexOf("closeStore();");
+    assert.ok(stop > 0 && stop < drain && drain < waited && waited < close, `${stop} < ${drain} < ${waited} < ${close}`);
+    assert.match(handler.slice(drain, waited), /drainStartedAt \+ DRAIN_INTENT_CHAIN_MS - Date\.now\(\)/, "bounded by what is left of the same budget");
+  });
+
   it("every paper_book read-modify-write runs under the lane's lock, and the tick reads cash with the perp term", () => {
     const writes = [...CODE.matchAll(/setPaperBook\(/g)].map((m) => m.index ?? 0);
     assert.ok(writes.length >= 2);
