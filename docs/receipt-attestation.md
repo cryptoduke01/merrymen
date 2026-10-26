@@ -161,10 +161,11 @@ contracts and every flow identity either book already holds. Every capital
 transfer whose transaction any flow row of either book names (by identity or
 by transaction, any source) is left out. Then all of these must hold:
 
-- exactly **one** capital transfer remains (a second deposit or an unbooked
-  withdrawal in the window refuses: two movements that sum to the change cannot
-  be told from one that is it beside one that is not);
-- it is inbound and equals the inferred amount to the micro-USDG;
+- exactly **one** capital transfer remains, inbound and equal to the inferred
+  amount to the micro-USDG: the live booker's own rule for a change it would
+  infer (`flow-inference.ts` RULE 4, `matchInferredDelta`). A second deposit or
+  an unbooked withdrawal in the window refuses: two movements that sum to the
+  change cannot be told from one that is it beside one that is not;
 - its block time lies between the baseline reading and the booking, with ten
   minutes' skew;
 - it is at least 200,000 blocks behind the observed head, so the amended
@@ -238,9 +239,10 @@ be attested before its owner re-signs. A re-sign between the preview and
 stale, but after a commit is interrupted it refuses every retry and leaves the
 pending barriers in place. Re-sign after `applied`.
 
-**Reads.** Chain evidence goes through the attestation's read path. When the
-house endpoint refuses (a spent quota), that path must fail over to the chain's
-public RPC, or the preview refuses for want of a read.
+**Reads.** Chain evidence goes through the fleet's read path (`chainReadRpc`,
+as for the untouched-book protocol): a house endpoint that refuses, a spent
+quota included, fails over to the chain's public RPC. A window still unread
+after that refuses the preview.
 
 ### Interruption, retry and limits
 

@@ -19,10 +19,12 @@
  * movement of the window from its receipt (deposit-log.ts findTransferFlows,
  * with the book's trades, the grant's custody and every flow identity either
  * book already holds). Every capital transfer whose transaction any flow row of
- * either book names is left out. Exactly ONE must remain, inbound, equal to the
- * inferred amount to the micro-USDG, at least SCAN_LOOKBACK_BLOCKS deep, and
- * timed between the readings. Anything else refuses: two transfers that sum to
- * the change cannot be told from one that is it beside one that is not.
+ * either book names is left out. Of the rest, exactly ONE must be the change,
+ * by the live booker's own rule (flow-inference.ts RULE 4, matchInferredDelta):
+ * inbound and equal to the inferred amount to the micro-USDG. It must also be
+ * at least SCAN_LOOKBACK_BLOCKS deep and timed between the readings. Anything
+ * else refuses: two transfers that sum to the change cannot be told from one
+ * that is it beside one that is not.
  */
 import { createHash } from "node:crypto";
 import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, rmSync } from "node:fs";
@@ -36,6 +38,7 @@ import type { RpcCall } from "./chain-capital";
 import { BOOKING_CONFIRMATIONS } from "./chain-confirmations";
 import { wrapSqlite, type Db } from "./db";
 import { findTransferFlows, flowKey, TRANSFER_TOPIC, type TransferFlow } from "./deposit-log";
+import { matchInferredDelta } from "./flow-inference";
 import type { ReceiptLog } from "./fills";
 import type { RawLog, ReconcileChain } from "./inflight-reconcile";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
@@ -384,10 +387,12 @@ async function chainEvidence(o: TradedReceiptAttestationOptions, local: Read, co
     if (refusal) throw refusal;
     return refuse(`the window's transfers could not be read or classified (${redactUrls(error instanceof Error ? error.message : String(error))})`);
   }
-  const unbooked = flows.filter(f => !booked.txs.has(f.txHash.toLowerCase()));
-  if (unbooked.length !== 1) refuse(unbooked.length ? `${unbooked.length} unbooked capital transfers are in the window, and one deposit cannot be told from another` : "no unbooked capital transfer is in the window");
-  const only = unbooked[0]!;
-  if (only.direction !== "in" || only.amountUsdg6 !== expectedAmount) refuse("the window's one unbooked capital transfer is not this deposit");
+  // RULE 4's own match (flow-inference.ts matchInferredDelta), as the live
+  // booker applies it: of the capital transfers no flow row names, exactly one,
+  // signed by direction and equal to the inferred change to the micro-USDG.
+  const found = matchInferredDelta(flows.filter(f => !booked.txs.has(f.txHash.toLowerCase())), expectedAmount);
+  if ("none" in found) refuse(`${found.none} (blocks ${window.fromBlock}..${window.toBlock})`);
+  const only = found.match;
   if (local.barred.has(only.txHash.toLowerCase()) || common.barred.has(only.txHash.toLowerCase())) refuse("an earlier repair or owner record names the receipt's transaction");
   const r = evidence.find(x => x.method === "eth_getTransactionReceipt" && String(x.params[0]).toLowerCase() === only.txHash.toLowerCase())?.result as
     { blockNumber?: unknown; blockHash?: unknown; logs?: Array<{ address?: unknown; topics?: unknown; data?: unknown; logIndex?: unknown }> } | undefined;

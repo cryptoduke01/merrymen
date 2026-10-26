@@ -187,7 +187,7 @@ test("a second unbooked capital transfer in the window refuses, whichever is lar
   const f = await fixture();
   try {
     f.state.logs.push(transferLog({ from: DEPOSITOR, to: TEST_ACCOUNT, raw: 1_000_000n, block: BLOCK.booking + 100, tx: `0x${"c4".repeat(32)}`, index: 0 }));
-    await refusesWithoutWriting(f, /2 unbooked capital transfers are in the window/);
+    await refusesWithoutWriting(f, /2 capital transfers are in the window/);
   } finally { f.close(); }
 });
 
@@ -195,7 +195,7 @@ test("an unbooked withdrawal in the window refuses too: the change cannot be tol
   const f = await fixture();
   try {
     f.state.logs.push(transferLog({ from: TEST_ACCOUNT, to: DEPOSITOR, raw: 5_000_000n, block: BLOCK.booking + 100, tx: `0x${"c5".repeat(32)}`, index: 0 }));
-    await refusesWithoutWriting(f, /2 unbooked capital transfers/);
+    await refusesWithoutWriting(f, /2 capital transfers are in the window/);
   } finally { f.close(); }
 });
 
@@ -218,7 +218,7 @@ for (const [description, shared] of [["the original book", false], ["the shared 
     try {
       await (shared ? f.shared : f.local).prepare("INSERT INTO flows(agent_id,direction,amount_usdg,tx_hash,source,at,epoch,chain_id) VALUES(?,'in',1,?,'transfer-intent',?,1,4663)")
         .run(TEST_ACCOUNT, TX.deposit, BOOKED_AT + 30);
-      await refusesWithoutWriting(f, shared ? /no unbooked capital transfer is in the window/ : /./);
+      await refusesWithoutWriting(f, shared ? /no capital transfer is in the window/ : /./);
     } finally { f.close(); }
   });
 }
@@ -227,7 +227,7 @@ test("a transfer of a different amount is a different movement", async () => {
   const f = await fixture();
   try {
     f.deposit.data = `0x${(TOP_UP_RAW + 1n).toString(16).padStart(64, "0")}`;
-    await refusesWithoutWriting(f, /not this deposit/);
+    await refusesWithoutWriting(f, /not this change's/);
   } finally { f.close(); }
 });
 
@@ -236,7 +236,7 @@ test("a deposit outside the readings' window is not this flow's receipt", async 
   try {
     const moved = BLOCK.baseline - Number(WINDOW_MARGIN_BLOCKS) - 10;
     Object.assign(f.deposit, { blockNumber: `0x${moved.toString(16)}`, blockHash: `0x${"b".repeat(58)}${moved.toString(16)}` });
-    await refusesWithoutWriting(f, /no unbooked capital transfer is in the window/);
+    await refusesWithoutWriting(f, /no capital transfer is in the window/);
   } finally { f.close(); }
 });
 
@@ -373,7 +373,7 @@ test("a pending repair keeps both barriers when its receipt reads differently, a
     const preview = await attestTradedReceipt(f.options);
     await assert.rejects(commit(f, preview.approvalDigest, { checkpoint(at) { if (at === "local") throw new Error("stop after the original book"); } }), /stop after/);
     f.state.logs.push(transferLog({ from: DEPOSITOR, to: TEST_ACCOUNT, raw: 1_000_000n, block: BLOCK.booking + 100, tx: `0x${"c7".repeat(32)}`, index: 0 }));
-    await assert.rejects(commit(f, preview.approvalDigest), /2 unbooked capital transfers/);
+    await assert.rejects(commit(f, preview.approvalDigest), /2 capital transfers are in the window/);
     assert.equal((await readReceiptAttestation(f.shared, TEST_TENANT))!.state, "pending");
     assert.equal(existsSync(marker(f)), true);
     f.state.logs.pop();
