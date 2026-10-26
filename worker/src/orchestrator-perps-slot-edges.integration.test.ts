@@ -282,3 +282,32 @@ describe("one replica per login", () => {
     assert.equal(live(perpsKey(o)).length, 1, "both start once this replica holds the Spot lease");
   });
 });
+
+describe("the public reads' exclusion record (perps-wallets.ts)", () => {
+  it("names a Perps wallet before its worker first starts, and a record that cannot be written starts none", async () => {
+    const { readPerpsWallets } = await import("./perps-wallets");
+    const raw = new DatabaseSync(":memory:"), shared = wrapSqlite(raw);
+    await applyLedgerSchema(shared);
+    await shared.exec(MIRROR_STATE_DDL);
+    orch.setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
+    try {
+      const o = ownerAt(0x5a), p = ownerAt(0x6a);
+      await spot.put(o, grant(o, address(0x5b)));
+      await perps.put(o, grant(o, address(0x5c), { purpose: "perps" }));
+      await orch.reconcile();
+      await settle();
+      assert.equal(live(perpsKey(o)).length, 1);
+      assert.deepEqual([...await readPerpsWallets(shared)], [address(0x5c)], "the Perps account, and never the Spot one");
+      // A shared database that refuses the record: no Perps worker starts.
+      raw.exec("CREATE TRIGGER refuse_perps_wallets BEFORE INSERT ON perps_wallets BEGIN SELECT RAISE(ABORT, 'refused'); END");
+      await perps.put(p, grant(p, address(0x6c), { purpose: "perps" }));
+      await orch.reconcile();
+      await settle();
+      assert.equal(all(perpsKey(p)).length, 0, "no record, no worker");
+      assert.ok(said.some((l) => l.includes("could not be put on the public reads' exclusion record")));
+    } finally {
+      orch.setRetirementMemoryStoreForTest(null);
+      raw.close();
+    }
+  });
+});

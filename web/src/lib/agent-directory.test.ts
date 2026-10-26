@@ -48,7 +48,8 @@ test("164-account directory has the ranking's lifecycle selection without financ
     assert.equal(directory.fetchedAt, NOW * 1000);
     assert.ok(directory.agents.every(r => r.landed === null && r.pnlBps === null && r.unrankedWhy === "not-read"));
     assert.ok(fast.queries.every(sql => !/\b(?:trades|equity|flows|tenant_settings)\b/i.test(sql)), "no financial query can delay identity discovery");
-    assert.equal(fast.queries.length, 4, "selection cost stays fixed as the fleet grows");
+    // Five: the four selection reads and the one read of the Perps wallets the board leaves out.
+    assert.equal(fast.queries.length, 5, "selection cost stays fixed as the fleet grows");
     assert.doesNotMatch(JSON.stringify(directory), /smart_account|owner_address|session_key|caps|equityUsdg|pnlUsdg|performance/);
 
     const slow = observed(f.db);
@@ -118,9 +119,35 @@ test("directory diagnostics stop acquisition at callback entry and wrap only the
     // This ledger fixture lacks the optional recovery table. Its read still
     // gets an error outcome, while the existing no-hold fallback keeps rows.
     assert.deepEqual(events, [
-      ...["read-db", "identities", "heartbeat", "registrations", "lifecycle"]
+      // perps-wallets: the Perps wallets the board leaves out (rule 17), read with the board.
+      ...["read-db", "identities", "heartbeat", "registrations", "perps-wallets", "lifecycle"]
         .flatMap(stage => [`start:${stage}`, `ok:${stage}`]),
       "start:holds", "error:holds",
     ]);
+  } finally { f.raw.close(); }
+});
+
+test("A PERPS WALLET'S AGENT IS NEVER ON THE BOARD OR IN THE DIRECTORY (docs/perps.md rule 17)", async () => {
+  const f = await fixture(3, 0);
+  try {
+    const { recordPerpsWallet } = await import("../../../worker/src/perps-wallets");
+    // A login's Perps worker wrote its own agents row (no public id), as a
+    // hosted one does; the orchestrator recorded the wallet before it ran.
+    const perps = `0x${"9".repeat(40)}` as const;
+    f.raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps,
+      granted_at, expires_at, status, created_at, name, mode, beat_at) VALUES (?, 'owner', 'key', 4663, '{}', ?, ?, 'armed', ?, 'Robin', 'paper', ?)`)
+      .run(perps, NOW - 1000, NOW + 1000, NOW, NOW - 60);
+    const before = await readAgentDirectory(fn => fn(f.db), f.identities, () => NOW);
+    assert.equal(before.agents.length, 4, "unrecorded, it would be listed — which is why the record comes first");
+    await recordPerpsWallet(f.db, { smartAccount: perps, owner: `0x${"8".repeat(40)}`, chainId: 4663, nowSec: NOW });
+    const directory = await readAgentDirectory(fn => fn(f.db), f.identities, () => NOW);
+    assert.equal(directory.agents.length, 3);
+    assert.ok(!directory.agents.some((a) => a.name === "Robin"), "the Perps wallet's agent is left out");
+    const board = await readLeaderboard(fn => fn(f.db), f.identities, () => NOW);
+    assert.ok(!JSON.stringify(board).includes("Robin"), "and off the leaderboard");
+    // A record that cannot be read leaves the board unread, never both wallets listed.
+    f.raw.exec("DROP TABLE perps_wallets; CREATE VIEW perps_wallets AS SELECT 1 AS nothing_here");
+    const unread = await readAgentDirectory(fn => fn(f.db), f.identities, () => NOW).catch((e) => e);
+    assert.ok(unread instanceof Error || (unread as { agents?: unknown[] }).agents === undefined || !(unread as { agents: Array<{ name: string }> }).agents.some((a) => a.name === "Robin"));
   } finally { f.raw.close(); }
 });

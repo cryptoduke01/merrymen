@@ -1,5 +1,6 @@
 /** Public agent identities and lifecycle only; no book, trade or settings reads. */
 import type { Db } from "../../../worker/src/db";
+import { readPerpsWallets } from "../../../worker/src/perps-wallets";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { withReadDb } from "./ledger";
 import { inIncidentWindow, isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "./retired-agent";
@@ -67,6 +68,18 @@ export async function readDirectorySelection(
   } catch {
     // A failed selection is unread, including an older schema. It must not
     // become a successful empty directory or claim that nobody is here.
+    return null;
+  }
+
+  // NEVER A PERPS WALLET'S AGENT (docs/perps.md rule 17; perps-wallets.ts):
+  // the orchestrator records every Perps wallet before its worker first runs,
+  // and its agents row is left off the board, the directory and every count
+  // made from them. A record that cannot be read leaves the board unread
+  // rather than risk listing one.
+  try {
+    const perps = await measure("perps-wallets", () => readPerpsWallets(db));
+    if (perps.size) rows = rows.filter((r) => !perps.has(r.smart_account.toLowerCase()));
+  } catch {
     return null;
   }
 

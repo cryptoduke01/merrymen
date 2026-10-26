@@ -83,6 +83,7 @@ import { merrymenHome } from "./home";
 import { isPerpsWorkerKey, parseWorkerKey, PERPS_CHILDREN_DIR, perpsChildHome, workerKey, workerOwner } from "./worker-key";
 import { perpsCeilingOf } from "./settings";
 import { createFleetPerpFeed, type FleetPerpFeed, type FleetPerpFeedOptions } from "./perps/fleet-feed";
+import { recordPerpsWallet } from "./perps-wallets";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import {
   drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
@@ -1094,6 +1095,14 @@ function grantFileFor(grant: StoredGrant): StoredGrant {
   const { apiKeySealed: _sealed, ...pub } = perp;
   return { ...grant, perp: pub };
 }
+
+/**
+ * Each Perps worker's smart account, as this process last handed its grant
+ * over: what its final mirror pass copies under once the grant itself is gone
+ * (mirrorGuardedLedger). In memory only — after a restart with the grant gone,
+ * a persistent Perps home is kept rather than final-passed (fail closed).
+ */
+const perpsSlotAccounts = new Map<string, `0x${string}`>();
 
 /** True when a grant's own signed purpose is the wallet this worker serves. */
 function grantFitsSlot(tenant: string, grant: StoredGrant): boolean {
@@ -2376,6 +2385,7 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<{ smartAccount
 
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  if (slot.perps) perpsSlotAccounts.set(tenant, grant.smartAccount.toLowerCase() as `0x${string}`);
   // grant.json holds the SESSION key (the store already refused any owner key),
   // so keep it owner-only. Replaced whole — see refreshGrantForChild for what a
   // child makes of half a grant. Never a Lighter key's sealed half (grantFileFor).
@@ -3660,7 +3670,13 @@ async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home =
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror ownership changed during its continuity proof.");
     const marker = path.join(home, LEDGER_SOURCE_BLOCK);
     writeFileAtomicSync(marker, JSON.stringify({ version: 1, state: "pending-mirror" }), 0o600, { durable: true });
-    const report = await mirrorTenant({ tenant, child, shared });
+    // A PERPS WORKER'S ACCOUNT, AS THIS PROCESS HANDED IT OVER (perpsSlotAccounts):
+    // the mirror copies only that account's perp rows, and once the Perps
+    // grant is gone — a kill, an expiry, the final pass of a stood-down worker
+    // — the store can no longer name it. While the grant stands the two must
+    // agree (ledger-mirror.ts agreedAccount). A Spot worker's is the grant's.
+    const account = isPerpsWorkerKey(tenant) ? children.get(tenant)?.smartAccount ?? perpsSlotAccounts.get(tenant) : undefined;
+    const report = await mirrorTenant({ tenant, child, shared, ...(account ? { account } : {}) });
     if (stillOwned && !stillOwned()) throw new Error("Ledger mirror ownership changed during its copy; retain the recovery barrier.");
     if (report.restarted && Object.keys(report.restarted).length) {
       // Do not clear the pending marker. A new supervisor must refuse too,
@@ -4884,6 +4900,19 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     if (!Number.isFinite(grantForChild.expiresAt) || grantForChild.expiresAt <= Math.floor(Date.now() / 1000)) {
       log(`${tenant}: signed grant expired or has no valid expiry — not starting a worker; re-sign required`);
       return;
+    }
+    // A PERPS WALLET IS ON RECORD BEFORE ITS WORKER CAN WRITE A ROW
+    // (perps-wallets.ts): every public read leaves the accounts named there out,
+    // so its agents row never reaches the directory or the leaderboard. A
+    // record that cannot be written starts no worker.
+    if (perpsSlot && (process.env.DATABASE_URL || retirementMemoryStoreForTest)) {
+      try {
+        const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(process.env.DATABASE_URL!);
+        await recordPerpsWallet(shared, { smartAccount, owner: slotOf(tenant).owner, chainId: grantForChild.grant.chainId, nowSec: Math.floor(Date.now() / 1000) });
+      } catch (e) {
+        sayTenantAlert(tenant, `[alert] ${tenant}: its Perps wallet could not be put on the public reads' exclusion record (${errorKind(e)}) — no Perps worker starts until it can be`);
+        return;
+      }
     }
     if (!(await preparePersistentLedgerForChild(tenant, grantForChild.grant, lease))) {
       await reportFleetSource(tenant, grantForChild.grant, lease, "persistent-source"); return;
