@@ -3061,6 +3061,30 @@ export async function lastChainLogBlock(agentId: string): Promise<number | null>
 }
 
 /**
+ * WOULD A SCAN RESUMING FROM THIS MARK READ MONEY INFERENCE ALREADY BOOKED?
+ *
+ * The deposit scan resumes from its last chain-log block (above) and tells a
+ * booked log by its identity, tx#logIndex. An inferred flow has none, so a scan
+ * resuming below one would book the same deposit again — contributions twice,
+ * and both peaks raised twice for good. True when any inferred flow was booked
+ * at or after the receipts at `markBlock` were, less `slackSec` for a receipt
+ * booked late after its block: the scan then opens at the head instead
+ * (index.ts scanChainFlows). Over every epoch, as the mark is.
+ */
+export async function inferredFlowSinceChainLog(agentId: string, markBlock: number, slackSec = 3600): Promise<boolean> {
+  const row = await getDb()
+    .prepare(
+      `SELECT 1 AS n FROM flows
+        WHERE agent_id = ? AND source = 'inferred'
+          AND at >= (SELECT COALESCE(MAX(at), 0) FROM flows
+                      WHERE agent_id = ? AND source = 'chain-log' AND block_number = ?) - ?
+        LIMIT 1`,
+    )
+    .get(agentId, agentId, markBlock, slackSec);
+  return row !== undefined && row !== null;
+}
+
+/**
  * Flow keys already recorded from block `fromBlock` onward.
  *
  * The scan re-reads its last block every pass — a block can carry several

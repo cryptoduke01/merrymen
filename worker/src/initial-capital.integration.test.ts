@@ -342,7 +342,10 @@ describe("pre-funding restart receipt eligibility", () => {
   });
   it("wires the first-funding path independently of the optional scanner and refuses inference", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    assert.match(source, /cfg\.depositScanEnabled \|\| \(initialCapitalLicence !== null && !initialCapitalComplete\)/);
+    // The chain seam reaches every live look, scanner or not (an inferred
+    // change looks for its receipt first); only the ongoing scan is optional.
+    assert.match(source, /const flows = await reconcileFlowsOrRetry\(\s*agentId,\s*balances\.cashUsdg,\s*equityUsdg,\s*\{\s*chain: makeReconcileChain\(client\),\s*initialRpc:/);
+    assert.match(source, /\} else if \(cfg\.depositScanEnabled && scan\) \{\s*covered = await scanChainFlows\(scan\);/);
     assert.match(source, /if \(plan\.amountUsdg > 0n\) throw new Error\("Hosted initial funding requires verified receipts"\)/);
     assert.match(source, /if \(initialCapitalLicence !== null && !initialCapitalComplete\) return null/);
     const branch = source.slice(source.indexOf("let covered = false;"), source.indexOf("// THE LEDGER, READ ONCE"));

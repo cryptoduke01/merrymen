@@ -45,6 +45,7 @@ import { FLEET_RECOVERY_SCHEMA, recordFleetRecoveryHold, recordFleetSourceVerifi
 import { AUTONOMY_HOLDS_SQL, AUTONOMY_TRADE_FUNNEL_SQL, FLEET_RAILS_SQL, autonomyLines, fleetRails, foldFunnel, railsLine, type AgentRailRow, type FleetRails } from "./autonomy-funnel";
 import { guardStdio, lineRedactor } from "./redact-stdio";
 import { redactUrls } from "./redact-urls";
+import { chainReadRpc } from "./rpc-meter";
 import { commitOf, heartbeatClock, heartbeatCounts, lastShutdownOf, writeFleetHeartbeat, type FleetSnapshot, type HeartbeatCounts, type LastShutdown } from "./fleet-heartbeat";
 import { recoveryCommandRefused, writeRecoveryCommandBarrier } from "./recovery-command-barrier";
 import { repairHistoricalFills } from "./history-fill-repair";
@@ -95,7 +96,7 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease as acquireStoreLease, setTenantLeaseLossHandler, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, robinhoodChain, STOCK_TOKENS, type MerrymenSettings, type StoredGrant } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import {
   botIdOf,
@@ -10125,15 +10126,10 @@ async function runReceiptAttestationIfAsked(): Promise<void> {
   }
   try {
     const shared = await makePgDb(process.env.DATABASE_URL), rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
-    let id = 0;
-    const rpc: ReceiptAttestationOptions["rpc"] = async (method, params) => {
-      const response = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }), signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) throw new Error(`Receipt evidence RPC returned HTTP ${response.status}`);
-      const body = await response.json() as { result?: unknown; error?: { message?: string } };
-      if (body.error) throw new Error(body.error.message ?? "Receipt evidence RPC failed");
-      return body.result ?? null;
-    };
+    // The fleet's read path, failed over as the reconstruction's is (rpc-meter.ts
+    // chainReadRpc): any error still refuses the attestation, a spent house
+    // quota no longer does by itself.
+    const rpc: ReceiptAttestationOptions["rpc"] = chainReadRpc(rpcUrl, robinhoodChain, { label: "receipt-attestation", timeoutMs: 30_000 });
     const report = await attestReceiptUnderSupervisor({ tenant, smartAccount: request.account, shared, rpc, mode: request.mode, approvedDigest: request.approvedDigest,
       ...(request.flowId === undefined ? {} : { sharedFlowId: request.flowId }) });
     log(`receipt-attestation| ${JSON.stringify(report)}`);
@@ -10282,18 +10278,14 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
         `recon| WARNING: ${scopeTo.size} account(s) named but only ${accounts.length} found in the roster`,
       );
     }
+    // THE FLEET'S READ PATH, NOT A BARE FETCH (rpc-meter.ts chainReadRpc). The
+    // house endpoint's quota was spent from 2026-10-15, and a raw POST to it
+    // left every window unread and the plan blocked, while the chain's public
+    // RPC — where the children's own reads fail over — served the same logs.
+    // Mainnet's chain object, because that is the endpoint this variable
+    // names; the generous timeout is for one eth_getLogs over all of history.
     const rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
-    let rpcId = 1;
-    const rpc = async (method: string, params: unknown[]): Promise<unknown> => {
-      const r = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method, params }),
-      });
-      const j = (await r.json()) as { result?: unknown; error?: { message?: string } };
-      if (j.error) throw new Error(j.error.message ?? "rpc error");
-      return j.result ?? null;
-    };
+    const rpc = chainReadRpc(rpcUrl, robinhoodChain, { label: "recon", timeoutMs: 60_000 });
 
     const usdgToken = String(CASH.USDG);
     const head = BigInt((await rpc("eth_blockNumber", [])) as string);
