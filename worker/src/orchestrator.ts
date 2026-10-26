@@ -1429,6 +1429,12 @@ export function setTenantLeaseForTest(tenant: `0x${string}`, lease: TenantLease 
  * switch), when its lease goes unhealthy, or on shutdown.
  */
 const leases = new Map<string, TenantLease>();
+/**
+ * A lease a receipt attestation is using, with no process of the tenant
+ * (attestReceiptUnderSupervisor proves that and keeps proving it). Expiry
+ * retirement passes these by: it would stand the repair down mid-protocol.
+ */
+const maintenanceLeases = new Map<string, TenantLease>();
 let stopping = false;
 /** A lease-lost child must exit before THIS replica may arm the tenant again. */
 const leaseLossDraining = new Set<string>();
@@ -1462,25 +1468,26 @@ export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOpt
   if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
   const grant = await getGrantStore("spot").get(tenant);
   if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
-  // An expired grant holding a lease is retired by the next reconcile pass
-  // (retireExpiredGrants), and that is this repair's lease: it would stop the
-  // repair part-way, then mirror and release under it. The hold keeps a
-  // re-signed worker stopped, so the owner re-signs first.
-  if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= Math.floor(Date.now() / 1000) + 3600) {
-    throw new Error("Receipt attestation requires a stored grant that stays unexpired for the next hour; the owner re-signs first, and the maintenance hold keeps its worker stopped.");
-  }
   const assertQuiescent = () => {
     if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
         || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
   };
   assertQuiescent();
-  // Wait for every already-scheduled copy. New copies queue behind the complete
-  // repair and must pass its shared pending gate before touching a cursor.
-  return mirrorSerially(tenant, async () => {
-    assertQuiescent();
-    return attestReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
-      home: childHome(tenant), volume, lease, assertQuiescent });
-  });
+  // An expired grant keeps its stored permission, and the repair may run on it
+  // (re-signing between a preview and its commit changes the bound grant).
+  // Expiry retirement must not take this lease part-way: see retireExpiredGrants.
+  maintenanceLeases.set(tenant, lease);
+  try {
+    // Wait for every already-scheduled copy. New copies queue behind the complete
+    // repair and must pass its shared pending gate before touching a cursor.
+    return await mirrorSerially(tenant, async () => {
+      assertQuiescent();
+      return attestReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
+        home: childHome(tenant), volume, lease, assertQuiescent });
+    });
+  } finally {
+    if (maintenanceLeases.get(tenant) === lease) maintenanceLeases.delete(tenant);
+  }
 }
 
 function log(msg: string): void {
@@ -5926,6 +5933,10 @@ async function retireExpiredGrants(
     // tenant is held. What follows stops a process, mirrors its book under the
     // lease and then lets the lease go: that waits for the pass that admits it.
     if (rolloutHeld(lc, process.env, newTenantAdmissions)) continue;
+    // A RECEIPT ATTESTATION'S LEASE, under a hold, with no process: retiring
+    // it now would stop that repair part-way and release its lease. Its own
+    // finally releases the lease; with nothing running, nothing waits on it.
+    if (maintenanceLeases.has(lc) && maintenanceLeases.get(lc) === leases.get(lc)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that
     // fresh grant just because the roster snapshot was old.

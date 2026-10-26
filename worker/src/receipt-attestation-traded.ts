@@ -416,9 +416,9 @@ export async function attestTradedReceipt(o: TradedReceiptAttestationOptions): P
   let plan: Plan;
   if (old) {
     try { plan = JSON.parse(String(old.plan_json)) as Plan; } catch { return refuse("permanent audit was modified"); }
+    if (hash(plan) !== old.plan_hash || approvalDigest(plan) !== old.approval_digest) refuse("permanent audit was modified");
     if (plan.version !== 2) refuse("this tenant's recorded attestation is not for one flow of a traded book");
-    if (hash(plan) !== old.plan_hash || approvalDigest(plan) !== old.approval_digest
-        || plan.tenant !== tenant || plan.account !== account || plan.chainId !== o.chainId) refuse("permanent audit was modified");
+    if (plan.tenant !== tenant || plan.account !== account || plan.chainId !== o.chainId) refuse("permanent audit was modified");
     if (safeInteger(plan.shared.flow.id) !== o.sharedFlowId) refuse("this tenant's recorded attestation names another flow; one attestation per tenant is recorded");
     assertMarker(o, plan, false);
     const state = await verify(o, plan);
@@ -428,9 +428,8 @@ export async function attestTradedReceipt(o: TradedReceiptAttestationOptions): P
     if (present(path.join(o.home, MARKER))) refuse("another source barrier exists");
     const identity = await sharedIdentity(o.shared, o);
     const common = await readBook(o.shared, { account, chainId: o.chainId }, false, flows => flows.filter(r => safeInteger(r.id) === o.sharedFlowId));
-    const local = await readLocal(o, flows => flows.filter(r => same(fact(r), fact(common.book.flow))));
     const epoch = safeInteger(common.book.agent.epoch), mark = identity.marks.find(r => r.table_name === "flows");
-    for (const read of [local, common]) {
+    const check = (read: Read) => {
       const flow = read.book.flow;
       if (flow.source !== "inferred" || flow.direction !== "in" || flow.tx_hash !== null || flow.block_number !== null || flow.log_index !== null
           || (flow.chain_id !== null && safeInteger(flow.chain_id) !== o.chainId) || safeInteger(flow.epoch) !== epoch
@@ -438,7 +437,11 @@ export async function attestTradedReceipt(o: TradedReceiptAttestationOptions): P
       micro(flow);
       if (read.flows.filter(r => same(fact(r), fact(flow))).length !== 1) refuse("the selected flow's fact is booked more than once");
       if (String(read.book.agent.owner_address).toLowerCase() !== identity.grant.owner) refuse("original owner differs from the stored permission");
-    }
+    };
+    // The selection first: the original book is searched only for an inferred deposit's copy.
+    check(common);
+    const local = await readLocal(o, flows => flows.filter(r => same(fact(r), fact(common.book.flow))));
+    check(local);
     if (!mark || safeInteger(local.book.flow.id) > safeInteger(mark.last_id)) refuse("the original flow has no shared copy behind the mirror's witness");
     if (identity.source.source_inode !== local.file.inode || identity.source.source_identity !== local.file.identity.book_id) refuse("consumed source receipt differs from local file");
     const { receipt, window, evidence } = await chainEvidence(o, local, common);
