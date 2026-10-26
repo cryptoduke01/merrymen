@@ -75,21 +75,37 @@ Perps workers, and nothing live:
   cleanup), but a Perps worker is started only at `paper`. Turned off, a
   running one is stood down as a kill stands one down, its last rows mirrored
   and its lease given back; its paper positions are frozen until `paper`
-  returns. An unreadable Perps roster changes nothing for any Perps worker.
+  returns. A Perps worker also gives its process slot back, the same way, when
+  a Spot worker is waiting for one (Spot first). An unreadable Perps roster
+  changes nothing for any Perps worker: none is started, stood down, yielded,
+  wiped or released on that pass.
 - *Durable books.* The perp ledger mirrors to Postgres (own account only, inert
   for a Spot book with no perp rows), the paper checkpoint carries the perp
   book (`perp_json`, recorded stops included), and the ledger-import specs carry
-  the perp tables. The fleet handover refuses while a Perps book exists, until
-  it covers them.
+  the perp tables. Every way a Perps worker stops (kill, removal, expiry, the
+  flag leaving `paper`, a yielded slot, the drain) ends in a final mirror pass
+  under the Perps account: the one its spawn read from the grant, or after a
+  restart the `perps_wallets` record, used only when the book is that
+  account's. With neither, the lease and home are kept. A Spot checkpoint never
+  waits on the `perp_json` column: while it cannot be added, Spot books are
+  written without it. The fleet handover refuses while a Perps book exists,
+  until it covers them.
+- *Off every public read (rule 17).* The orchestrator records each Perps
+  wallet in `perps_wallets` before its worker first starts (no record, no
+  worker), and the directory, leaderboard, theses and decision pages leave
+  those accounts out; one that cannot read the record says so rather than
+  listing both wallets. A Perps worker publishes no market review.
 - *One feed.* `perps/fleet-feed.ts` publishes the public Lighter feed every
   hosted Perps worker reads, over what this replica's own Perps workers want,
   only at `paper`, paused under FLEET_HALT and stopped before the drain.
 - *The kill and the pause.* A kill from the owner's bot, or one sitting in a
   Perps worker's home, is the owner's whole kill (both wallets, Solana, paper
   off), and every worker it revokes is stood down before the ✅. `/pause` is the
-  login's: the Spot home's pause is mirrored into the Perps home. A Perps worker
-  does not start while its owner's recovery journal holds a kill or a pause
-  not yet applied.
+  login's: the Spot home's pause is mirrored into the Perps home. A kill in the
+  owner's recovery journal, not yet carried out, holds the Perps worker: it does
+  not start. A recorded pause not yet applied, or a durable pause, starts it
+  paused instead (its protective loop still closes at stops), and it stays
+  paused until the owner's Spot home is armed and says otherwise.
 
 **Not in slice 4.** The live hosted stand-down (closing at Lighter, bringing
 money home, Lighter's 1 USDG withdrawal minimum), the venue key's hand-over,
@@ -98,6 +114,18 @@ the paper slices. **A Perps worker runs no bot in this build**: the bot seat a
 Perps-only login needs (the Perps worker running the owner's bot when there is
 no Spot grant, and a Perps-aware bot) is slice 6a's. Until then a Perps-only
 owner stops from the web and the phones.
+
+**Known limitation: a lost Perps home.** A Perps worker whose persistent home
+is lost (the volume replaced, not handed over) does not start again. Its
+import receipt (`tenant_ledger_import`, key `0x<owner>:perps`) is never
+released by any automatic path, the attested-gap registration refuses a Perps
+key, and the Perps smart account is fixed per owner, so a re-sign does not
+help. It fails closed: the orchestrator logs that the persistent original
+book is unconfirmed on every pass, and nothing is lost, because the mirrored
+perp rows and `paper_checkpoints.perp_json` stay in Postgres. An operator
+recovery path (admitting a fresh Perps book and restoring `perp_json` into
+it) is not built yet. Until it is, never replace a volume while Perps books
+are on it; the handover already refuses.
 
 ## One login, two wallets
 

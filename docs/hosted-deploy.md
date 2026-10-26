@@ -933,7 +933,10 @@ socket for; it runs only at `paper`, pauses under FLEET_HALT and stops before
 the drain signals children. Watch for `perps roster:` and `[perps feed]`
 lines. **The fleet handover refuses while `children-perps/` holds a book**:
 the handover CLI does not carry Perps books yet, so do not run a persistent-
-volume handover with Perps workers on the volume.
+volume handover with Perps workers on the volume. Nor replace that volume any
+other way: a Perps worker whose home is lost does not start again, and there is
+no recovery path for it yet (docs/perps.md, "Known limitation: a lost Perps
+home"). Its mirrored rows and paper checkpoint stay in Postgres.
 
 > **What the later slices add here** (from the branch, to be checked again as
 > each lands): the Lighter key sealed under `MERRYMEN_STORE_DEK` in the Perps
