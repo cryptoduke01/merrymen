@@ -7,6 +7,7 @@ import { requireDek } from "./store-crypto";
 import { checkpointFleetLedger } from "./ledger-safeguard";
 import { accountingHoldTenants } from "./accounting-maintenance";
 import { merrymenHome } from "./home";
+import { PerpsBooksNotHandedOver, refuseWhilePerpsBooks } from "./perps-handover-refusal";
 import {
   captureFleetMemory, openMemoryBackup, readMemoryBackupArtifact, sealMemoryBackup,
   seedMemoryBackup, verifyMemoryBackup, writeMemoryBackupArtifact, type MemorySource,
@@ -85,6 +86,12 @@ export async function runMemorySafeguardCli(argv: string[]): Promise<Record<stri
   }
   const home = merrymenHome();
   if (!home || !path.isAbsolute(home) || !process.env.DATABASE_URL) throw fail();
+  // THE SAME REFUSAL AS THE LEDGER HANDOVER'S, for the same reason: capture,
+  // seed and the fleet checkpoint each walk `children/` alone, so a Perps
+  // paper book under `children-perps/` would be left out of the backup and
+  // the checkpoint would vouch for a fleet it never read
+  // (perps-handover-refusal.ts). `verify` reads only its artifact, above.
+  refuseWhilePerpsBooks(home);
   const opts = { home, expectedDeployment: values.get("--expected-deployment") ?? "",
     expectedCommit: values.get("--expected-commit") ?? "", orchestratorPid: Number(values.get("--orchestrator-pid")),
     quiescent: flags.has("--quiescent"), singleReplicaConfirmed: flags.has("--single-replica-confirmed") };
@@ -118,8 +125,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   runMemorySafeguardCli(process.argv.slice(2)).then(result => {
     console.log(JSON.stringify(result));
     process.exit(0); // makePgDb intentionally keeps its shared pool alive.
-  }).catch(() => {
-    console.error("Memory safeguard refused. No personal content was logged and no destructive fallback was attempted.");
+  }).catch((e: unknown) => {
+    console.error(e instanceof PerpsBooksNotHandedOver ? e.message
+      : "Memory safeguard refused. No personal content was logged and no destructive fallback was attempted.");
     process.exit(1);
   });
 }

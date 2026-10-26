@@ -14,9 +14,13 @@
  *   budgets   — perp orders count against the day's caps after a refresh and
  *               a restart, per rail, by fill once known and by worst notional
  *               until then; exits never count as spend.
- *   paper     — a reset takes the paper perp book with the cash. (Its ride on
- *               the hosted checkpoint, and the mirror's copy of the perp
- *               ledger, are hosted operation: slice 4.)
+ *   paper     — the paper perp book survives a checkpoint round trip whole —
+ *               recorded stops, funding hour and nonce high-water included —
+ *               a checkpoint older than the shared tape is refused, and a
+ *               reset takes the book with the cash.
+ *   mirror    — the shared copy moves forward only, never carries the signed
+ *               bytes, copies only the worker's own account, and copies an
+ *               unchanged ledger as nothing.
  *   migration — the schema lands over an existing ledger without touching a
  *               row, the shared ledger's migration leaves `equity` alone, and
  *               every statement translates for Postgres.
@@ -29,6 +33,15 @@ import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { verifyChain } from "./audit";
 import { translateSchema, wrapSqlite, type Db } from "./db";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
+import {
+  ensurePaperCheckpointSchema,
+  mirrorPaperCheckpoints,
+  paperCheckpointRejection,
+  paperPerpRejection,
+  resetBlockedPaperBook,
+  restorePaperCheckpoint,
+} from "./paper-checkpoint";
 import type { PerpSignedTx } from "./store";
 import type { PerpOrderIntent } from "./policy";
 import { readFileSync } from "node:fs";
@@ -593,11 +606,16 @@ describe("epochs and equity", () => {
 });
 
 // ── paper ─────────────────────────────────────────────────────────────────────
-//
-// The paper perp book riding the hosted checkpoint (paper_checkpoints.perp_json)
-// and the mirror carrying the perp ledger to the shared database are hosted
-// operation, and land with it in slice 4. Here: the reset, which the worker's
-// own ledger does in one transaction.
+
+/** A shared or fresh database with the real schema, as the orchestrator builds one. */
+async function ledgerDb(): Promise<{ db: Db; raw: DatabaseSync }> {
+  const r = new DatabaseSync(":memory:");
+  others.push(r);
+  const db = wrapSqlite(r);
+  await store.applyLedgerSchema(db);
+  await db.exec(MIRROR_STATE_DDL);
+  return { db, raw: r };
+}
 
 describe("the paper perp book is reset with the paper cash", () => {
   it("resets the paper perp book with the paper cash, and never touches the live one", async () => {
@@ -615,6 +633,387 @@ describe("the paper perp book is reset with the paper cash", () => {
     assert.equal((await store.getPerpPositions(id, "paper", { includeFlat: true })).length, 0);
     assert.equal((await store.getPerpPositions(id, "live")).length, 1);
     assert.equal(await store.getNonceHighWater(id, "paper"), hw, "the high-water survives a reset");
+  });
+});
+
+/** The shared agents row a restore joins on, at the epoch every agent of this file is in. */
+function sharedAgent(r: DatabaseSync, id: string, epoch = 1): void {
+  r.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch) VALUES (?, 'o', 's', 4663, '{}', 0, 0, ?)").run(id, epoch);
+}
+
+/** A paper venue the REAL engine trades against: one market, its mark and its bids set by the test. */
+function paperVenue(id: string, startUsdg: number) {
+  const btc = parseOrderBookDetails(JSON.parse(readFileSync(path.join(import.meta.dirname, "perps", "fixtures", "orderBookDetails.perp.json"), "utf8")))!.markets.get(1)!;
+  const H = 1_790_708_400;
+  const v = { clockMs: (H - 1800) * 1000, mark: "800000", bids: [["799900", "1000"]] as [string, string][] };
+  const feed = () =>
+    parseLighterFeed(
+      {
+        v: 1,
+        observedAt: v.clockMs - 500,
+        markets: {
+          "1": {
+            observedAt: v.clockMs - 1_000,
+            priceSource: "ws",
+            mark: v.mark,
+            index: v.mark,
+            // The hour's payment exists only once the hour has passed.
+            ...(v.clockMs > H * 1000 + 1_000 ? { lastFundingRatePctPerHour: "0.0012", lastFundingAt: H * 1000 + 40 } : {}),
+            status: btc.spec.status,
+            spec: specToJson(btc.spec),
+            specObservedAt: v.clockMs - 60_000,
+            takerFeePpm: 0,
+            makerFeePpm: 0,
+            bids: v.bids,
+            asks: [["800000", "1000"]],
+            bookObservedAt: v.clockMs - 1_000,
+            bookSource: "ws",
+          },
+        },
+      },
+      v.clockMs,
+    );
+  const ex = createPaperPerpExecutor({ agentId: id, epoch: () => 1, feed, store, now: () => v.clockMs, paperStartUsdg: startUsdg });
+  return { ex, v, H };
+}
+
+const OPEN_LONG = {
+  kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "open", side: "long", reduceOnly: false,
+  baseAmount: 20n, worstPrice: 804_000n, markPrice: 800_000n, notionalUsdg: 16_080_000n, imfBp: 5000, stopTrigger: 760_000n, stopPrice: 744_800n,
+} as PerpOrderIntent;
+
+describe("the paper perp book rides the checkpoint", () => {
+  it("round-trips collateral and positions — margin, imf, funding hour, recorded stop and nonce high-water included", async () => {
+    const id = await agent();
+    await store.getPaperBook(id, 1000);
+    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 50_000_000n });
+    const hw = await store.bumpNonceHighWater(id, "paper", 1_790_000_000_123n);
+    await store.upsertPerpPosition({
+      agentId: id, mode: "paper", source: "paper", marketId: 1, side: "short", base: 20_000n, entryPrice: 11_500_000n,
+      allocatedMarginMicro: 11_500_000n, imfBp: 5000, marginMode: "isolated", fundingHourApplied: 1_790_683_200,
+      stopTrigger: 12_075_000n, stopPrice: 12_316_500n, recordedStopTrigger: 12_075_000n, recordedStopPrice: 12_316_500n, openedAt: 1_790_680_000,
+    });
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    assert.ok((await mirrorPaperCheckpoints(child, shared.db)) >= 1);
+    const cp = shared.raw.prepare("SELECT perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { perp_json: string };
+    assert.equal(paperPerpRejection(cp.perp_json), null);
+    assert.equal((JSON.parse(cp.perp_json) as { nonce_high_water: string }).nonce_high_water, hw.toString());
+    sharedAgent(shared.raw, id);
+
+    const fresh = await ledgerDb();
+    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /restored, with the paper perp book/);
+    const acct = fresh.raw.prepare("SELECT paper_collateral_micro, nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as Record<string, unknown>;
+    assert.deepEqual({ ...acct }, { paper_collateral_micro: "50000000", nonce_high_water: hw.toString() }, "the next paper nonce can never mint an identity the tape holds");
+    const pos = fresh.raw.prepare(`SELECT side, base, allocated_margin_micro, imf_bp, funding_hour_applied, stop_price, recorded_stop_trigger, recorded_stop_price, source
+      FROM perp_positions WHERE agent_id = ?`).all(id.toLowerCase());
+    assert.deepEqual(pos.map((p) => ({ ...p })), [
+      { side: "short", base: "20000", allocated_margin_micro: "11500000", imf_bp: 5000, funding_hour_applied: 1_790_683_200, stop_price: "12316500", recorded_stop_trigger: "12075000", recorded_stop_price: "12316500", source: "paper" },
+    ]);
+
+    // A ledger that already holds a HIGHER high-water keeps it: the high-water only rises.
+    const ahead = await ledgerDb();
+    ahead.raw.prepare("INSERT INTO perp_accounts (agent_id, mode, nonce_high_water) VALUES (?, 'paper', ?)").run(id.toLowerCase(), (hw + 1000n).toString());
+    await restorePaperCheckpoint(ahead.db, shared.db, id);
+    assert.equal((ahead.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { nonce_high_water: string }).nonce_high_water, (hw + 1000n).toString());
+  });
+
+  it("a position the REAL paper engine opened, then gapped, is carried whole — and its recorded stop survives checkpoint, restore and mirror", async () => {
+    // The engine books under an account row bumpNonceHighWater created with
+    // paper_collateral_micro NULL; the checkpoint reads NULL collateral beside
+    // an open position as a torn book and skips the WHOLE row — cash, shares
+    // and basis too (R3-PAPER-CKPT-NULL-COLLATERAL). Only the engine's own
+    // path proves the column is a read 0, and only its own gap proves the
+    // level a position is protected at outlives the stop child.
+    const id = await agent();
+    const acct = id.toLowerCase();
+    await store.getPaperBook(id, 100);
+    const { ex, v, H } = paperVenue(id, 100);
+    await ex.setLeverage!(1, 5000);
+    const placed = await ex.place(OPEN_LONG, await ex.review(OPEN_LONG), { decisionId: null, agentId: id });
+    assert.equal(placed.status, "filled");
+    // An hour's funding, so funding_hour_applied is part of what must round-trip.
+    v.clockMs = H * 1000 + 60_000;
+    assert.equal((await ex.tick!()).events.length, 1);
+    assert.equal((await store.getPerpAccount(id, "paper"))?.paperCollateralMicro, 0n, "the engine's book keeps a READ zero, never NULL");
+    // The stop gaps past its bound: the child is spent, the level stands.
+    v.clockMs += 5_000;
+    v.mark = "750000";
+    v.bids = [["740000", "1000"]];
+    assert.deepEqual((await ex.tick!()).events.map((e) => `${e.kind}:${e.outcome}`), ["sl:gapped"]);
+
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    await mirrorPaperCheckpoints(child, shared.db);
+    const cp = shared.raw.prepare("SELECT cash_usdg, updated_at, perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { cash_usdg: number; updated_at: number; perp_json: string } | undefined;
+    assert.ok(cp, "the agent's checkpoint row was mirrored — not skipped over its perp book");
+    assert.equal(paperPerpRejection(cp.perp_json), null);
+    const state = JSON.parse(cp.perp_json) as { collateral_micro: string; tape_at: number; positions: Record<string, unknown>[] };
+    assert.equal(state.collateral_micro, "0");
+    assert.deepEqual(state.positions.map((p) => [p.stop_trigger, p.recorded_stop_trigger, p.recorded_stop_price]), [[null, "760000", "744800"]]);
+    assert.ok(state.tape_at >= cp.updated_at, "the funding hour moved no cash, so only the book's own tape time says it is held");
+    assert.equal(cp.cash_usdg, 92, "the margin left paper cash (8 USDG at 2x of 16)");
+
+    // The shared tape holds the open and the funding hour, as the mirror carries them.
+    sharedAgent(shared.raw, id);
+    const tape = await mirrorTenant({ tenant: "rides", child, shared: shared.db, account: acct });
+    assert.equal(tape.failed, undefined, JSON.stringify(tape.failed));
+    assert.ok((tape.copied.perp_funding ?? 0) >= 1, "the funding hour is on the shared tape");
+
+    const fresh = await ledgerDb();
+    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /restored, with the paper perp book/, "a checkpoint that holds the funding hour is not older than the tape");
+    const book = fresh.raw.prepare("SELECT cash_usdg FROM paper_book").get() as { cash_usdg: number };
+    assert.equal(book.cash_usdg, 92, "cash as it stood with the position open — not the pre-open 100");
+    const pos = fresh.raw.prepare(`SELECT side, base, allocated_margin_micro, funding_hour_applied, stop_trigger, stop_price, recorded_stop_trigger, recorded_stop_price
+      FROM perp_positions WHERE agent_id = ? AND mode = 'paper'`).all(acct);
+    assert.deepEqual(pos.map((p) => ({ ...p })), [
+      { side: "long", base: "20", allocated_margin_micro: String(8_000_000 - 192), funding_hour_applied: H, stop_trigger: null, stop_price: null, recorded_stop_trigger: "760000", recorded_stop_price: "744800" },
+    ], "restored protected at its own level, never the settings ceiling");
+    const restoredAcct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(acct) as { paper_collateral_micro: string };
+    assert.equal(restoredAcct.paper_collateral_micro, "0");
+
+    // …and the restored book mirrors its level up from its new home.
+    const after = await ledgerDb();
+    const up = await mirrorTenant({ tenant: "rides-restored", child: fresh.db, shared: after.db, account: acct });
+    assert.equal(up.failed, undefined, JSON.stringify(up.failed));
+    const mirrored = after.raw.prepare("SELECT stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").get(acct) as Record<string, unknown>;
+    assert.deepEqual({ ...mirrored }, { stop_trigger: null, recorded_stop_trigger: "760000", recorded_stop_price: "744800" });
+  });
+
+  it("refuses a perp book it could not write back whole", () => {
+    const base = { agent_id: "a", epoch: 1, cash_usdg: 900, vault_usdg: 0, hwm_usdg: 1000, shares: "{}", basis_json: "[]", updated_at: 10 };
+    const position = {
+      market_id: 1, side: "long", base: "1", entry_price: "1", allocated_margin_micro: "0", imf_bp: 5000, margin_mode: "isolated", realized_micro: null, funding_micro: null,
+      funding_hour_applied: 3600, stop_trigger: "1", stop_price: "1", recorded_stop_trigger: "1", recorded_stop_price: "1", take_trigger: null, take_price: null, opened_at: null,
+    };
+    const ok = { v: 1, collateral_micro: "1", positions: [position] };
+    const rej = (s: unknown) => paperCheckpointRejection({ ...base, perp_json: JSON.stringify(s) });
+    assert.equal(rej(ok), null);
+    assert.equal(rej({ ...ok, nonce_high_water: "1790000000123", tape_at: 11 }), null, "the optional fields, present");
+    assert.equal(paperCheckpointRejection({ ...base, perp_json: null }), null);
+    assert.match(rej({ ...ok, collateral_micro: "-1" })!, /collateral/);
+    assert.match(rej({ ...ok, positions: [{ ...position, market_id: 9999 }] })!, /market 9999/);
+    assert.match(rej({ ...ok, positions: [position, position] })!, /held twice/);
+    assert.match(rej({ ...ok, positions: [{ ...position, allocated_margin_micro: "-5" }] })!, /margin/);
+    assert.match(paperCheckpointRejection({ ...base, perp_json: "{" })!, /unreadable/);
+    // The funding hour is not optional: it is what stops an hour being paid twice.
+    assert.match(rej({ ...ok, positions: [{ ...position, funding_hour_applied: null }] })!, /funding hour/);
+    // Every trigger with its bound, both or neither — a half pair the engine could not read.
+    assert.match(rej({ ...ok, positions: [{ ...position, stop_price: null }] })!, /BTC-PERP stop has half a pair/);
+    assert.match(rej({ ...ok, positions: [{ ...position, recorded_stop_trigger: null }] })!, /recorded stop has half a pair/);
+    assert.match(rej({ ...ok, positions: [{ ...position, take_trigger: "5" }] })!, /take has half a pair/);
+    const { recorded_stop_trigger: _t, recorded_stop_price: _p, ...unrecorded } = position;
+    void _t; void _p;
+    assert.match(rej({ ...ok, positions: [unrecorded] })!, /recorded stop is undefined/, "a level the book never wrote is not a level of null");
+    assert.match(rej({ ...ok, nonce_high_water: "-1" })!, /nonce high-water/);
+    assert.match(rej({ ...ok, tape_at: -1 })!, /tape time/);
+  });
+
+  it("a checkpoint older than the shared perp tape is refused; one that holds the tape restores", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const shared = await ledgerDb();
+    sharedAgent(shared.raw, id);
+    const book = { v: 1, collateral_micro: "0", tape_at: 150, nonce_high_water: "7", positions: [] };
+    await ensurePaperCheckpointSchema(shared.db);
+    shared.raw.prepare(`INSERT INTO paper_checkpoints (agent_id, epoch, cash_usdg, vault_usdg, hwm_usdg, shares, basis_json, updated_at, perp_json)
+      VALUES (?, 1, 90, 0, 100, '{}', '[]', 100, ?)`).run(id, JSON.stringify(book));
+    // A funding hour after the cash last moved, which the book's own tape time holds.
+    shared.raw.prepare(`INSERT INTO perp_funding (agent_id, mode, epoch, market_id, funding_id, funding_hour, payment_micro, created_at)
+      VALUES (?, 'paper', 1, 1, 'paper:funding:1:3600', 3600, '-1', 150)`).run(acct);
+    assert.match(await restorePaperCheckpoint((await ledgerDb()).db, shared.db, id), /restored/);
+    // A fill the book never held: the close a restore would book twice.
+    shared.raw.prepare(`INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, base, price, quote_micro, fee_micro,
+                             trade_type, attribution, venue_ts_ms, created_at)
+       VALUES (?, 'paper', 1, 'paper:close:1:9', 'ask', 1, 'long', '1', '1', '1', '0', 'trade', 'venue-stop', 1, 151)`).run(acct);
+    await assert.rejects(restorePaperCheckpoint((await ledgerDb()).db, shared.db, id), /paper perp fills or funding are newer than the durable checkpoint/);
+    // Another epoch's tape, or the live rail's, is another book.
+    shared.raw.prepare("UPDATE perp_fills SET epoch = 2 WHERE agent_id = ?").run(acct);
+    assert.match(await restorePaperCheckpoint((await ledgerDb()).db, shared.db, id), /restored/);
+  });
+
+  it("a newer checkpoint with no paper perp book replaces the older one's, NULL and all", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    await store.getPaperBook(id, 1000);
+    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 1_000_000n });
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    await mirrorPaperCheckpoints(child, shared.db);
+    const perp = () => (shared.raw.prepare("SELECT perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { perp_json: string | null }).perp_json;
+    assert.notEqual(perp(), null);
+    raw.prepare("DELETE FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").run(acct);
+    await mirrorPaperCheckpoints(child, shared.db);
+    assert.equal(perp(), null, "a perp book that is gone never comes back from an older checkpoint");
+  });
+
+  it("recovers from a valuation whose perp term is part of the identity, closing the paper perps at that mark", async () => {
+    const id = await agent();
+    const shared = await ledgerDb();
+    sharedAgent(shared.raw, id);
+    const mark = shared.raw.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at,
+                           perp_collateral_micro, perp_isolated_margin_micro, perp_unrealized_micro, perp_unrealized_gain_micro, perp_in_transit_micro)
+       VALUES (?, '0', ?, 0, 0, ?, 1, 'paper', ?, ?, ?, ?, ?, '0')`,
+    );
+    // A wick: 1,100 of equity, 150 of it an unrealized gain that reverted. Its basis is 950.
+    mark.run(id, 900, 1100, 5, "50000000", "0", "150000000", "150000000");
+    // The recoverable valuation: 900 cash + 50 collateral + 20 margin + 5 unrealized = 975.
+    mark.run(id, 900, 975, 10, "50000000", "20000000", "5000000", "5000000");
+    const fresh = await ledgerDb();
+    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /closed into paper collateral/);
+    const book = fresh.raw.prepare("SELECT cash_usdg, hwm_usdg FROM paper_book").get() as { cash_usdg: number; hwm_usdg: number };
+    assert.equal(book.cash_usdg, 900);
+    assert.equal(book.hwm_usdg, 975, "the wick never lifted the peak; today's book is the highest real candidate");
+    const acct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE mode = 'paper'").get() as { paper_collateral_micro: string };
+    assert.equal(acct.paper_collateral_micro, "75000000");
+
+    // The identity without its perp term does not add up, and says so.
+    const broken = await ledgerDb();
+    sharedAgent(broken.raw, id);
+    broken.raw.prepare(
+      "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at, perp_collateral_micro) VALUES (?, '0', 900, 0, 0, 975, 1, 'paper', 10, '50000000')",
+    ).run(id);
+    await assert.rejects(restorePaperCheckpoint((await ledgerDb()).db, broken.db, id), /does not add up/);
+
+    // A paper perp fill after the valuation moved money the mark does not hold.
+    shared.raw.prepare(
+      `INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, base, price, quote_micro, fee_micro,
+                               trade_type, attribution, venue_ts_ms, created_at)
+       VALUES (?, 'paper', 1, 'p1', 'bid', 1, 'long', '1', '1', '1', '0', 'trade', 'intent', 1, 11)`,
+    ).run(id.toLowerCase());
+    await assert.rejects(restorePaperCheckpoint((await ledgerDb()).db, shared.db, id), /perp fills or funding are newer/);
+  });
+
+  it("a held reset clears the shared paper perp book, keeps the live one, and opens an epoch past the perp tape's", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const shared = await ledgerDb();
+    sharedAgent(shared.raw, id);
+    shared.raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at) VALUES (?, '0', 90, 0, 0, 90, 1, 'paper', 10)").run(id);
+    for (const mode of ["paper", "live"]) {
+      shared.raw.prepare("INSERT INTO perp_positions (agent_id, mode, market_id, side, base, allocated_margin_micro, source) VALUES (?, ?, 1, 'long', '5', '1', ?)").run(acct, mode, mode === "paper" ? "paper" : "venue");
+      shared.raw.prepare("INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water) VALUES (?, ?, ?, '42')").run(acct, mode, mode === "paper" ? "9000000" : null);
+    }
+    // The perp tape ran a step ahead of the agents row.
+    shared.raw.prepare(`INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, base, price, quote_micro, fee_micro,
+                             trade_type, attribution, venue_ts_ms, created_at)
+       VALUES (?, 'paper', 3, 'paper:open:1:1', 'bid', 1, 'long', '1', '1', '1', '0', 'trade', 'intent', 1, 11)`).run(acct);
+    const r = await resetBlockedPaperBook(shared.db, id, 1);
+    assert.deepEqual(r, { ok: true, epoch: 4 }, "one past every epoch a row carries, the perp tape's included");
+    assert.deepEqual((shared.raw.prepare("SELECT mode FROM perp_positions WHERE agent_id = ?").all(acct) as { mode: string }[]).map((p) => p.mode), ["live"]);
+    const accts = shared.raw.prepare("SELECT mode, paper_collateral_micro, nonce_high_water FROM perp_accounts WHERE agent_id = ? ORDER BY mode").all(acct);
+    assert.deepEqual(accts.map((a) => ({ ...a })), [
+      { mode: "live", paper_collateral_micro: null, nonce_high_water: "42" },
+      { mode: "paper", paper_collateral_micro: "0", nonce_high_water: "42" },
+    ], "a read zero, never NULL; and the high-water survives the reset");
+  });
+});
+
+// ── the mirror ────────────────────────────────────────────────────────────────
+//
+// The store's own ledger here holds every agent this file made, so every pass
+// below is also a pass over other accounts' perp rows: each is copied under
+// the one account the pass names, and the rest are counted foreign.
+
+describe("the mirror carries the perp ledger up, forward only", () => {
+  const PERP_COPIED = ["perp_fills", "perp_funding", "perp_orders", "perp_order_legs", "perp_transfers", "perp_positions", "perp_accounts"];
+
+  it("copies every perp table — never the signed bytes or an incident's detail — and an unchanged ledger as nothing", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const { id: orderId } = await liveOpen(id, 23_000_000n);
+    await store.insertPerpFill(fill(id, { orderId }));
+    await store.insertPerpFunding({ agentId: id, mode: "live", marketId: 1, fundingId: "501", fundingHour: 7200, paymentMicro: -3n });
+    await store.upsertPerpTransfer({ agentId: id, mode: "live", direction: "deposit", amountMicro: 5_000_000n, initiator: "agent", state: "landed", chainId: 4663, txHash: `0x${"12".repeat(32)}`, logIndex: 0 });
+    await store.upsertPerpPosition({ agentId: id, mode: "live", source: "venue", marketId: 1, side: "long", base: 20_000n, allocatedMarginMicro: 11_500_000n, imfBp: 5000, marginMode: "isolated" });
+    // A gapped paper stop: the resting child is gone, the level it was protected at stands.
+    await store.upsertPerpPosition({
+      agentId: id, mode: "paper", source: "paper", marketId: 2, side: "short", base: 30n, entryPrice: 790_000n, allocatedMarginMicro: 12_450_000n,
+      imfBp: 5000, marginMode: "isolated", stopTrigger: null, stopPrice: null, recordedStopTrigger: 829_500n, recordedStopPrice: 845_000n, fundingHourApplied: 3600,
+    });
+    await store.patchPerpAccount(id, "live", { accountIndex: 22_149, incident: { kind: "foreign-key", at: 7, detail: { pubkey: "secret-ish" } } });
+    await store.addEquity(id, {
+      ethWei: 0n, cashUsdg: 1, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 1, mode: "live",
+      perp: { collateralMicro: 0n, isolatedMarginMicro: 0n, unrealizedMicro: 0n, unrealizedGainMicro: 0n, inTransitMicro: 0n, snapshotTime: null },
+    });
+
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    const first = await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal(first.failed, undefined, JSON.stringify(first.failed));
+    for (const t of PERP_COPIED) assert.ok((first.copied[t] ?? 0) > 0, `${t} arrived`);
+    const order = shared.raw.prepare("SELECT status, tx_info, tx_hash FROM perp_orders WHERE id = ?").get(orderId) as Record<string, unknown>;
+    assert.equal(order.status, "submitted");
+    assert.equal(order.tx_info, null, "the signed bytes stay in the child");
+    const incident = shared.raw.prepare("SELECT incident_json FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { incident_json: string };
+    assert.deepEqual(JSON.parse(incident.incident_json), { at: 7, kind: "foreign-key" }, "kind and time, never the detail");
+    const eq = shared.raw.prepare("SELECT perp_collateral_micro FROM equity WHERE agent_id = ?").get(id) as { perp_collateral_micro: string };
+    assert.equal(eq.perp_collateral_micro, "0", "the equity row's perp terms travel with it");
+    const gapped = shared.raw.prepare("SELECT stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").get(acct) as Record<string, unknown>;
+    assert.deepEqual({ ...gapped }, { stop_trigger: null, recorded_stop_trigger: "829500", recorded_stop_price: "845000" }, "the level the position is protected at travels with it");
+    assert.equal(Number((shared.raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id <> ?").get(acct) as { n: number }).n), 0, "no other account's fill came up under this one");
+    assert.ok((first.copied.perp_fills_foreign ?? 0) > 0, "…and they are counted, not lost");
+
+    const again = await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    for (const t of PERP_COPIED) assert.equal(again.copied[t], undefined, `${t}: an unchanged ledger copies as nothing`);
+    assert.equal(Number((shared.raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ?").get(acct) as { n: number }).n), 1);
+
+    // The answer arrives: the resolved row replaces the submitted one.
+    await store.resolvePerpOrder({ agentId: id, mode: "live", id: orderId, status: "filled", filledBase: 20_000n, filledQuoteMicro: 23_000_000n });
+    raw.prepare("UPDATE perp_orders SET updated_at = updated_at + 1 WHERE id = ?").run(orderId);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
+
+    // A STALE CHILD NEVER REGRESSES A ROW: walk the child's copy back and
+    // make it look newer, as a ledger restored from an old backup would.
+    raw.prepare("UPDATE perp_orders SET status = 'submitted', updated_at = updated_at + 10 WHERE id = ?").run(orderId);
+    raw.prepare("UPDATE perp_transfers SET state = 'submitted', updated_at = updated_at + 10 WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
+    assert.equal((shared.raw.prepare("SELECT state FROM perp_transfers WHERE agent_id = ?").get(acct) as { state: string }).state, "landed");
+
+    // A nonce high-water never falls in shared storage, whatever the child says.
+    const high = (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water;
+    raw.prepare("UPDATE perp_accounts SET nonce_high_water = '1', updated_at = updated_at + 20 WHERE agent_id = ? AND mode = 'live'").run(acct);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal(
+      (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water,
+      high,
+    );
+  });
+
+  it("flattens a shared position the child has since closed — recorded stop and all — and not one it has merely not re-read", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const shared = await ledgerDb();
+    const child = wrapSqlite(raw);
+    await store.setAgentMode(id, "paper", 1, false);
+    await store.upsertPerpPosition({
+      agentId: id, mode: "paper", source: "paper", marketId: 3, side: "long", base: 7n, allocatedMarginMicro: 1n,
+      stopTrigger: 700n, stopPrice: 690n, recordedStopTrigger: 700n, recordedStopPrice: 690n,
+    });
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    // The child's paper reset deletes its rows and touches its account row.
+    await store.resetPaperLedger(id, 1000);
+    raw.prepare("DELETE FROM perp_accounts WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT base FROM perp_positions WHERE agent_id = ?").get(acct) as { base: string }).base, "7", "silence is not flatness");
+    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 0n });
+    raw.prepare("UPDATE perp_accounts SET updated_at = updated_at + 5 WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    const flat = shared.raw.prepare("SELECT base, side, stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = ?").get(acct) as Record<string, unknown>;
+    assert.deepEqual({ ...flat }, { base: "0", side: null, stop_trigger: null, recorded_stop_trigger: null, recorded_stop_price: null }, "flat as the worker's own flatten writes it: no level claimed for a position that is not there");
+  });
+
+  it("skips a child ledger from before perps, with nothing to say and nothing failed", async () => {
+    const old = new DatabaseSync(":memory:");
+    others.push(old);
+    old.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY)");
+    const shared = await ledgerDb();
+    const r = await mirrorTenant({ tenant: "t3", child: wrapSqlite(old), shared: shared.db });
+    assert.equal(Object.keys(r.copied).some((k) => k.startsWith("perp")), false);
+    assert.equal(Object.keys(r.failed ?? {}).some((k) => k.startsWith("perp")), false);
   });
 });
 
