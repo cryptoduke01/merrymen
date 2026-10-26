@@ -10,6 +10,25 @@ This is an operator maintenance control. It does not sign a grant, change a cap,
 reset a high-water mark, transfer funds or place a trade. The affected tenant's
 worker and bot are temporarily unavailable while held.
 
+## Before starting: current limits
+
+- **Staged rollout.** The deploy guard refuses to start the orchestrator while
+  any one-shot variable is set — `MERRYMEN_ACCOUNTING_RECONSTRUCT` and every
+  `MERRYMEN_REPAIR*` included — unless `MERRYMEN_FLEET_ROLLOUT` is exactly
+  `all` (`worker/src/deploy-guard-checks.ts`, `fleetStartChecks`). Receipt
+  attestation ([receipt-attestation.md](receipt-attestation.md)) is the one
+  protocol it admits during a staged rollout. Setting these variables while the
+  rollout names tenants keeps the whole fleet's orchestrator from starting.
+- **Persistent homes.** Tenant homes live on the persistent volume
+  (`MERRYMEN_PERSISTENT_HOME_REQUIRED=1`), so a tenant that has ever run keeps
+  its home through a fresh container, and step 4's commit refuses it ("local
+  tenant state exists"). This procedure can commit only for a tenant with no
+  home on the volume. Never move or erase a home to get past that refusal.
+- **Reads.** The reconstruction scan reads through the fleet's read path
+  (`chainReadRpc`): a configured `MERRYMEN_RPC_MAINNET` that refuses — a spent
+  quota, a refused key, a 5xx, a timeout — fails over to the chain's public
+  RPC. A window still unread after that blocks the plan, as before.
+
 ## Required deployment order
 
 1. Confirm the exact smart-account → tenant mapping. Set
