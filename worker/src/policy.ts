@@ -647,6 +647,21 @@ export interface ScoutContext {
 }
 
 /**
+ * A PERPS WALLET TRADES PERPETUALS, AND NOTHING ELSE (docs/perps.md "One
+ * login, two wallets"). Its paper cash is the perp book's collateral, and its
+ * Spot producers are off (settings.ts mergeSettings) — but an owner's own
+ * orders are not producers: a chat /buy, a /transfer, an app or MCP trade, the
+ * self-test probe or an energy buy reaches the queue as a Spot intent. So on a
+ * Perps wallet's worker every intent that is not a perp one is refused, before
+ * anything else is asked (index.ts processIntentLocked). Withheld from every
+ * public surface, as every perp rule is (thesis-policy.ts).
+ */
+export function perpsWalletRefusal(wallet: "spot" | "perps", intent: Pick<TradeIntent, "kind">): { rule: "perps-wallet-spot" } | null {
+  if (wallet !== "perps" || intent.kind === "perp-order" || intent.kind === "perp-margin") return null;
+  return { rule: "perps-wallet-spot" };
+}
+
+/**
  * IS THIS INTENT MONEY COMING HOME? The drawdown breaker's exit test, lifted
  * out of checkPolicy VERBATIM so the energy gate (worker/src/energy.ts,
  * index.ts) asks the one question the breaker asks, rather than a second copy

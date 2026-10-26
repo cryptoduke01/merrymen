@@ -24,7 +24,8 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import type { ExecMode } from "../exec-mode";
 import type { AgentLimits, PerpOrderIntent, TradeIntent } from "../policy";
-import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
+import { perpsWalletRefusal } from "../policy";
+import { rejectRuleLabel, ownerRejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { buildOpenDraft } from "./drafts";
 import { createPaperPerpExecutor, PerpRefused, type PerpExecutor } from "./executor";
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "./feed-reader";
@@ -515,13 +516,22 @@ describe("the wiring in index.ts", () => {
     // An owner's /buy, /transfer, app trade, self-test or energy buy is not a
     // producer the settings can turn off; it would spend the perp collateral.
     const locked = fn("processIntentLocked");
-    const refusal = locked.indexOf('if (cfg.workerWallet === "perps" && !perpIntent) {');
+    const refusal = locked.indexOf("const walletRefusal = perpsWalletRefusal(cfg.workerWallet, intent);");
     const admission = locked.indexOf("const admissionRule = admissionRefusal(");
     assert.ok(refusal > 0 && refusal < admission, "before admission, so nothing is reserved or read");
     const body = locked.slice(refusal, locked.indexOf("\n    }\n", refusal));
-    assert.match(body, /lastTradeOutcome = \{ status: "rejected", rejectRule: "perps-wallet-spot" \};\s*return;/);
+    assert.match(body, /lastTradeOutcome = \{ status: "rejected", rejectRule: walletRefusal\.rule \};\s*return;/);
+    // The rule itself: every non-perp kind on a Perps wallet, nothing on Spot.
+    for (const kind of ["swap", "curve-trade", "transfer", "energy-buy", "equity-order"] as const) {
+      assert.deepEqual(perpsWalletRefusal("perps", { kind }), { rule: "perps-wallet-spot" });
+      assert.equal(perpsWalletRefusal("spot", { kind }), null);
+    }
+    assert.equal(perpsWalletRefusal("perps", { kind: "perp-order" }), null);
+    assert.equal(perpsWalletRefusal("perps", { kind: "perp-margin" }), null);
     assert.doesNotMatch(body, /recordTrade|addTrade|reserveBudget/, "never the public tape, never the budget");
-    assert.ok(rejectRuleLabel("perps-wallet-spot"), "the owner is told in words");
+    // Told to the owner in words, and never on a public lane (rule 17).
+    assert.equal(rejectRuleLabel("perps-wallet-spot"), null, "not in the public register");
+    assert.ok(ownerRejectRuleLabel("perps-wallet-spot"), "the owner is told in words");
     assert.ok(rejectRuleRemedy("perps-wallet-spot"));
   });
 

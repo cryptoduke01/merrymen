@@ -859,8 +859,15 @@ describe("which wallet this worker serves (MERRYMEN_WALLET_PURPOSE)", () => {
       trencherFastEnabled: true,
       fomoFollowEnabled: true,
       perpsEnabled: true,
+      telegramEnabled: true,
+      telegramGroupsEnabled: true,
+      telegramBotToken: "111:AAAA",
     } as MerrymenSettings;
     const perps = mergeSettings(file, { MERRYMEN_WALLET_PURPOSE: "perps" });
+    // No bot and no groups on a Perps wallet's worker in this build (the bot seat is slice 6a's).
+    assert.equal(perps.telegramEnabled, false);
+    assert.equal(perps.telegramGroupsEnabled, false);
+    assert.equal(mergeSettings(file, {}).telegramEnabled, true, "a Spot worker keeps its bot");
     assert.equal(perps.workerWallet, "perps");
     assert.equal(perps.strategy, "perps-only");
     for (const k of ["discoveryEnabled", "officialCoinsEnabled", "classSnipeEnabled", "scoutEnabled", "trencherLiveEnabled", "trencherFastEnabled", "fomoFollowEnabled"] as const) {

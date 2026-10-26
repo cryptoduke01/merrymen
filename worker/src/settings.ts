@@ -837,6 +837,11 @@ export function mergeSettings(
           trencherLiveEnabled: false,
           trencherFastEnabled: false,
           fomoFollowEnabled: false,
+          // NO BOT AND NO GROUPS, whatever the file says: a Perps wallet's
+          // worker runs none in this build (the orchestrator hands it no
+          // token either). The bot seat a Perps-only login needs is slice 6a's.
+          telegramEnabled: false,
+          telegramGroupsEnabled: false,
         }
       : {}),
   };

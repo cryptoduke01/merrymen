@@ -92,7 +92,7 @@ import { getGrantStore } from "./grant-store";
 import { KILL_CLOCK_SLACK_SEC, KILL_DONE_PERPS_HOME_TEXT, KILL_DONE_PERPS_TEXT, KILL_DONE_TEXT, honourKillRequest, killRequested, readKillRequest, writeKillRequest, type KillOutcome } from "./kill-request";
 import { stopSolanaForKill } from "./solana-kill";
 import { stopPerpsForKill } from "./perps-kill";
-import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
+import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, PAUSED_FILE, armOwnerControls, durablePauseLifted, foldRecoveryControls, readControlsEvidence, readRecoveryControls, type ControlScope } from "./recovery-reply-arm";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -4848,7 +4848,16 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // (recovery-reply-arm.ts): a kill is carried out against the store before
     // grant.json could be written, and a pause is in the home before the
     // worker's first tick reads it. A hold here is this tenant's alone.
-    if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
+    if (perpsSlot) {
+      // A PERPS WORKER'S CONTROLS ARE ITS OWNER'S (perpsOwnerControlsHold, the
+      // pause mirror): never applied from here, and never with its own key.
+      const held = await perpsOwnerControlsHold(slotOf(tenant).owner);
+      if (held) {
+        sayTenantAlert(tenant, `${tenant}: held by its owner's recorded controls (${held}) — not spawning`);
+        return;
+      }
+      mirrorLoginPause(tenant);
+    } else if (storedGrant && !(await armControlsForChild(tenant, storedGrant, lease))) return;
     const grantForChild = await writeGrantForChild(tenant);
     if (!grantForChild) {
       log(`${tenant}: no usable signed grant in the store — not spawning`);
@@ -6433,6 +6442,87 @@ async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promis
 }
 
 /**
+ * THE OWNER'S /pause IS THE LOGIN'S (docs/perps.md): their Perps worker is
+ * paused exactly while their Spot worker's home is.
+ *
+ * In this slice a Perps worker runs no bot (the bot seat is slice 6a's), so
+ * the one place an owner can pause or resume is the bot their Spot worker —
+ * or its hold process — answers, and the `paused` file it writes in the Spot
+ * home is the login's pause. Mirrored here into the Perps home: written while
+ * the Spot home's is there, removed once it is gone. Nothing else writes a
+ * Perps home's `paused` file hosted, so the mirror owns it. A paused Perps
+ * worker opens nothing new and its route closes nothing; its protective loop,
+ * on its own clock, still closes positions at their stops (perps/lane.ts).
+ *
+ * Only for a Perps worker this replica leases, on the order ferry's clock and
+ * before every Perps spawn. A home whose file cannot be written or removed is
+ * said once an hour and tried again on the next tick.
+ */
+function mirrorLoginPause(key: string): void {
+  if (!isPerpsWorkerKey(key)) return;
+  const spot = path.join(childHome(workerOwner(key)), PAUSED_FILE);
+  const home = childHome(key);
+  const mine = path.join(home, PAUSED_FILE);
+  try {
+    if (existsSync(spot)) {
+      if (existsSync(mine)) return;
+      mkdirSync(home, { recursive: true, mode: 0o700 });
+      writeFileAtomicSync(mine, "paused", 0o600);
+      log(`${key}: its owner paused trading — the Perps worker is paused too`);
+    } else if (existsSync(mine)) {
+      rmSync(mine, { force: true });
+      log(`${key}: its owner resumed trading — the Perps worker is resumed too`);
+    }
+  } catch (e) {
+    sayTenantAlert(`pause:${key}`, `[alert] ${key}: its owner's pause could not be mirrored into its Perps home (${errorKind(e)}) — tried again in seconds`);
+  }
+}
+function mirrorLoginPauses(): void {
+  for (const key of [...children.keys(), ...spawning.keys()]) {
+    if (isPerpsWorkerKey(key) && leases.get(key)?.healthy()) mirrorLoginPause(key);
+  }
+}
+
+/**
+ * A RECORDED CONTROL NOT YET APPLIED HOLDS A PERPS WORKER, or null.
+ *
+ * While a login's Spot worker is held, the recovery-reply listener answers
+ * its bot and journals a /pause or a confirmed /kill (recovery-reply-arm.ts);
+ * they are applied at that Spot worker's next arm — the kill carried out as
+ * the owner's (honourKill: both wallets), the pause into the Spot home, which
+ * the pause mirror then carries here. The Perps worker must not run ahead of
+ * either: so while the owner's journal holds a kill awaiting its /confirm, a
+ * confirmed kill or a pause that no receipt says was applied, it does not
+ * start. Read only — it never applies one itself, because a receipt written
+ * here would stop the Spot arm applying that control to the Spot home.
+ * Unreadable is a hold: fail closed.
+ */
+async function perpsOwnerControlsHold(owner: `0x${string}`): Promise<string | null> {
+  const url = process.env.DATABASE_URL;
+  if (!url && !retirementMemoryStoreForTest) return null;
+  try {
+    const shared = retirementMemoryStoreForTest?.shared ?? await makePgDb(url!);
+    const journal = await readRecoveryControls(shared, { tenant: owner, smartAccount: owner, chainId: 1 });
+    if ("absent" in journal || journal.rows.length === 0) return null;
+    const fold = foldRecoveryControls(journal.rows, Date.now());
+    if (fold.malformed) return "its owner's recorded controls cannot be read";
+    if (fold.pendingKills > 0) return "a /kill its owner sent is waiting for its /confirm";
+    let receipts: Set<string>;
+    try {
+      receipts = new Set(((await shared.prepare("SELECT bot_id, update_id FROM recovery_reply_control_receipts WHERE tenant = ?").all(owner)) as
+        Array<{ bot_id: unknown; update_id: unknown }>).map((r) => `${String(r.bot_id)}:${String(r.update_id)}`));
+    } catch {
+      receipts = new Set();
+    }
+    if (fold.confirmedKills.some((k) => !receipts.has(`${k.botId}:${k.requestUpdateId}`))) return "a /kill its owner confirmed is carried out at its Spot worker's arm first";
+    if (fold.pauses.some((p) => !receipts.has(`${p.botId}:${p.updateId}`))) return "a /pause its owner sent is applied at its Spot worker's arm first";
+    return null;
+  } catch (e) {
+    return `its owner's recorded controls could not be read (${errorKind(e)})`;
+  }
+}
+
+/**
  * Carry out one tenant's pending Telegram kill, if it has one. Called from
  * reconcile, from the three-second order ferry and on shutdown. They can
  * overlap, which is safe: the DELETE is conditional and atomic, so exactly
@@ -7726,6 +7816,8 @@ async function orderFerryLoop(): Promise<void> {
     // (kill-request.ts). Before the halt check on purpose. A fleet halt stops
     // trading, and a kill makes the stop outlive the halt.
     await honourPendingKills();
+    // And the owner's /pause, onto their Perps worker within the same seconds.
+    mirrorLoginPauses();
     if (!haltRequested()) await ferryOrdersNow();
     await new Promise((r) => setTimeout(r, ORDER_FERRY_MS));
   }

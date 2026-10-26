@@ -217,7 +217,7 @@ import { ensureHome, homePaths, liftKillPause, merrymenHome, pauseForKeptGrant }
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
-import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+import { checkPolicy, perpsWalletRefusal, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
 import { entryGateLatch, entryGatesOf } from "./entry-gates";
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
@@ -9060,9 +9060,10 @@ async function main() {
     // table is the public tape, and a Perps wallet's agent never appears on it
     // (docs/perps.md rule 17). The owner who asked is told, from
     // lastTradeOutcome (thesis-policy.ts "perps-wallet-spot").
-    if (cfg.workerWallet === "perps" && !perpIntent) {
+    const walletRefusal = perpsWalletRefusal(cfg.workerWallet, intent);
+    if (walletRefusal) {
       console.log(`[perps] REFUSED ${intent.kind}: a Perps wallet's worker trades perpetuals only`);
-      lastTradeOutcome = { status: "rejected", rejectRule: "perps-wallet-spot" };
+      lastTradeOutcome = { status: "rejected", rejectRule: walletRefusal.rule };
       return;
     }
 
