@@ -631,7 +631,7 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
     try {
       const s = row.perp_json ? (JSON.parse(row.perp_json) as PaperPerpState) : null;
       if (typeof s?.tape_at === "number" && Number.isSafeInteger(s.tape_at)) tapeAt = s.tape_at;
-    } catch { /* unreadable: the check below refuses the row on its own */ }
+    } catch { /* unreadable: paperCheckpointRejection, below, refuses the row */ }
     bookAt = Math.max(Number(row.updated_at), tapeAt);
     if ((await laterPaperPerpFacts(shared, account, Number(row.epoch), bookAt, true)) > 0) {
       throw new Error("paper perp fills or funding are newer than the durable checkpoint");
