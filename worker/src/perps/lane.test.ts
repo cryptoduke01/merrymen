@@ -535,6 +535,13 @@ describe("the wiring in index.ts", () => {
     assert.ok(rejectRuleRemedy("perps-wallet-spot"));
   });
 
+  it("A PERPS WALLET'S WORKER PUBLISHES NO MARKET REVIEW — its source is a public one (rule 17)", () => {
+    const at = CODE.indexOf("quietReview = async () => {");
+    assert.ok(at > 0, "found the market review");
+    const head = CODE.slice(at, CODE.indexOf("const clock = reviewClock(agentId);", at));
+    assert.match(head, /if \(cfg\.workerWallet === "perps"\) return;/);
+  });
+
   it("A PERPS WALLET'S WORKER NEVER RUNS THE BRAIN, whatever MERRYMEN_BRAIN_LIVE or _SHADOW say", () => {
     // The Brain reviews tokens and its live mode submits Spot buys.
     const tick = fn("tick");

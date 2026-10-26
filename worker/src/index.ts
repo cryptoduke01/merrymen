@@ -13252,6 +13252,11 @@ async function main() {
     // stay in the owner's events.
     quietReview = async () => {
       if (isPaused()) return;
+      // NEVER ON A PERPS WALLET'S WORKER. A market review is a published
+      // thesis (source `market-review`) about the basket's tokens, and a Perps
+      // wallet's agent publishes nothing (docs/perps.md rule 17): its rows
+      // would reach the public theses feed under its own name.
+      if (cfg.workerWallet === "perps") return;
       const now = Math.floor(Date.now() / 1000);
       reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
       const clock = reviewClock(agentId);
