@@ -4,7 +4,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fsyncSync, linkSync, lstat
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { wrapSqlite, type Db } from "./db";
+import { tablePresent, wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { assertLedgerSourceContinuity } from "./ledger-safeguard";
 import { openSecret, sealSecret } from "./store-crypto";
@@ -13,6 +13,8 @@ import type { MemorySource } from "./memory-safeguard";
 import type { TenantLease } from "./tenant-lease";
 import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
 import { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_ADDITIVE_DDL, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
+import { PERP_UNRESOLVED_ORDER_STATUSES } from "./perp-ledger-rules";
+import { parseWorkerKey, PERPS_CHILDREN_DIR } from "./worker-key";
 export { LEDGER_IMPORT_SCHEMA, LEDGER_IMPORT_GENERATIONS_SCHEMA, LEDGER_RESUME_SCHEMA } from "./ledger-import-schema";
 
 export const LEDGER_IMPORT_PENDING_FILE = "ledger-import.pending.json";
@@ -34,6 +36,15 @@ function canonical(value: unknown): string {
 }
 function object(v: unknown): v is Record<string, unknown> { return !!v && typeof v === "object" && !Array.isArray(v); }
 function address(v: unknown): string { if (typeof v !== "string" || !ADDRESS.test(v)) throw refuse(); return v; }
+/**
+ * A TENANT HERE IS A WORKER'S KEY (worker-key.ts): `0x<owner>` for the Spot
+ * wallet's worker, exactly the tenant this file always took, or
+ * `0x<owner>:perps` for the Perps wallet's. The key, never the owner, names
+ * the receipt (tenant_ledger_import), the lease and the book's identity, so a
+ * login's two books never share one; the owner and the wallet it names pick
+ * the grant (grantBinding) and the home (volumeOkay). Anything else refuses.
+ */
+function tenantKey(v: unknown): string { if (!parseWorkerKey(v)) throw refuse(); return v as string; }
 function present(file: string): boolean {
   try { lstatSync(file); return true; }
   catch (e) { if ((e as { code?: unknown }).code === "ENOENT") return false; throw refuse(); }
@@ -62,7 +73,7 @@ const SPECS = {
   posts: "id:I agent_id:T decision_id:T body:T created_at:I",
   trades: "id:I agent_id:T kind:T target:T sell_token:T buy_token:T amount_usdg:R user_op_hash:T tx_hash:T status:T reject_rule:T created_at:I sim_quote_out:T sim_min_out:T sim_fee_tier:I sim_gas:T decision_id:T fill_side:T fill_symbol:T fill_qty_raw:T fill_price_usd:R realized_pnl_usdg:R basis_source:T order_id:T settlement_status:T gas_wei:T sponsored_gas_wei:T epoch:I fill_slippage_bps:I fill_cash_usdg:R gas_usdg:R gas_units:T trade_fee_usdg:R user_op_nonce:T budget_settled_at:I",
   // The venue's terms beside the total (store.ts PERP_EQUITY_ALTERS): NULL on every row of an
-  // agent with no perps. The perp_* tables themselves cross this boundary with hosted perps (slice 4).
+  // agent with no perps. The perp_* tables themselves are the last eight below.
   equity: "id:I agent_id:T eth_wei:T cash_usdg:R vault_usdg:R equity_usdg:R at:I positions_usdg:R epoch:I mode:T flows_held:I cash_read_at:I perp_collateral_micro:T perp_isolated_margin_micro:T perp_unrealized_micro:T perp_unrealized_gain_micro:T perp_in_transit_micro:T perp_snapshot_time:I cash_read_block:I",
   flows: "id:I agent_id:T direction:T amount_usdg:R tx_hash:T block_number:I source:T at:I epoch:I log_index:I chain_id:I",
   fee_accruals: "id:I agent_id:T profit_usdg:R fee_usdg:R hwm_before_usdg:R hwm_after_usdg:R at:I epoch:I",
@@ -80,14 +91,55 @@ const SPECS = {
   brain_trigger_state: "agent_id:T state_json:T updated_at:I",
   agent_commands: "id:T agent_id:T kind:T created_at:I claimed_at:I done_at:I result:T args:T",
   discovered_pools: "address:T symbol:T first_seen:I decimals:I liquidity_usd:R fdv_usd:R pool_currency0:T pool_currency1:T pool_fee:I pool_tick_spacing:I pool_hooks:T curve:T quote_token:T pool_announced_at:I graduation_threshold:T",
+  // ── THE PERP BOOK (store.ts PERP_LEDGER_DDL), a paper one in this build ────
+  //
+  // Every column, by its exact declared type, as readBook requires — tx_info
+  // included, because the check is every column or the table refuses. It is
+  // listed so that it can be refused: assertSettled refuses any book holding a
+  // non-NULL tx_info (the signed venue bytes never enter a sealed artifact),
+  // a live row, or a perp intent still in flight. recorded_stop_* reach a book
+  // an earlier build made by ALTER, at the end of the table; the check is
+  // order-blind. None is AUTOINCREMENT: their keys are identities.
+  //
+  // OPTIONAL TABLES, all eight: a Spot book last opened by a build from before
+  // the perp tables has none of them, and an artifact sealed by such a build
+  // has no key for them. Either is an empty perp book (PERP_BOOK_TABLES).
+  perp_orders: "id:T agent_id:T mode:T epoch:I account_index:I api_key_index:I nonce:I tx_hash:T tx_type:I tx_info:T expired_at:I status:T effect:T reduce_only:I market_id:I worst_notional_micro:T filled_base:T filled_quote_micro:T decision_id:T reason:T created_at:I resolved_at:I updated_at:I",
+  perp_order_legs: "agent_id:T mode:T order_id:T role:T client_order_index:I venue_order_index:T status:T venue_status:T created_at:I updated_at:I",
+  perp_fills: "agent_id:T mode:T epoch:I venue_trade_id:T side_role:T market_id:I side:T role:T base:T price:T quote_micro:T fee_micro:T realized_micro:T position_before:T entry_quote_before_micro:T trade_type:T attribution:T order_id:T venue_order_index:T client_order_index:I venue_tx_hash:T venue_ts_ms:I created_at:I",
+  perp_funding: "agent_id:T mode:T epoch:I market_id:I funding_id:T funding_hour:I payment_micro:T rate_ppm:I position_base:T position_side:T created_at:I",
+  perp_transfers: "id:T agent_id:T mode:T epoch:I direction:T amount_micro:T initiator:T state:T chain_id:I tx_hash:T log_index:I user_op_hash:T venue_tx_hash:T paid_tx_hash:T paid_log_index:I order_id:T created_at:I updated_at:I",
+  perp_positions: "agent_id:T mode:T market_id:I side:T base:T entry_price:T allocated_margin_micro:T imf_bp:I margin_mode:T realized_micro:T funding_micro:T stop_trigger:T stop_price:T recorded_stop_trigger:T recorded_stop_price:T take_trigger:T take_price:T funding_hour_applied:I opened_at:I updated_at:I source:T",
+  perp_accounts: "agent_id:T mode:T account_index:I registered_pubkey:T retired_pubkeys:T nonce_high_water:T paper_collateral_micro:T incident_json:T entries_halted:I last_venue_read_at:I last_snapshot_time:I created_at:I updated_at:I",
+  perp_carries: "agent_id:T mode:T epoch:I market_id:I side:T base:T mark_price:T entry_quote_micro:T created_at:I",
 } as const;
 type Table = keyof typeof SPECS;
 type Cell = null | string | number | { integer: string };
-type Tables = Record<Table, Cell[][]>;
+/**
+ * The book's rows, table by table. Every table but a perp one always has its
+ * key, empty or not; a perp table has one only when it holds a row (readBook),
+ * so a book without a perp row — every Spot book — has exactly the keys, the
+ * digest and the `tables` count it had before the perp tables crossed this
+ * boundary, and an artifact sealed before then is still read as written.
+ */
+type Tables = Partial<Record<Table, Cell[][]>>;
 interface Book { tables: Tables; sequences: Record<string, string> }
 const names = Object.keys(SPECS) as Table[];
 const fields = (table: Table) => SPECS[table].split(" ").map(s => { const [name, type] = s.split(":"); return { name: name!, type: type! }; });
 const autoincrement = ["events", "posts", "trades", "equity", "flows", "fee_accruals", "journal"];
+/** The perp book's tables: absent from a book, a shared database or an artifact, each is an empty one. */
+const PERP_BOOK_TABLES: readonly Table[] = ["perp_orders", "perp_order_legs", "perp_fills", "perp_funding", "perp_transfers", "perp_positions", "perp_accounts", "perp_carries"];
+const optionalTable = (table: Table) => PERP_BOOK_TABLES.includes(table);
+const rowsOf = (book: Book, table: Table): Cell[][] => book.tables[table] ?? [];
+/** The tables this sqlite book has, by its own catalogue. */
+function bookTables(raw: DatabaseSync): Set<string> {
+  return new Set((raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: unknown }>).map(t => String(t.name)));
+}
+/** The named tables a book can be read for: every one but a perp table the book does not have. */
+function tablesIn(raw: DatabaseSync): Table[] {
+  const present = bookTables(raw);
+  return names.filter(t => !optionalTable(t) || present.has(t));
+}
 function wire(value: unknown, type: string): Cell {
   if (value === null) return null;
   if (type === "I" && typeof value === "bigint" && value >= -BigInt(Number.MAX_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)) return { integer: String(value) };
@@ -106,12 +158,20 @@ function unwire(value: Cell, type: string): string | number | bigint | null {
 }
 function readBook(raw: DatabaseSync, account: string, allowEmpty = false): Book {
   const tables = {} as Tables; let count = 0;
+  const present = bookTables(raw);
   for (const table of names) {
+    // A perp table this book does not have is an empty perp book: a Spot
+    // book last opened before the perp tables existed. Every other table
+    // must be there, column for column, as it always had to be.
+    if (optionalTable(table) && !present.has(table)) continue;
     const info = raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; type: string }>;
     const wanted = fields(table);
     if (info.length !== wanted.length || wanted.some(c => !info.some(i => i.name === c.name && i.type === ({ I: "INTEGER", R: "REAL", T: "TEXT" } as Record<string, string>)[c.type]))) throw refuse();
     const stmt = raw.prepare(`SELECT ${wanted.map(c => c.name).join(",")} FROM ${table} LIMIT ${MAX_ROWS + 1}`); stmt.setReadBigInts(true);
     const rows = stmt.all(); count += rows.length; if (count > MAX_ROWS) throw refuse();
+    // An empty perp table is left out, so a book with no perp row reads —
+    // and digests — exactly as it did before these tables crossed.
+    if (optionalTable(table) && rows.length === 0) continue;
     tables[table] = rows.map(row => {
       if (table !== "discovered_pools") {
         const id = table === "agents" ? row.smart_account : row.agent_id;
@@ -120,7 +180,8 @@ function readBook(raw: DatabaseSync, account: string, allowEmpty = false): Book 
       return wanted.map(c => wire(row[c.name], c.type));
     }).sort((a, b) => canonical(a).localeCompare(canonical(b)));
   }
-  if (tables.agents.length !== 1 && !(allowEmpty && tables.agents.length === 0 && names.every(t => tables[t].length === 0))) throw refuse();
+  const agents = tables.agents ?? [];
+  if (agents.length !== 1 && !(allowEmpty && agents.length === 0 && names.every(t => (tables[t] ?? []).length === 0))) throw refuse();
   const sequences: Record<string, string> = {};
   const stmt = raw.prepare("SELECT name,seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
   for (const row of stmt.all()) if (typeof row.name === "string" && autoincrement.includes(row.name)) {
@@ -131,11 +192,18 @@ function readBook(raw: DatabaseSync, account: string, allowEmpty = false): Book 
   return out;
 }
 function validateBook(book: unknown, account: string): asserts book is Book {
-  if (!object(book) || !object(book.tables) || !object(book.sequences) || Object.keys(book.tables).sort().join() !== [...names].sort().join()) throw refuse();
+  if (!object(book) || !object(book.tables) || !object(book.sequences)) throw refuse();
+  // Every table but a perp one, exactly; a perp table only when it holds a
+  // row, which is the one form readBook writes (an empty one present is a
+  // book no build sealed, and refuses). An artifact sealed before the perp
+  // tables crossed has no perp key at all, and reads as it was written.
+  const keys = Object.keys(book.tables);
+  if (keys.some(k => !(names as readonly string[]).includes(k)) || names.some(t => !optionalTable(t) && !keys.includes(t))) throw refuse();
   let count = 0;
   for (const table of names) {
+    if (optionalTable(table) && !keys.includes(table)) continue;
     const rows = book.tables[table]; const cols = fields(table);
-    if (!Array.isArray(rows)) throw refuse(); count += rows.length; if (count > MAX_ROWS) throw refuse();
+    if (!Array.isArray(rows) || (optionalTable(table) && rows.length === 0)) throw refuse(); count += rows.length; if (count > MAX_ROWS) throw refuse();
     for (const row of rows) {
       if (!Array.isArray(row) || row.length !== cols.length) throw refuse();
       row.forEach((v, i) => { unwire(v as Cell, cols[i]!.type); });
@@ -154,6 +222,27 @@ function assertSettled(raw: DatabaseSync): void {
   // Store startup normalizes these historical fields. Reject an unsupported old source,
   // rather than advertise an exact import that its first schema pass would mutate.
   if (raw.prepare("SELECT 1 FROM flows WHERE tx_hash IS NOT NULL AND (tx_hash <> LOWER(tx_hash) OR chain_id IS NULL) LIMIT 1").get()) throw refuse();
+  // ── THE PERP BOOK IS SETTLED, PAPER, AND CARRIES NO SIGNED BYTES ──────────
+  //
+  // A book in flight is not a book: a perp order the venue has not answered
+  // (PERP_UNRESOLVED_ORDER_STATUSES), or a transfer not yet resolved or with
+  // money in transit (perp-ledger-rules.ts perpTransferInTransit), sealed here
+  // could be answered twice — once by the restored book, once by whatever
+  // answers the original — exactly the trades rule above. This build hands
+  // over paper perps only, so a row on any other rail refuses the book, and
+  // so does any signed venue transaction (tx_info): bytes that could be
+  // re-sent to the venue never enter an artifact shared storage keeps.
+  const present = bookTables(raw);
+  const some = (sql: string, ...args: string[]) => !!raw.prepare(sql).get(...args);
+  for (const table of PERP_BOOK_TABLES) {
+    if (present.has(table) && some(`SELECT 1 FROM ${table} WHERE mode IS NULL OR mode <> 'paper' LIMIT 1`)) throw refuse();
+  }
+  if (present.has("perp_orders")) {
+    if (some(`SELECT 1 FROM perp_orders WHERE status IN (${PERP_UNRESOLVED_ORDER_STATUSES.map(() => "?").join(",")}) LIMIT 1`, ...PERP_UNRESOLVED_ORDER_STATUSES)) throw refuse();
+    if (some("SELECT 1 FROM perp_orders WHERE tx_info IS NOT NULL LIMIT 1")) throw refuse();
+  }
+  if (present.has("perp_transfers")
+      && some("SELECT 1 FROM perp_transfers WHERE state = 'submitted' OR (direction = 'deposit' AND state = 'landed') OR (direction = 'withdraw' AND state = 'executed') LIMIT 1")) throw refuse();
 }
 
 type Dialect = "postgres" | "sqlite";
@@ -171,11 +260,39 @@ export interface LedgerImportVolume { id: string; mountPath: string; homeRoot: s
 function leaseOkay(lease: TenantLease, tenant: string): void {
   if (lease.tenant.toLowerCase() !== tenant || lease.backend !== "postgres" || !lease.healthy()) throw refuse();
 }
+/**
+ * Is this table in the shared database? Asked of the catalogue, never learned
+ * from a failed statement: every caller holds a transaction, and on Postgres
+ * a read of a missing relation aborts it.
+ */
+async function sharedTable(db: Db, table: string, dialect: Dialect): Promise<boolean> {
+  return dialect === "postgres"
+    ? !!(await db.prepare(`SELECT to_regclass('${table}') AS name`).get() as { name?: unknown } | undefined)?.name
+    : !!(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { name?: unknown } | undefined)?.name;
+}
+/** Does the shared paper_checkpoints table have its perp_json column yet (paper-checkpoint.ts PAPER_CHECKPOINT_ALTERS)? */
+async function checkpointPerpColumn(db: Db, dialect: Dialect): Promise<boolean> {
+  return dialect === "postgres"
+    ? !!(await db.prepare(`SELECT 1 AS x FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        WHERE c.relname = 'paper_checkpoints' AND a.attname = 'perp_json' AND a.attnum > 0 AND NOT a.attisdropped AND pg_table_is_visible(c.oid)`).get())
+    : !!(await db.prepare("SELECT 1 AS x FROM pragma_table_info('paper_checkpoints') WHERE name = 'perp_json'").get());
+}
+/**
+ * THE GRANT A WORKER'S BOOK IS BOUND TO: the owner's row in its own wallet's
+ * table — `grants` for the Spot wallet, as always, and `perps_grants` for the
+ * Perps wallet (grant-store.ts), which the first Perps put creates and nothing
+ * else does, so its absence is asked of the catalogue first and refuses. The
+ * binding keeps the worker's key as its tenant.
+ */
 async function grantBinding(db: Db, tenant: string, dialect: Dialect, lock = false): Promise<GrantBinding> {
+  const worker = parseWorkerKey(tenant);
+  if (!worker) throw refuse();
+  const table = worker.purpose === "perps" ? "perps_grants" : "grants";
+  if (table === "perps_grants" && !(await sharedTable(db, table, dialect))) throw refuse();
   const row = await db.prepare(`SELECT tenant, lower(grant_json->>'smartAccount') AS account, lower(grant_json->>'owner') AS owner,
     grant_json->>'chainId' AS chain, ${dialect === "postgres" ? "updated_at::text AS updated, xmin::text AS incarnation" : "CAST(updated_at AS TEXT) AS updated, CAST(row_version AS TEXT) AS incarnation"}
-    FROM grants WHERE tenant = ?${lock && dialect === "postgres" ? " FOR SHARE" : ""}`).get(tenant) as Record<string, unknown> | undefined;
-  if (!row || row.tenant !== tenant || typeof row.updated !== "string" || !/^\d+$/.test(row.updated) || typeof row.incarnation !== "string" || !/^\d+$/.test(row.incarnation)
+    FROM ${table} WHERE tenant = ?${lock && dialect === "postgres" ? " FOR SHARE" : ""}`).get(worker.owner) as Record<string, unknown> | undefined;
+  if (!row || row.tenant !== worker.owner || typeof row.updated !== "string" || !/^\d+$/.test(row.updated) || typeof row.incarnation !== "string" || !/^\d+$/.test(row.incarnation)
       || !Number.isSafeInteger(Number(row.chain)) || Number(row.chain) <= 0) throw refuse();
   return { tenant, smartAccount: address(row.account), owner: address(row.owner), chainId: Number(row.chain), updatedAt: row.updated, rowVersion: row.incarnation };
 }
@@ -186,10 +303,27 @@ async function bindings(db: Db, tenant: string, account: string, dialect: Dialec
   // Settlements and historical accounting repairs can change rows without advancing
   // a source cursor. Bind those rows as well as the current position/basis snapshots.
   for (const table of names.filter(t => t !== "discovered_pools")) {
+    // A perp table binds only when the account has a row there (a shared
+    // database without it has none), so a Spot tenant's digest is the one it
+    // was before the perp tables crossed — a staged import or a resume that
+    // spans this change is not refused for a table that says nothing.
+    if (optionalTable(table) && !(await sharedTable(db, table, dialect))) continue;
     const cols = fields(table).map(c => c.name).join(","); const key = table === "agents" ? "smart_account" : "agent_id";
-    mutable[table] = (await db.prepare(`SELECT ${cols} FROM ${table} WHERE LOWER(${key}) = ?`).all(account)).map(r => canonical(r)).sort();
+    const rows = (await db.prepare(`SELECT ${cols} FROM ${table} WHERE LOWER(${key}) = ?`).all(account)).map(r => canonical(r)).sort();
+    if (optionalTable(table) && rows.length === 0) continue;
+    mutable[table] = rows;
   }
-  mutable.paper_checkpoints = (await db.prepare("SELECT agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at FROM paper_checkpoints WHERE LOWER(agent_id) = ?").all(account)).map(r => canonical(r)).sort();
+  // perp_json binds with the rest of the checkpoint — a perp book changed
+  // between capture and restore must change the digest — except a NULL one,
+  // which is no perp book: the same evidence as a row from before the column.
+  const perpColumn = await checkpointPerpColumn(db, dialect);
+  mutable.paper_checkpoints = (await db.prepare(`SELECT agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at${perpColumn ? ",perp_json" : ""} FROM paper_checkpoints WHERE LOWER(agent_id) = ?`).all(account))
+    .map(r => {
+      const row = r as Record<string, unknown>;
+      if (row.perp_json !== null && row.perp_json !== undefined) return canonical(row);
+      const { perp_json: _none, ...rest } = row; void _none;
+      return canonical(rest);
+    }).sort();
   return { grant, marks, mutableDigest: hash(canonical(mutable)) };
 }
 /** Read-only evidence of a historical source gap. This does not prove or rebuild an original book. */
@@ -197,7 +331,7 @@ export async function readLedgerGapBinding(o: {
   tenant: string; smartAccount: string; chainId: number; shared: Db; lease: TenantLease;
   assertSource: () => void | Promise<void>; dialect?: Dialect;
 }): Promise<LedgerGapBinding> {
-  const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
+  const tenant = tenantKey(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
   leaseOkay(o.lease, tenant); await o.assertSource();
   return o.shared.tx(async db => {
     const before = await bindings(db, tenant, account, dialect, true);
@@ -211,7 +345,7 @@ export async function readLedgerGapBinding(o: {
 }
 function openArtifact(captured: CapturedLedgerImport, dek: Buffer): Artifact {
   if (dek.length !== 32 || typeof captured.sealed !== "string" || Buffer.byteLength(captured.sealed) > LEDGER_IMPORT_MAX_BYTES * 2 || hash(captured.sealed) !== captured.sha256) throw refuse();
-  const text = openSecret(captured.sealed, dek); const head = HEADER + address(captured.tenant) + "\n";
+  const text = openSecret(captured.sealed, dek); const head = HEADER + tenantKey(captured.tenant) + "\n";
   if (!text.startsWith(head) || Buffer.byteLength(text) !== captured.bytes || captured.bytes > LEDGER_IMPORT_MAX_BYTES) throw refuse();
   const a: unknown = JSON.parse(text.slice(head.length));
   if (!object(a) || a.version !== 1 || a.tenant !== captured.tenant || a.generation !== captured.generation || typeof a.generation !== "string" || !UUID.test(a.generation)
@@ -222,9 +356,21 @@ function openArtifact(captured: CapturedLedgerImport, dek: Buffer): Artifact {
   if (hash(canonical(a.book)) !== a.sourceDigest) throw refuse();
   return a as unknown as Artifact;
 }
+/**
+ * The home a worker's book lives in on the volume: `children/<owner>` for the
+ * Spot wallet's worker, byte for byte the path it always was, and
+ * `children-perps/<owner>` for the Perps wallet's (worker-key.ts).
+ */
+function workerHome(homeRoot: string, tenant: string): string {
+  const worker = parseWorkerKey(tenant);
+  if (!worker) throw refuse();
+  return worker.purpose === "perps"
+    ? path.join(path.resolve(homeRoot), PERPS_CHILDREN_DIR, worker.owner)
+    : path.join(path.resolve(homeRoot), "children", tenant);
+}
 function volumeOkay(volume: LedgerImportVolume, home: string, tenant: string): void {
   if (!volume || typeof volume.id !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(volume.id) || !path.isAbsolute(volume.mountPath) || !path.isAbsolute(volume.homeRoot)
-      || path.resolve(home) !== path.join(path.resolve(volume.homeRoot), "children", tenant)) throw refuse();
+      || path.resolve(home) !== workerHome(volume.homeRoot, tenant)) throw refuse();
   const relative = path.relative(path.resolve(volume.mountPath), path.resolve(volume.homeRoot));
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw refuse();
   parentDirectories(volume.mountPath); parentDirectories(volume.homeRoot);
@@ -243,8 +389,13 @@ function volumeOkay(volume: LedgerImportVolume, home: string, tenant: string): v
  * (seedBasisForChild, completeAttestedSeed) and the day's energy
  * (seedEnergyForChild). `agents` is the worker's own, written at arm
  * (store.ts ensureAgent), and nothing else in these tables is written before.
+ *
+ * AND THE PAPER PERP BOOK the same restore puts back beside the practice
+ * cash (paper-checkpoint.ts writePaperPerpState: the paper collateral and
+ * every open paper position), before the worker arms. Without them here, an
+ * attested Perps book refused after that seed would be refused for good.
  */
-const SEEDED_BEFORE_ARM: readonly Table[] = ["paper_book", "cost_basis", "position_floors", "energy_days"];
+const SEEDED_BEFORE_ARM: readonly Table[] = ["paper_book", "cost_basis", "position_floors", "energy_days", "perp_accounts", "perp_positions"];
 
 /**
  * The book at `file` is this account's, on this volume: "armed" (its agent
@@ -264,7 +415,12 @@ function existingBookIdentity(file: string, account: string, chainId: number, vo
     const agents = raw.prepare("SELECT smart_account,chain_id FROM agents LIMIT 2").all() as Array<{ smart_account: string; chain_id: number }>;
     if (agents.length > 1 || agents.some(a => a.smart_account.toLowerCase() !== account || a.chain_id !== chainId)) throw refuse();
     let seeded = false;
-    for (const table of names) {
+    // RUN ON EVERY PERSISTENT SPAWN, before the worker opens the book and
+    // runs its schema: a Spot book last opened by a build from before the
+    // perp tables has none of them, and is the book it always was. Asked of
+    // its catalogue, so a held tenant's untouched book is not refused for
+    // tables it never had.
+    for (const table of tablesIn(raw)) {
       if (table === "discovered_pools") continue;
       const key = table === "agents" ? "smart_account" : "agent_id";
       if (raw.prepare(`SELECT 1 FROM ${table} WHERE LOWER(${key}) <> ? OR ${key} IS NULL LIMIT 1`).get(account)) throw refuse();
@@ -371,7 +527,7 @@ export async function captureLedgerImport(o: {
   tenant: string; smartAccount: string; chainId: number; home: string; shared: Db; dek: Buffer; lease: TenantLease;
   source: MemorySource; assertSource: () => void | Promise<void>; dialect?: Dialect;
 }): Promise<CapturedLedgerImport> {
-  const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
+  const tenant = tenantKey(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
   leaseOkay(o.lease, tenant); await o.assertSource();
   if (o.dek.length !== 32 || !o.source.quiescent || !o.source.singleReplicaConfirmed || !o.source.deploymentId || !o.source.gitCommit || !o.source.orchestratorStart || !Number.isSafeInteger(o.source.orchestratorPid)) throw refuse();
   parentDirectories(o.home); const file = path.join(o.home, "merrymen.db"); plain(file, false);
@@ -442,7 +598,7 @@ async function buildStage(file: string, a: Artifact): Promise<void> {
     try {
       for (const table of names) {
         const cols = fields(table); const stmt = raw.prepare(`INSERT INTO ${table}(${cols.map(c => c.name).join(",")}) VALUES(${cols.map(() => "?").join(",")})`);
-        for (const row of a.book.tables[table]) stmt.run(...row.map((v, i) => unwire(v, cols[i]!.type)));
+        for (const row of rowsOf(a.book, table)) stmt.run(...row.map((v, i) => unwire(v, cols[i]!.type)));
       }
       for (const table of autoincrement) {
         raw.prepare("DELETE FROM sqlite_sequence WHERE name = ?").run(table);
@@ -470,7 +626,7 @@ export async function restoreLedgerImport(o: {
   tenant: string; smartAccount: string; chainId: number; home: string; volume: LedgerImportVolume;
   shared: Db; dek: Buffer; lease: TenantLease; dialect?: Dialect;
 }): Promise<"none" | "present" | "restored" | "resumed"> {
-  const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
+  const tenant = tenantKey(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
   leaseOkay(o.lease, tenant);
   await ensureLedgerImportSchema(o.shared, dialect);
   await assertNoPendingReceiptAttestation(o.shared, tenant);
@@ -556,7 +712,14 @@ export async function restoreLedgerImport(o: {
   });
 }
 
-/** Permanent nonpayload generation receipt. Permission replacement must never call this. */
+/**
+ * Permanent nonpayload generation receipt. Permission replacement must never call this.
+ *
+ * SPOT TENANTS ONLY, still: its `absentOnly` asks `grants`, which never holds
+ * a Perps worker's row, so a Perps key here would read as a removed tenant
+ * and lose a live book's receipt. A Perps key refuses (see
+ * invalidateLedgerImportsUnlessListed).
+ */
 export async function invalidateLedgerImport(tenant: string, shared: Db, o: {
   beforeMs?: number; expectedGrant?: { updatedAt: string; rowVersion: string }; absentOnly?: boolean;
 } = {}): Promise<void> {
@@ -568,9 +731,16 @@ export async function invalidateLedgerImport(tenant: string, shared: Db, o: {
     await db.prepare(`UPDATE tenant_ledger_import SET state = 'deleted', sealed = NULL, bytes = 0 WHERE ${where}`).run(...args);
   });
 }
+/**
+ * The Spot roster's sweep of removed tenants' receipts. A Perps worker's
+ * receipt (`0x<owner>:perps`) is never one of them and is left out by the
+ * query itself: `wanted` lists Spot tenants, and a Perps key in the sweep
+ * would either refuse the whole pass (address) or, worse, read as removed.
+ * Keeping a receipt only keeps a book's identity, which is the safe side.
+ */
 export async function invalidateLedgerImportsUnlessListed(shared: Db, wanted: ReadonlySet<string>, listedAtMs: number): Promise<void> {
   if (!Number.isSafeInteger(listedAtMs)) throw refuse();
-  const rows = await shared.prepare("SELECT tenant FROM tenant_ledger_import WHERE state <> 'deleted' AND created_at_ms <= ? ORDER BY tenant LIMIT 128").all(listedAtMs) as Array<{ tenant: string }>;
+  const rows = await shared.prepare("SELECT tenant FROM tenant_ledger_import WHERE state <> 'deleted' AND created_at_ms <= ? AND tenant NOT LIKE '%:perps' ORDER BY tenant LIMIT 128").all(listedAtMs) as Array<{ tenant: string }>;
   for (const row of rows) if (!wanted.has(address(row.tenant))) await invalidateLedgerImport(row.tenant, shared, { beforeMs: listedAtMs, absentOnly: true });
 }
 
@@ -588,6 +758,9 @@ export async function sharedLedgerHistory(db: Pick<Db, "prepare">, tenant: strin
   const marks = await db.prepare("SELECT last_id FROM mirror_state WHERE tenant = ?").all(tenant) as Array<{ last_id: unknown }>;
   if (marks.some(m => String(m.last_id) !== "0")) return "mirror_state";
   for (const table of names.filter(t => t !== "discovered_pools")) {
+    // A shared database without a perp table holds no perp row: asked of the
+    // catalogue, since registerLedgerSource asks this inside its transaction.
+    if (optionalTable(table) && !(await tablePresent(db, table))) continue;
     const key = table === "agents" ? "smart_account" : "agent_id";
     const row = await db.prepare(`SELECT count(*) AS n FROM ${table} WHERE LOWER(${key}) = ?`).get(account) as { n: unknown };
     if (Number(row.n) !== 0) return table;
@@ -601,7 +774,7 @@ export async function registerLedgerSource(o: {
   tenant: string; smartAccount: string; chainId: number; home: string; volume: LedgerImportVolume;
   shared: Db; lease: TenantLease; dialect?: Dialect;
 }): Promise<void> {
-  const tenant = address(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
+  const tenant = tenantKey(o.tenant), account = address(o.smartAccount), dialect = o.dialect ?? "postgres";
   leaseOkay(o.lease, tenant);
   await ensureLedgerImportSchema(o.shared, dialect);
   await assertNoPendingReceiptAttestation(o.shared, tenant);
@@ -649,7 +822,7 @@ export async function registerLedgerSource(o: {
     }
     const raw = new DatabaseSync(file, { readOnly: true });
     try {
-      for (const table of names) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
+      for (const table of tablesIn(raw)) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
       const stmt = raw.prepare("SELECT name,seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
       if (stmt.all().some(row => typeof row.name === "string" && autoincrement.includes(row.name) && row.seq !== 0n)) throw refuse();
     } finally { raw.close(); }
@@ -782,6 +955,9 @@ export async function registerAttestedGapSource(o: {
   /** The gap preconditions, re-read inside the transaction. Throws to refuse. */
   recheck: (db: Db) => Promise<void>;
 }): Promise<AttestedGapReceipt> {
+  // A Spot tenant only, by its bare address: the attested gap recovers the
+  // books lost before persistent homes (ledger-resume.ts), and no Perps book
+  // existed then. A Perps worker's key refuses here.
   const tenant = address(o.tenant), account = address(o.smartAccount), owner = address(o.owner), dialect = o.dialect ?? "postgres";
   if (!UUID.test(o.generation) || !UUID.test(o.approvalId) || !/^[0-9a-f]{64}$/.test(o.evidenceDigest)) throw refuse();
   const block = /^(0|[1-9][0-9]{0,29})$/;
@@ -841,7 +1017,7 @@ export async function registerAttestedGapSource(o: {
     chmodSync(file, 0o600); syncFile(file); fsyncDirSync(o.home);
     const raw = new DatabaseSync(file, { readOnly: true });
     try {
-      for (const table of names) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
+      for (const table of tablesIn(raw)) if ((raw.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n !== 0) throw refuse();
       const stmt = raw.prepare("SELECT name,seq FROM sqlite_sequence"); stmt.setReadBigInts(true);
       if (stmt.all().some(row => typeof row.name === "string" && autoincrement.includes(row.name) && row.seq !== 0n)) throw refuse();
     } finally { raw.close(); }
@@ -901,7 +1077,7 @@ export async function verifyLedgerImport(o: {
       leaseOkay(o.lease, a.tenant); await o.assertSource();
       if (canonical(await bindings(db, a.tenant, a.smartAccount, dialect, true)) !== canonical(a.bindings)) throw refuse();
     });
-    return { tables: names.length, rows: names.reduce((n, t) => n + a.book.tables[t].length, 0), sourceDigest: a.sourceDigest };
+    return bookCounts(a);
   } finally { try { original.exec("ROLLBACK"); } finally { original.close(); rmSync(temporary, { recursive: true, force: true }); } }
 }
 
@@ -927,5 +1103,15 @@ export async function verifyRestoredLedgerImport(o: {
     leaseOkay(o.lease, a.tenant); await o.assertSource();
     sameBook(file, a.smartAccount, a.sourceDigest);
   });
-  return { tables: names.length, rows: names.reduce((n, t) => n + a.book.tables[t].length, 0), sourceDigest: a.sourceDigest };
+  return bookCounts(a);
+}
+
+/**
+ * The operator's counts for a verified book: its tables and their rows. A
+ * perp table is counted when the book holds it — when it has a row — so a
+ * Spot book reports the tables it always did.
+ */
+function bookCounts(a: Artifact): { tables: number; rows: number; sourceDigest: string } {
+  const held = names.filter(t => a.book.tables[t] !== undefined);
+  return { tables: held.length, rows: held.reduce((n, t) => n + rowsOf(a.book, t).length, 0), sourceDigest: a.sourceDigest };
 }

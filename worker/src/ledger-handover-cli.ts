@@ -27,6 +27,7 @@ import {
 } from "./persistent-home";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { openSecret, sealSecret } from "./store-crypto";
+import { PerpsBooksNotHandedOver, refuseWhilePerpsBooks } from "./perps-handover-refusal";
 
 const ENVELOPE = "ledger-handover/v1\n";
 export const LEDGER_HANDOVER_MAX_BYTES = 384 * 1024 * 1024;
@@ -363,6 +364,12 @@ export async function runLedgerHandoverCli(argv: string[], dependencies: LedgerH
   const home = env.MERRYMEN_HOME;
   if (!home || !path.isAbsolute(home) || path.resolve(home) !== home || (!dependencies.shared && !env.DATABASE_URL)) throw refuse();
   plainDirectory(home);
+  // A PERPS PAPER BOOK IS NOT COVERED YET, so none of this runs while one
+  // exists — source or target, preflight included, before any lease or read
+  // — and the operator is told that, not handed the generic refusal: every
+  // step below walks `children/` alone and would leave the book behind
+  // without a word (perps-handover-refusal.ts).
+  refuseWhilePerpsBooks(home);
   const opts = { home, expectedDeployment: values.get("--expected-deployment") ?? "", expectedCommit: values.get("--expected-commit") ?? "",
     orchestratorPid: Number(values.get("--orchestrator-pid")), quiescent: flags.has("--quiescent"), singleReplicaConfirmed: true };
   const current = inspectMemorySource(opts, env, dependencies.procRoot), targetMode = mode === "restore" || mode === "complete";
@@ -560,5 +567,5 @@ export async function runLedgerHandoverCli(argv: string[], dependencies: LedgerH
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   runLedgerHandoverCli(process.argv.slice(2)).then(result => { console.log(JSON.stringify(result)); process.exit(0); })
-    .catch(() => { console.error(refuse().message); process.exit(1); });
+    .catch((e: unknown) => { console.error(e instanceof PerpsBooksNotHandedOver ? e.message : refuse().message); process.exit(1); });
 }
