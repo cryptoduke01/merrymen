@@ -82,6 +82,7 @@ import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { isPerpsWorkerKey, parseWorkerKey, PERPS_CHILDREN_DIR, perpsChildHome, workerKey, workerOwner } from "./worker-key";
 import { perpsCeilingOf } from "./settings";
+import { createFleetPerpFeed, type FleetPerpFeed, type FleetPerpFeedOptions } from "./perps/fleet-feed";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import {
   drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
@@ -2915,7 +2916,9 @@ async function writePerpsSettingsForChild(
     const holder: `0x${string}` | null = claims
       ? (effectiveHolder(owner, spot?.holderProof ?? null, (w) => claims.get(w))?.address ?? null)
       : lastWrittenHolder(path.join(childHome(tenant), "settings.json"));
-    writeChildSettings(tenant, childSettingsFor(perpsWorkerSettings(stored), holder));
+    const forChild = perpsWorkerSettings(stored);
+    writeChildSettings(tenant, childSettingsFor(forChild, holder));
+    perpsFeedSettings.set(tenant.toLowerCase(), forChild);
     return stored;
   } catch {
     return null;
@@ -12241,6 +12244,85 @@ function stopFomoPass(): void {
 // still being built sees `stopping` and never starts (runFomoPass).
 onDrainBeforeChildren("fomo stream", stopFomoPass);
 
+// ── THE PERPS FEED (perps/fleet-feed.ts) ────────────────────────────────────
+//
+// The replica's one public Lighter market-data publisher, which every hosted
+// Perps worker reads and none runs itself (lane.ts isHostedChildProcess).
+// Built on first use and refreshed after each mirror pass; it carries only
+// what THIS replica's own Perps workers want — the settings this process
+// handed each (writePerpsSettingsForChild, never a file a child could write)
+// and what each one's own book holds — and only while MERRYMEN_PERPS=paper
+// (perpsSpawnable). Off, it starts nothing and asks Lighter nothing.
+
+/** The Perps settings this process last handed each Perps worker, by worker key: the feed's markets. */
+const perpsFeedSettings = new Map<string, MerrymenSettings>();
+let perpsFeed: FleetPerpFeed | null = null;
+let perpsFeedStartForTest: FleetPerpFeedOptions["start"] | undefined;
+/** Test seam: the feed's start (and a fresh publisher); null puts startLighterFeed back. */
+export function setPerpsFeedStartForTest(fn: FleetPerpFeedOptions["start"] | null): void {
+  perpsFeed?.stop();
+  perpsFeed = null;
+  perpsFeedStartForTest = fn ?? undefined;
+}
+/** Test seam: the publisher's markets, or null when none is built. */
+export function perpsFeedMarketsForTest(): { running: boolean; markets: readonly number[] } | null {
+  return perpsFeed ? { running: perpsFeed.running, markets: perpsFeed.marketIds } : null;
+}
+
+/** The Perps workers this replica runs, is starting or will restart, under a lease it holds. */
+function perpsFeedConsumers(): string[] {
+  const keys = new Set<string>([...children.keys(), ...spawning.keys(), ...restartPending.keys()]);
+  return [...keys].filter((k) => isPerpsWorkerKey(k) && leases.get(k)?.healthy() === true);
+}
+
+/** The markets those workers' own books hold a paper position in, read from each book; a book that will not read is skipped. */
+async function perpsFeedHeld(): Promise<number[]> {
+  const ids = new Set<number>();
+  let unread = 0;
+  for (const key of perpsFeedConsumers()) {
+    const handle = openChildLedger(childHome(key));
+    if (!handle) continue;
+    try {
+      const rows = (await handle.db.prepare("SELECT DISTINCT market_id FROM perp_positions WHERE mode = 'paper' AND base <> '0'").all()) as Array<{ market_id: number }>;
+      for (const r of rows) ids.add(Number(r.market_id));
+    } catch {
+      unread += 1;
+    } finally {
+      handle.close();
+    }
+  }
+  // Every book unread is not "nothing held": the publisher keeps what it carried.
+  if (unread > 0 && ids.size === 0) throw new Error(`${unread} Perps book${unread === 1 ? "" : "s"} unreadable`);
+  return [...ids];
+}
+
+function perpsFeedNow(): FleetPerpFeed {
+  perpsFeed ??= createFleetPerpFeed({
+    home: merrymenHome(),
+    enabled: perpsSpawnable,
+    halted: () => stopping || haltRequested(),
+    readSettings: async () => perpsFeedConsumers().flatMap((k) => perpsFeedSettings.get(k) ?? []),
+    readHeld: perpsFeedHeld,
+    log,
+    ...(perpsFeedStartForTest ? { start: perpsFeedStartForTest } : {}),
+  });
+  return perpsFeed;
+}
+
+/** One refresh of the feed, never throwing. With perps off and nothing built, nothing is even built. */
+async function refreshPerpsFeed(): Promise<void> {
+  if (!perpsFeed && !perpsSpawnable()) return;
+  await perpsFeedNow().refresh();
+}
+/** FLEET_HALT: the socket goes now; the first pass after the halt lifts starts it again. */
+function pausePerpsFeed(): void {
+  perpsFeed?.pause();
+}
+// THE DRAIN STOPS IT, before any child is signalled, as it stops the Fomo
+// stream: draining children then see the file age, which refuses paper opens
+// and fills — the safe direction. Synchronous, and for good.
+onDrainBeforeChildren("perps feed", () => perpsFeed?.stop());
+
 function startFomoPass(): void {
   if (fomoInFlight || stopping) return;
   const boot = fomoBootNow();
@@ -12480,8 +12562,10 @@ function haltRequested(): boolean {
  */
 export async function honourFleetHalt(): Promise<void> {
   // The shared Fomo stream and its fleet lease go first: a halted replica
-  // leads nothing, and another replica may take the lease over.
+  // leads nothing, and another replica may take the lease over. And the perps
+  // feed's socket, until the halt lifts (refreshPerpsFeed).
   stopFomoPass();
+  pausePerpsFeed();
   // A lease kept for a hold process that has not exited (below) is waited
   // for, like its process, and not a reason to say all this again.
   const kept = (t: string) => !!holders.get(t)?.leaving || retiringExpired.has(t);
@@ -13122,6 +13206,9 @@ export async function runOrchestrator(): Promise<void> {
       // jobs — none of them waited for, all of them cut off by the exit.
       if (stopping) return;
       startHistoryRepair();
+      // THE PERPS FEED, after the mirror, so what the books hold is this
+      // pass's. Never throws; with perps off it does nothing at all.
+      await refreshPerpsFeed();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this
       // costs a vendor request; most passes it costs a file write.

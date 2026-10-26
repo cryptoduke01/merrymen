@@ -3724,6 +3724,10 @@ async function main() {
     start: () =>
       startLighterFeed({
         marketIds: () => perpLane.feedMarketIds(),
+        // Funding history for every HELD market, not only perp-trend's
+        // universe: a position's funding never stalls on a market the route
+        // does not trade (feed.ts heldMarketIds).
+        heldMarketIds: () => perpLane.heldMarketIds(),
         outPath: lighterFeedPath(merrymenHome()),
         home: merrymenHome(),
         // THE PUBLIC CLIENT: market data never bills a tenant's L1 bucket.

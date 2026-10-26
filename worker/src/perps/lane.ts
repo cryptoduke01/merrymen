@@ -399,6 +399,8 @@ export interface PerpLane {
   report(): Promise<void>;
   /** Venue market ids the feed should carry: the allowed markets plus anything held. */
   feedMarketIds(): number[];
+  /** Venue market ids the book HOLDS: the feed's funding history covers each (feed.ts heldMarketIds). */
+  heldMarketIds(): number[];
 }
 
 export function createPerpLane(deps: PerpLaneDeps): PerpLane {
@@ -1372,15 +1374,19 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const cfg = deps.config();
       // What is HELD is always carried (its stop and its liquidation are
       // watched whatever the switch says); the allowed markets only while
-      // perps are on.
+      // perps are on — the owner's switch AND the operator's ceiling, which
+      // takes opens away and so needs no market a book does not hold.
       const ids = new Set<number>(lastHeldMarkets);
-      if (cfg.perpsEnabled) {
+      if (cfg.perpsEnabled && cfg.perpsOperatorCeiling !== "off") {
         for (const k of cfg.perpsMarkets) {
           const id = perpMarketByKey(k)?.marketId;
           if (id !== undefined) ids.add(id);
         }
       }
       return [...ids].sort((x, y) => x - y);
+    },
+    heldMarketIds() {
+      return [...new Set(lastHeldMarkets)].sort((x, y) => x - y);
     },
   };
   return lane;
