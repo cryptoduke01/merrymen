@@ -10,7 +10,13 @@ import {
   expectedCashUsdg,
   heldBreakerObservationUsdg,
   lookAtCash,
+  matchInferredDelta,
   opsHoldInference,
+  RECEIPT_FLOOR_SKEW_BLOCKS,
+  RECEIPT_MARGIN_BLOCKS,
+  RECEIPT_MAX_WINDOW_BLOCKS,
+  receiptFloorAfter,
+  receiptWindow,
   settlementDelta,
   STRANDED_RESOLVE_WINDOW_SEC,
   wroteSince,
@@ -149,5 +155,57 @@ describe("heldBreakerObservationUsdg — what a held look may still show the bre
     const queued = [s(900, -5n * U), s(1_000, -10n * U), s(1_100, null)];
     assert.equal(expectedCashUsdg({ cashUsdg: 100n * U, since: 1_000 }, queued), 90n * U);
     assert.equal(expectedCashUsdg(null, queued), null);
+  });
+});
+
+describe("RULE 4 — a receipt before an opinion: where to look, and what counts as THE receipt", () => {
+  const flow = (direction: "in" | "out", amountUsdg6: bigint, txHash = "0xaa") => ({ direction, amountUsdg6, txHash });
+
+  it("a window runs from the baseline's head less the margin up to this look's head", () => {
+    const w = receiptWindow({ baselineHead: 10_000n, floor: 1_000n, head: 10_150n });
+    assert.deepEqual(w, { fromBlock: 10_001n - RECEIPT_MARGIN_BLOCKS, toBlock: 10_150n });
+  });
+
+  it("THE FLOOR WINS over the margin: no window reaches a block an inferred flow may stand for", () => {
+    // The last inferring look read head 9,950: its cash, and so its movement,
+    // was below that. The margin alone would reach back past it.
+    const floor = receiptFloorAfter(null, 9_950n)!;
+    assert.equal(floor, 9_950n + RECEIPT_FLOOR_SKEW_BLOCKS);
+    const w = receiptWindow({ baselineHead: 10_000n, floor, head: 10_150n });
+    assert.deepEqual(w, { fromBlock: floor + 1n, toBlock: 10_150n });
+  });
+
+  it("no window without a head, a floor or a baseline head — and none that is empty or wider than one look reads", () => {
+    assert.ok("none" in receiptWindow({ baselineHead: 10_000n, floor: 1_000n, head: null }));
+    assert.ok("none" in receiptWindow({ baselineHead: 10_000n, floor: null, head: 10_150n }), "a process that has not placed its floor reads nothing");
+    assert.ok("none" in receiptWindow({ baselineHead: null, floor: 1_000n, head: 10_150n }));
+    // The first look after a start: its floor is above the head the next look reads.
+    const floor = receiptFloorAfter(null, 10_000n);
+    assert.ok("none" in receiptWindow({ baselineHead: 10_000n, floor, head: 10_050n }), "too soon after the floor: nothing to read");
+    const wide = receiptWindow({ baselineHead: 1_000n, floor: 0n, head: 1_000n + RECEIPT_MAX_WINDOW_BLOCKS });
+    assert.ok("none" in wide && /wider than one look reads/.test(wide.none));
+    const widest = receiptWindow({ baselineHead: RECEIPT_MARGIN_BLOCKS, floor: 0n, head: RECEIPT_MAX_WINDOW_BLOCKS });
+    assert.deepEqual(widest, { fromBlock: 1n, toBlock: RECEIPT_MAX_WINDOW_BLOCKS }, "exactly one window's width still reads");
+  });
+
+  it("the floor only ever rises, and an inferring look that could not read its head makes it unknown", () => {
+    assert.equal(receiptFloorAfter(500n, 100n), 500n, "never lowered by an older head");
+    assert.equal(receiptFloorAfter(100n, 500n), 500n + RECEIPT_FLOOR_SKEW_BLOCKS);
+    assert.equal(receiptFloorAfter(500n, null), null, "unknown, so no window opens until a look places it again");
+  });
+
+  it("EXACTLY ONE capital transfer, equal to the change to the micro-USDG, in its direction", () => {
+    const deposit = flow("in", 59_954_460n);
+    assert.deepEqual(matchInferredDelta([deposit], 59_954_460n), { match: deposit }, "Alan's 10-18 top-up");
+    const withdrawal = flow("out", 5_000_000n);
+    assert.deepEqual(matchInferredDelta([withdrawal], -5_000_000n), { match: withdrawal });
+  });
+
+  it("anything else is no receipt: none, two, another amount, the wrong direction, or no change at all", () => {
+    assert.ok("none" in matchInferredDelta([], 59_954_460n));
+    assert.ok("none" in matchInferredDelta([flow("in", 30_000_000n), flow("in", 29_954_460n, "0xbb")], 59_954_460n), "two that sum to it are not one that is it");
+    assert.ok("none" in matchInferredDelta([flow("in", 59_954_461n)], 59_954_460n), "a micro-USDG off is a different movement");
+    assert.ok("none" in matchInferredDelta([flow("out", 59_954_460n)], 59_954_460n), "a withdrawal does not explain a deposit");
+    assert.ok("none" in matchInferredDelta([flow("in", 1n)], 0n));
   });
 });
