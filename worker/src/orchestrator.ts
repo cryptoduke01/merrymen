@@ -6707,7 +6707,9 @@ async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
   const { tenant, lease } = home;
   // Never one this build started (operatorHold holds it), and its book is not
   // one the EVM mirror may copy: signalled like every process, copied never.
-  if (evmFleetId(tenant) === null) {
+  // A Perps worker's key is its owner's address and `:perps` (worker-key.ts):
+  // one this build started, final-passed like any other under its own lease.
+  if (evmFleetId(tenant) === null && !isPerpsWorkerKey(tenant.toLowerCase())) {
     log(`[alert] ${unsupportedFleetIdLabel(tenant)}: not a Robinhood Chain tenant — no final pass; its home is left as it is`);
     return "skipped";
   }
@@ -6732,7 +6734,7 @@ async function drainFinalPass(home: DrainHome): Promise<FinalPassOutcome> {
   const restoreBlocked = readRestoreBlocked(dir) !== null;
   let authorityGone: boolean;
   try {
-    authorityGone = !(await getGrantStore("spot").get(tenant as `0x${string}`)) || killRequested(dir);
+    authorityGone = !(await slotGrant(tenant)) || killRequested(dir);
   } catch {
     // Unconfirmed is not present: never publish on it.
     authorityGone = true;
@@ -6949,6 +6951,26 @@ export async function reconcile(): Promise<void> {
       cancelRestart(key);
       if (children.has(key)) log(`${key}: MERRYMEN_PERPS is not paper — its Perps worker is stood down; its book is kept and its paper positions are frozen`);
       killChild(key);
+    }
+    /**
+     * AND ITS LAST ROWS UP, THEN ITS LEASE BACK. A stood-down Perps worker is
+     * still wanted, so no removed-home cleanup will ever copy what it booked
+     * after the last mirror pass — fills, funding, a protective close — and a
+     * redeploy without a persistent home would lose them. Once it has exited,
+     * the same final pass as an expired worker's (retiredWorkerPass) runs
+     * under the lease it held, and only a complete copy lets the lease go; a
+     * stalled or partial one keeps the lease and the home, and tries again on
+     * the next pass. Expiry retirement, when it has the worker, does this
+     * itself.
+     */
+    for (const [key, lease] of [...leases]) {
+      if (!isPerpsWorkerKey(key) || retiringExpired.has(key)) continue;
+      if (children.has(key) || exitingChildren.has(key) || spawning.has(key) || restartPending.has(key)) continue;
+      if (!lease.healthy()) continue;
+      if (existsSync(path.join(childHome(key), "merrymen.db")) && !(await mirrorRetiredWorker(key, lease, true, false))) continue;
+      if (leases.get(key) !== lease) continue;
+      await releaseLease(key);
+      log(`${key}: stood-down Perps worker's final mirror pass completed — its lease is released while MERRYMEN_PERPS is not paper`);
     }
   }
   // OUT OF THE ROLLOUT, LEFT AS THE INCIDENT LEFT IT: of expiry retirement,
@@ -7378,7 +7400,12 @@ export async function reconcile(): Promise<void> {
    * have run the tenant since. Retain the original financial source even
    * after a successful copy: accounting IDs and deduplication are durable.
    */
-  for (const tenant of childHomeTenants()) {
+  //
+  // AND EVERY PERPS WORKER'S HOME (children-perps/), by the same rules against
+  // its own wallet's store: its book retained, its revoked key's copy scrubbed.
+  // Not on a pass whose Perps roster did not read: then every Perps home is
+  // wanted (perpsRosterForPass), so none is reached here.
+  for (const tenant of [...childHomeTenants(), ...perpsChildHomeKeys()]) {
     if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant) || retiringExpired.has(tenant) || exitingChildren.has(tenant) || holders.has(tenant)) continue;
     // Before the await, so no restart timer can start a spawn in this home
     // while its ledger is being read.
@@ -7401,9 +7428,10 @@ export async function reconcile(): Promise<void> {
     try {
       // The earlier roster can be stale after the final mirror's awaits.
       // Never erase a renewal/re-grant's retained home on that old snapshot.
-      const retained = (await getGrantStore("spot").listTenants()).some(t => t.toLowerCase() === tenant);
+      const slot = slotOf(tenant);
+      const retained = (await getGrantStore(slot.purpose).listTenants()).some(t => t.toLowerCase() === slot.owner);
       if (retained || localMemoryWriterPresent(tenant)) continue;
-      const current = await getGrantStore("spot").get(tenant as `0x${string}`);
+      const current = await slotGrant(tenant);
       if (current || localMemoryWriterPresent(tenant)) continue;
       const home = childHome(tenant);
       // A TELEGRAM KILL NOT CARRIED OUT YET KEEPS ITS HOME. Its grant is removed
@@ -7415,7 +7443,8 @@ export async function reconcile(): Promise<void> {
       // revoked session key's cached copy, the bot token and memory go now, as
       // for any removed agent, and the home with its request stays for the
       // order ferry and the next pass.
-      const killPending = killRequested(home) && (await honourKill(tenant, Math.floor(Date.now() / 1000))).outcome === "failed";
+      // A kill is its OWNER's, wherever its request sits (honourKill).
+      const killPending = killRequested(home) && (await honourKill(slot.owner, Math.floor(Date.now() / 1000))).outcome === "failed";
       scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true });
       forgetTgGroupsHome(home, log);
       forgetPersonalMemoryHome(home, log);
@@ -7445,7 +7474,12 @@ export async function reconcile(): Promise<void> {
   // branch above reaches only a child running on this replica right now. The
   // listing succeeded (an unreadable store returned above), so `wanted` is
   // the fleet's. See sweepTgGroups.
-  await sweepTgGroups(wanted, listedAtMs);
+  //
+  // WITH EVERY PERPS WORKER'S OWNER: the DM memory a Perps worker's bot keeps
+  // is stored under its owner, the login's, and a login with only a Perps
+  // grant is still a login. And NOT AT ALL on a pass whose Perps roster did
+  // not read: a missing owner there is an unread one, not a removed one.
+  if (perps.readable) await sweepTgGroups(new Set([...wanted, ...perps.keys.map((k) => workerOwner(k))]), listedAtMs);
   // Release any lease we still hold for a tenant that is no longer wanted — both
   // the kill-switch case above and a lease left over from a child that has since
   // exited. Holding a lease for a tenant we won't arm would block another replica
