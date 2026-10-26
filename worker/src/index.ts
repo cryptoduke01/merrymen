@@ -4512,8 +4512,8 @@ async function main() {
         await addEvent(
           agentId,
           "warn",
-          `that ${residual > 0n ? "deposit" : "withdrawal"} of ${fmt(residual > 0n ? residual : -residual)} USDG was ` +
-            `booked without its transaction (${why}). From the next restart this agent's contributions read as ` +
+          `the ${residual > 0n ? "deposit" : "withdrawal"} of ${fmt(residual > 0n ? residual : -residual)} USDG just ` +
+            `booked has no transaction behind it (${why}). From the next restart this agent's contributions read as ` +
             `unknown, so no performance fee is charged and the Brain opens no new positions, until an operator ` +
             `repairs the flow.`,
         );
