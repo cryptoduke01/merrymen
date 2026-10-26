@@ -2378,10 +2378,26 @@ export async function mirrorPerpLedger(args: {
   // ── snapshots: positions and the account row ─────────────────────────────
   //
   // Small (a market per row, two rails per agent) and rewritten in place, so
-  // every row is read every pass and copied only when it is NEWER than the
-  // row already here — strictly newer, so an unchanged row is not rewritten
-  // (and not counted) on every pass. The one cost: a second write within the
-  // same second as a copy waits for the row's next write, one tick away.
+  // every row is read every pass and copied when it is NEWER than the row
+  // already here — or, at the SAME stamp, when it says something different.
+  //
+  // A TIE GOES TO THE CHILD. The stamp is in seconds, and the child keeps
+  // committing while a pass reads it from another process, so one pass can
+  // copy a write and miss a second one made within the same second. For a
+  // position that second write is as often as not the CLOSE — the hour's
+  // funding booked, then the stop or a liquidation, in one executor pass,
+  // each its own commit — and a flat row is not written again until that
+  // market next trades; nor does the flatten below look at a market the
+  // child still holds a row for. Strictly-newer would leave the shared book
+  // showing the closed position open, its margin and its stop with it, for
+  // as long as the market stayed quiet. At a tie the child's row is the
+  // later word: it is what the shared row was copied from, and the shared
+  // side's own writers never race it within a second — the flatten below
+  // never touches a market the child holds, and the held reset
+  // (paper-checkpoint.ts resetBlockedPaperBookIn) runs only for a tenant
+  // with no worker, whose ledger no pass reads. A tie that says the same
+  // thing is not a copy: an unchanged row is still not rewritten (and not
+  // counted) on every pass. An OLDER child row never wins, whatever it says.
   //
   // BOTH FROM ONE CHILD READ. The flatten below takes its evidence from the
   // newest write on each rail across BOTH tables, and two separate reads
@@ -2429,25 +2445,27 @@ export async function mirrorPerpLedger(args: {
         // rebuilt child restarts both of these, and neither may go backwards
         // here — the high-water only rises (compared as integers, never as
         // the TEXT it is stored in, where "9" sorts above "10"), and a key
-        // once retired stays retired. Everything else follows the newer row.
+        // once retired stays retired. Everything else follows the newer row
+        // — the CHILD'S ON A TIE, for the reason the snapshots' note above
+        // gives; `changed` below keeps a tie that says nothing new unwritten.
         const childHigh = textInt(r.nonce_high_water);
         const heldHigh = textInt(held.nonce_high_water);
         const high = childHigh === null ? heldHigh : heldHigh === null || childHigh > heldHigh ? childHigh : heldHigh;
         const retired = [...new Set([...retiredOf(held.retired_pubkeys), ...retiredOf(r.retired_pubkeys)])].sort();
-        const newer = Number(r.updated_at ?? 0) > Number(held.updated_at ?? 0);
-        const pick = (c: string) => (newer ? (r[c] ?? null) : (held[c] ?? null));
+        const childWins = Number(r.updated_at ?? 0) >= Number(held.updated_at ?? 0);
+        const pick = (c: string) => (childWins ? (r[c] ?? null) : (held[c] ?? null));
         const next: Row = {
           account_index: r.account_index ?? held.account_index ?? null,
-          registered_pubkey: newer ? (r.registered_pubkey ?? held.registered_pubkey ?? null) : (held.registered_pubkey ?? null),
+          registered_pubkey: childWins ? (r.registered_pubkey ?? held.registered_pubkey ?? null) : (held.registered_pubkey ?? null),
           retired_pubkeys: JSON.stringify(retired),
           nonce_high_water: high === null ? null : high.toString(),
           paper_collateral_micro: pick("paper_collateral_micro"),
-          // Kind and time only, from whichever row is newer (sharedIncident).
-          incident_json: newer ? incident : (held.incident_json ?? null),
+          // Kind and time only, from whichever row wins (sharedIncident).
+          incident_json: childWins ? incident : (held.incident_json ?? null),
           entries_halted: pick("entries_halted") ?? 0,
           last_venue_read_at: pick("last_venue_read_at"),
           last_snapshot_time: Math.max(Number(r.last_snapshot_time ?? 0), Number(held.last_snapshot_time ?? 0)) || null,
-          updated_at: newer ? r.updated_at : held.updated_at,
+          updated_at: childWins ? r.updated_at : held.updated_at,
         };
         const changed = Object.keys(next).some((k) => String(next[k] ?? "") !== String(held[k] ?? ""));
         if (!changed) continue;
@@ -2475,14 +2493,24 @@ export async function mirrorPerpLedger(args: {
     let n = 0;
     await shared.tx(async (db) => {
       const setCols = PERP_POSITION_COLS.filter((c) => c !== "agent_id" && c !== "mode" && c !== "market_id");
+      // What a tie is judged on: every copied column but the stamp the two
+      // rows share. IS DISTINCT FROM, so NULL against a level (a stop
+      // cleared, a recorded stop gone with the close) is a difference — and
+      // spelled the same on sqlite (3.39+) and Postgres. One guarded
+      // statement, so the judgement and the write are one row-level step.
+      const tieCols = setCols.filter((c) => c !== "updated_at");
       for (const r of positions) {
         const agent = String(r.agent_id ?? "").toLowerCase();
         const res = await db
           .prepare(
             `UPDATE perp_positions SET ${setCols.map((c) => `${c} = ?`).join(", ")}
-              WHERE agent_id = ? AND mode = ? AND market_id = ? AND updated_at < ?`,
+              WHERE agent_id = ? AND mode = ? AND market_id = ?
+                AND (updated_at < ? OR (updated_at = ? AND (${tieCols.map((c) => `${c} IS DISTINCT FROM ?`).join(" OR ")})))`,
           )
-          .run(...setCols.map((c) => r[c] ?? null), agent, r.mode, r.market_id, r.updated_at);
+          .run(
+            ...setCols.map((c) => r[c] ?? null), agent, r.mode, r.market_id, r.updated_at, r.updated_at,
+            ...tieCols.map((c) => r[c] ?? null),
+          );
         if (Number(res.changes) > 0) {
           n += Number(res.changes);
           continue;

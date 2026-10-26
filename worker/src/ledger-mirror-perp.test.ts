@@ -21,6 +21,13 @@
  *               keyset moves every pass that finds rows — and a pass that
  *               filled its last page says hasMore, which every completeness
  *               check reads.
+ *   same second a position the child closed — written flat in place — in the
+ *               same second a pass had copied it open was never copied: the
+ *               copy took only a strictly newer row, and the flatten skips a
+ *               market the child still holds, so the shared book showed the
+ *               position open until that market next traded (the slice 4
+ *               review: snapshot-same-second-close-lost). Now a tie goes to
+ *               the child whenever it says something different.
  *   own account a row under another account is counted and never copied; with
  *               no account to name, nothing is.
  *   inert       a Spot child — every perp table, none holding a row — asks
@@ -274,6 +281,59 @@ describe("the keyset cursor: a burst of any size is copied, and nothing after it
     const after = shared.raw.prepare("SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = 'perp_funding'").get(TENANT) as { last_id: number; last_stamp: number };
     assert.deepEqual([Number(after.last_id), Number(after.last_stamp)], [6000, 2]);
     assert.ok(shared.raw.prepare("SELECT 1 FROM perp_funding WHERE funding_id = 'old'").get(), "…and its row inside the lookback is still copied");
+  });
+});
+
+describe("the snapshots: a second write in the second a pass copied the first", () => {
+  const position = (raw: DatabaseSync) =>
+    ({ ...(raw.prepare("SELECT side, base, allocated_margin_micro, stop_trigger, recorded_stop_trigger, updated_at FROM perp_positions WHERE agent_id = ?").get(A) as Record<string, unknown>) });
+
+  it("a position closed in the same second it was copied open goes flat here — and a tie that says nothing new is not rewritten", async () => {
+    const shared = perpDb();
+    const child = perpDb();
+    child.raw.prepare("INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, updated_at) VALUES (?, 'paper', '0', 100)").run(A);
+    // The hour's funding booked on the open position (executor.ts), at 200…
+    child.raw.prepare(`INSERT INTO perp_positions (agent_id, mode, market_id, side, base, entry_price, allocated_margin_micro, imf_bp, margin_mode,
+       stop_trigger, stop_price, recorded_stop_trigger, recorded_stop_price, funding_hour_applied, opened_at, updated_at, source)
+       VALUES (?, 'paper', 1, 'long', '100', '5000', '1000000', 500, 'isolated', '4900', '4890', '4900', '4890', 3600, 100, 200, 'paper')`).run(A);
+    // …which a pass reads, from its own process, before the executor's next commit.
+    assert.equal((await pass(child.db, shared.db, 200)).copied.perp_positions, 1);
+    // Still in second 200, the same executor pass fires the stop: the row is
+    // written flat IN PLACE, as setPerpPositions writes it — the child still
+    // holds a row for the market, so the flatten-on-evidence never looks at it.
+    child.raw.prepare(`UPDATE perp_positions SET side = NULL, base = '0', allocated_margin_micro = '0', entry_price = NULL, stop_trigger = NULL,
+       stop_price = NULL, recorded_stop_trigger = NULL, recorded_stop_price = NULL, opened_at = NULL, updated_at = 200 WHERE agent_id = ?`).run(A);
+    const closed = await pass(child.db, shared.db, 215);
+    assert.deepEqual(closed.failed, {});
+    assert.equal(closed.copied.perp_positions, 1, "the close arrives on the very next pass");
+    assert.deepEqual(position(shared.raw), { side: null, base: "0", allocated_margin_micro: "0", stop_trigger: null, recorded_stop_trigger: null, updated_at: 200 },
+      "flat, recorded stop and all — not the open position, indefinitely");
+    // A flat row is not written again until the market trades: every later
+    // pass meets the same tie, and it must say nothing.
+    for (const now of [230, 3600]) assert.equal((await pass(child.db, shared.db, now)).copied.perp_positions, undefined, `${now}: an unchanged row is not rewritten`);
+    // The tie goes to the child, and only the tie: an OLDER child row that
+    // differs is still not a newer word about the position.
+    child.raw.prepare("UPDATE perp_positions SET side = 'short', base = '5', updated_at = 199 WHERE agent_id = ?").run(A);
+    assert.equal((await pass(child.db, shared.db, 3610)).copied.perp_positions, undefined);
+    assert.equal(position(shared.raw).base, "0");
+  });
+
+  it("an account row rewritten in the same second it was copied: the shared row learns the second write", async () => {
+    const shared = perpDb();
+    const child = perpDb();
+    child.raw.prepare("INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water, updated_at) VALUES (?, 'paper', '7000000', '5', 300)").run(A);
+    assert.equal((await pass(child.db, shared.db, 300)).copied.perp_accounts, 1);
+    // A close's credit (and an entries halt, should a writer ever set one) in second 300.
+    child.raw.prepare(`UPDATE perp_accounts SET paper_collateral_micro = '9000000', entries_halted = 1, incident_json = '{"kind":"owner-pause","at":300,"detail":{"x":1}}', updated_at = 300 WHERE agent_id = ?`).run(A);
+    assert.equal((await pass(child.db, shared.db, 315)).copied.perp_accounts, 1);
+    const row = shared.raw.prepare("SELECT paper_collateral_micro, entries_halted, incident_json, nonce_high_water FROM perp_accounts WHERE agent_id = ?").get(A) as Record<string, unknown>;
+    assert.deepEqual({ ...row, incident_json: JSON.parse(String(row.incident_json)) },
+      { paper_collateral_micro: "9000000", entries_halted: 1, incident_json: { kind: "owner-pause", at: 300 }, nonce_high_water: "5" }, "kind and time only, as ever");
+    for (const now of [330, 900]) assert.equal((await pass(child.db, shared.db, now)).copied.perp_accounts, undefined, `${now}: an unchanged row is not rewritten`);
+    // And an older one still loses.
+    child.raw.prepare("UPDATE perp_accounts SET paper_collateral_micro = '1', updated_at = 299 WHERE agent_id = ?").run(A);
+    await pass(child.db, shared.db, 910);
+    assert.equal((shared.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ?").get(A) as { paper_collateral_micro: string }).paper_collateral_micro, "9000000");
   });
 });
 

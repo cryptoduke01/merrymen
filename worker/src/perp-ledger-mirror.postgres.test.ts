@@ -9,7 +9,8 @@
  *               violation rolled back alone, where Postgres would otherwise
  *               abort the batch), hasMore, the own-account filter, and a
  *               missing perps_grants asked of the catalogue inside a
- *               transaction without aborting it.
+ *               transaction without aborting it; and the snapshots' tie
+ *               rule, IS DISTINCT FROM against typed columns.
  *   checkpoint  perp_json added by applyLedgerMigrations' bounded ADD
  *               COLUMN, upserted with NULL and without; the restore's
  *               staleness check against the mirrored tape; the upgrade path's
@@ -185,6 +186,36 @@ test("Postgres: the paper perp book's mirror, checkpoint and import", { skip: !u
     assert.deepEqual(await one("SELECT base, side, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = $1", [account]),
       { base: "0", side: null, recorded_stop_trigger: null, recorded_stop_price: null });
     assert.equal((await one("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = $1", [account]))!.nonce_high_water, "1790000000001");
+  });
+
+  await t.test("a tie goes to the child: a position closed in the second a pass copied it open goes flat, and its account learns the credit", async () => {
+    const id = ++n, owner = address(0xb000 + id), account = address(0xc000 + id);
+    const tenant = workerKey(owner, "perps");
+    await putGrant("perps_grants", owner, account);
+    const child = await childLedger();
+    child.raw.prepare(`INSERT INTO perp_positions (agent_id, mode, market_id, side, base, entry_price, allocated_margin_micro, imf_bp, margin_mode,
+        stop_trigger, stop_price, recorded_stop_trigger, recorded_stop_price, funding_hour_applied, opened_at, updated_at, source)
+      VALUES (?, 'paper', 1, 'long', '20', '800000', '8000000', 5000, 'isolated', '760000', '744800', '760000', '744800', 3600, 8000, 8100, 'paper')`).run(account);
+    child.raw.prepare("INSERT INTO perp_accounts (agent_id, mode, nonce_high_water, paper_collateral_micro, updated_at) VALUES (?, 'paper', '1790000000001', '0', 8100)").run(account);
+    const open = await mirrorTenant({ tenant, child: child.db, shared, nowSec: 8100 });
+    assert.equal(open.failed, undefined, JSON.stringify(open.failed));
+    // The stop fires within second 8100: flat in place, its loss realised
+    // (NULL → a value, and levels → NULL: IS DISTINCT FROM against typed
+    // columns, both ways), the collateral credited, every stamp unmoved.
+    child.raw.exec(`UPDATE perp_positions SET side = NULL, base = '0', allocated_margin_micro = '0', entry_price = NULL, stop_trigger = NULL,
+      stop_price = NULL, recorded_stop_trigger = NULL, recorded_stop_price = NULL, opened_at = NULL, realized_micro = '-1200000'`);
+    child.raw.exec("UPDATE perp_accounts SET paper_collateral_micro = '6800000'");
+    const closed = await mirrorTenant({ tenant, child: child.db, shared, nowSec: 8115 });
+    assert.equal(closed.failed, undefined, JSON.stringify(closed.failed));
+    assert.equal(closed.copied.perp_positions, 1);
+    assert.equal(closed.copied.perp_accounts, 1);
+    assert.deepEqual(await one("SELECT side, base, stop_trigger, recorded_stop_trigger, recorded_stop_price, realized_micro, updated_at FROM perp_positions WHERE agent_id = $1", [account]),
+      { side: null, base: "0", stop_trigger: null, recorded_stop_trigger: null, recorded_stop_price: null, realized_micro: "-1200000", updated_at: 8100 });
+    assert.equal((await one("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = $1", [account]))!.paper_collateral_micro, "6800000");
+    const again = await mirrorTenant({ tenant, child: child.db, shared, nowSec: 8130 });
+    assert.equal(again.failed, undefined, JSON.stringify(again.failed));
+    assert.equal(again.copied.perp_positions, undefined, "a tie that says nothing new is not rewritten");
+    assert.equal(again.copied.perp_accounts, undefined);
   });
 
   await t.test("a Spot child beside it: no shared perp table is read or written", async () => {
