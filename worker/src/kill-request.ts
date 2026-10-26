@@ -86,6 +86,16 @@ export const KILL_DONE_PERPS_TEXT =
   "Your Perps wallet's stored trading grant is deleted too, so it can no longer sign anything either.";
 
 /**
+ * The ✅ for a kill sent to the bot a login's PERPS worker runs (it runs the
+ * login's bot when there is no Spot grant to run it, orchestrator.ts bot
+ * seat). Its grant is the Perps wallet's; a Spot grant from before the kill
+ * went with it. Silent about where any money is, as KILL_DONE_PERPS_TEXT is.
+ */
+export const KILL_DONE_PERPS_HOME_TEXT =
+  "✅ Kill switch done: your Perps wallet's stored trading grant is deleted, so its agent can no longer sign anything, " +
+  "and any Spot wallet grant from before the kill is deleted too. Sign a new grant on the dashboard to ride again.";
+
+/**
  * Which signed permission a grant is. It hashes `serialized`, the signed
  * permission itself, and not `smartAccount:grantedAt`. A re-sign keeps the
  * account, and `grantedAt` is whole seconds.
@@ -402,6 +412,13 @@ export type KillOutcome =
  * could not do its part.
  */
 export interface KillHalves {
+  /**
+   * Revoke the tenant's SPOT grant by the same cutoff, for a request whose
+   * home is a Perps worker's: there the store judged first is the Perps one,
+   * and the Spot grant is one more half. True when one was revoked by this
+   * call. Absent for a Spot home's request, whose store is Spot's.
+   */
+  spot?: (coveredSec: number) => Promise<boolean>;
   /** Turn the tenant's Solana strategy off (solana-kill.ts). */
   solana?: () => Promise<unknown>;
   /**
@@ -473,6 +490,10 @@ export async function honourKillRequest(
   }
   const failures: string[] = [];
   let perpsRemoved = false;
+  let spotRemoved = false;
+  if (halves.spot) {
+    try { spotRemoved = await halves.spot(coveredSec); } catch (e) { failures.push(`the Spot wallet could not be stopped: ${message(e)}`); }
+  }
   if (halves.solana) {
     try { await halves.solana(); } catch (e) { failures.push(`the Solana strategy could not be stopped: ${message(e)}`); }
   }
@@ -487,7 +508,7 @@ export async function honourKillRequest(
   }
   if (typeof result === "object" || failures.length > 0) {
     // Owed by this call alone: the DELETE that removed a grant happens once.
-    if (result === "removed" || perpsRemoved) oweKillConfirm(home, perpsRemoved);
+    if (result === "removed" || perpsRemoved || spotRemoved) oweKillConfirm(home, perpsRemoved);
     if (typeof result === "object") {
       return { outcome: "failed", request, error: [result.failed, ...failures].join(", and ") };
     }
@@ -496,7 +517,7 @@ export async function honourKillRequest(
   }
   if (result !== "newer") {
     const owed = takeKillConfirm(home);
-    return { outcome: "revoked", request, removed: result === "removed" || perpsRemoved || owed !== null, perps: perpsRemoved || owed?.perps === true };
+    return { outcome: "revoked", request, removed: result === "removed" || perpsRemoved || spotRemoved || owed !== null, perps: perpsRemoved || owed?.perps === true };
   }
   // SUPERSEDED, NOT DELETED: each killed grant's identity stays in this home.
   // Only the files this call read are renamed. A request the child wrote since

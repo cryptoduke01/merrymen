@@ -179,6 +179,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "signalFleetForDrain",
       "spawnChild",
       "spawnHolder",
+      // A kill stands every worker it revokes down at once, a hold process
+      // included (standDownHolder), before its ✅ can go; it starts nothing.
+      "standDownForKill",
       "standDownHolder",
       "standDownLostLeasesNow",
       "startHolderProcess",

@@ -89,7 +89,7 @@ import {
   type DrainHook, type DrainLimits, type FinalPassOutcome,
 } from "./fleet-drain";
 import { getGrantStore } from "./grant-store";
-import { KILL_DONE_PERPS_TEXT, KILL_DONE_TEXT, honourKillRequest, killRequested, writeKillRequest, type KillOutcome } from "./kill-request";
+import { KILL_CLOCK_SLACK_SEC, KILL_DONE_PERPS_HOME_TEXT, KILL_DONE_PERPS_TEXT, KILL_DONE_TEXT, honourKillRequest, killRequested, readKillRequest, writeKillRequest, type KillOutcome } from "./kill-request";
 import { stopSolanaForKill } from "./solana-kill";
 import { stopPerpsForKill } from "./perps-kill";
 import { CONTROLS_ARMED_FILE, CONTROL_RECEIPTS_SCHEMA, LEGACY_EVENTS_BOT, armOwnerControls, durablePauseLifted, readControlsEvidence, type ControlScope } from "./recovery-reply-arm";
@@ -1046,17 +1046,40 @@ function ownerHomes(tenant: string): string[] {
   return evmFleetId(owner) === null ? [spot] : [spot, childHome(workerKey(owner, "perps"))];
 }
 
+/** When each Spot grant was stored, by owner, as the pass's roster last read it: what a kill's cutoff is judged against. */
+let lastSpotStoredAt: Map<string, number | null> = new Map();
+
 /**
- * A TELEGRAM KILL IS PENDING FOR THIS WORKER: in either of its owner's homes.
+ * A TELEGRAM KILL IS PENDING FOR THIS WORKER: nothing is handed over,
+ * refreshed or started while it is.
  *
- * An owner's /kill stops both wallets (perps-kill.ts), and the bot that took
- * it lives in one home or the other (the Spot worker's, or the Perps worker's
- * when there is no Spot one). Until reconcile has carried it out, neither
- * worker is handed a key, refreshed, or started — the same latch a Spot
- * worker has always had on its own home's request.
+ * Its OWN home's request latches it outright, as a Spot worker's always has,
+ * until a grant signed after the kill supersedes it (honourKillRequest). And
+ * the OTHER home's — an owner's /kill stops both wallets, and the bot that
+ * took it lives in one home or the other (the Spot worker's, or the Perps
+ * worker's when there is no Spot one) — latches it only for a grant that
+ * kill covers: one stored at or before the request's cutoff, judged as the
+ * store judges it (removeUnlessNewer). A grant signed after the kill is the
+ * owner's later decision, and a request carried out stays in a home that
+ * keeps its book, so without the cutoff one old kill would hold the other
+ * wallet's every later grant for ever. An unreadable state, or a grant whose
+ * storing time this pass could not read, is latched: fail closed.
  */
 function killPendingFor(tenant: string): boolean {
-  return ownerHomes(tenant).some((home) => killRequested(home));
+  if (killRequested(childHome(tenant))) return true;
+  const slot = slotOf(tenant);
+  if (evmFleetId(slot.owner) === null) return false;
+  const other = slot.perps ? childHome(slot.owner) : childHome(workerKey(slot.owner, "perps"));
+  const request = readKillRequest(other, Math.floor(Date.now() / 1000));
+  if (request === null) return false;
+  if (request === "unreadable") return true;
+  const storedAt = (slot.perps ? lastPerpsPass.storedAt : lastSpotStoredAt).get(tenant.toLowerCase());
+  return !(typeof storedAt === "number" && storedAt > request.killedAt + KILL_CLOCK_SLACK_SEC);
+}
+
+/** A kill request is waiting in either of an owner's homes: honourKill has something to carry out. */
+function killRequestedAnywhere(owner: `0x${string}`): boolean {
+  return ownerHomes(owner).some((home) => killRequested(home));
 }
 
 /**
@@ -6285,7 +6308,7 @@ export { standDownLostLeasesNow as standDownLostLeasesForTest };
  * Best effort: a confirmation that fails to send is logged. The owner was
  * told what to do if none arrives.
  */
-let confirmKillDone = async (tenant: `0x${string}`, done: { perps: boolean } = { perps: false }): Promise<void> => {
+let confirmKillDone = async (tenant: `0x${string}`, done: { perps: boolean; perpsHome?: boolean } = { perps: false }): Promise<void> => {
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -6296,7 +6319,9 @@ let confirmKillDone = async (tenant: `0x${string}`, done: { perps: boolean } = {
     }
     // The Perps line only when this kill revoked a Perps grant: an owner with
     // no Perps wallet is told nothing about one.
-    const sent = await telegramSend()(to.botToken, to.chatId, done.perps ? `${KILL_DONE_TEXT}\n${KILL_DONE_PERPS_TEXT}` : KILL_DONE_TEXT);
+    // A kill sent to the bot the Perps worker runs is said as the Perps wallet's.
+    const text = done.perpsHome ? KILL_DONE_PERPS_HOME_TEXT : done.perps ? `${KILL_DONE_TEXT}\n${KILL_DONE_PERPS_TEXT}` : KILL_DONE_TEXT;
+    const sent = await telegramSend()(to.botToken, to.chatId, text);
     if (!sent.ok) log(`${tenant}: Telegram kill done, but the confirmation did not send — ${sent.reason ?? "unknown"}`);
   } catch (e) {
     log(`${tenant}: Telegram kill done, but the confirmation did not send — ${e instanceof Error ? e.message : String(e)}`);
@@ -6304,7 +6329,7 @@ let confirmKillDone = async (tenant: `0x${string}`, done: { perps: boolean } = {
 };
 
 /** Test seam: capture the confirmation instead of sending it. */
-export function setKillConfirmForTest(fn: (tenant: `0x${string}`, done?: { perps: boolean }) => Promise<void>): void {
+export function setKillConfirmForTest(fn: (tenant: `0x${string}`, done?: { perps: boolean; perpsHome?: boolean }) => Promise<void>): void {
   confirmKillDone = fn;
 }
 
@@ -6329,11 +6354,82 @@ export function setSolanaKillForTest(fn: (tenant: `0x${string}`) => Promise<unkn
 let stopPerps: (tenant: `0x${string}`, coveredSec: number) => Promise<boolean> = async (tenant, coveredSec) => {
   const perps = await stopPerpsForKill(tenant, { coveredSec });
   if (perps === "newer") log(`${tenant}: a Perps grant signed after the Telegram kill is kept`);
+  // AND ITS RUNNING WORKER, before the ✅ can go: revoked in the store is not
+  // stopped here, and the reconcile that would stand it down may be a pass
+  // away. Throws when it cannot, and the kill stays pending.
+  else standDownForKill(workerKey(tenant, "perps"));
   return perps === "stopped";
 };
+
+/**
+ * STAND ONE OF AN OWNER'S WORKERS DOWN FOR A KILL, synchronously: its restart
+ * cancelled, its process signalled, and its home's copy of the revoked grant
+ * removed, so nothing re-arms on it in the moments before reconcile has the
+ * rest. A copy that will not go throws: the kill is then incomplete, and stays
+ * pending until it does. No home, or no copy in it, is already done.
+ */
+function standDownForKill(key: string): void {
+  cancelRestart(key);
+  killChild(key);
+  if (holders.has(key)) standDownHolder(key);
+  try {
+    rmSync(path.join(childHome(key), "grant.json"));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`its worker's grant copy could not be removed (${(e as NodeJS.ErrnoException).code ?? "error"})`);
+  }
+}
 /** Test seam: replace the Perps stop. */
 export function setPerpsKillForTest(fn: (tenant: `0x${string}`, coveredSec: number) => Promise<boolean>): void {
   stopPerps = fn;
+}
+
+/**
+ * A KILL SENT TO THE BOT A LOGIN'S PERPS WORKER RUNS (its owner has no Spot
+ * grant to run the bot on: the bot seat), carried out as the owner's whole
+ * kill — every wallet, Solana too — from the Perps worker's home, where the
+ * request sits.
+ *
+ * THE PERPS GRANT IS THIS REQUEST'S OWN STORE'S: judged first, by the
+ * request's cutoff, and the one whose re-sign supersedes it — a Perps grant
+ * signed after the kill lifts this home's latch, as a Spot re-sign lifts a
+ * Spot home's. The rest are halves, each run whatever the others did: the
+ * Spot grant by the same cutoff, the Solana strategy, and the Perps wallet's
+ * paper strategy turned off unless a newer Perps grant replaced the one
+ * killed. Each worker a half revokes is stood down before the ✅ can go
+ * (standDownForKill). No request here: nothing is read beyond the listing.
+ */
+async function honourPerpsHomeKill(owner: `0x${string}`, nowSec: number): Promise<{ kill: KillOutcome; spot: "removed" | "absent" | "newer" | null }> {
+  const key = workerKey(owner, "perps");
+  const home = childHome(key);
+  if (!killRequested(home)) return { kill: { outcome: "none" }, spot: null };
+  let perpsResult: "removed" | "absent" | "newer" | undefined;
+  let spot: "removed" | "absent" | "newer" | null = null;
+  const perpsStore = {
+    removeUnlessNewer: async (tenant: `0x${string}`, coveredSec: number) => (perpsResult = await getGrantStore("perps").revokeForKill(tenant, coveredSec)),
+  };
+  const kill = await honourKillRequest(perpsStore, owner, home, nowSec, {
+    spot: async (coveredSec) => {
+      spot = await getGrantStore("spot").removeUnlessNewer(owner, coveredSec);
+      if (spot !== "newer") standDownForKill(owner);
+      return spot === "removed";
+    },
+    solana: () => stopSolana(owner),
+    perps: async (coveredSec) => {
+      // Its grant was this request's store's, above: what is left is the paper
+      // strategy (perps-kill.ts), judged by what that store answered.
+      const r = await stopPerpsForKill(owner, { coveredSec, store: { revokeForKill: async () => perpsResult ?? "absent" } });
+      if (r !== "newer") standDownForKill(key);
+      return perpsResult === "removed";
+    },
+  });
+  if (kill.outcome === "revoked" && kill.removed) {
+    log(`${owner}: Telegram kill (sent to its Perps worker's bot) honoured — grants removed from the store`);
+    void confirmKillDone(owner, { perps: kill.perps, perpsHome: true });
+    await forgetTgGroups(owner);
+  }
+  if (kill.outcome === "superseded") log(`${owner}: a Perps grant signed after the Telegram kill replaces it — arming that one`);
+  if (kill.outcome === "failed") log(`${owner}: Telegram kill (sent to its Perps worker's bot) pending, not carried out yet (${kill.error}) — nothing arms meanwhile`);
+  return { kill, spot };
 }
 
 /**
@@ -6346,10 +6442,22 @@ export function setPerpsKillForTest(fn: (tenant: `0x${string}`, coveredSec: numb
  * pass, and both are idempotent.
  */
 async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOutcome> {
+  // A KILL SENT TO THE BOT A PERPS WORKER RUNS sits in that worker's home, and
+  // is the same owner's kill (honourPerpsHomeKill). Carried out first, so its
+  // Spot half is in the store before this home's request is judged.
+  const perpsHome = evmFleetId(tenant) !== null ? await honourPerpsHomeKill(tenant, nowSec) : null;
   const k = await honourKillRequest(getGrantStore("spot"), tenant, childHome(tenant), nowSec, {
     solana: () => stopSolana(tenant),
     perps: (coveredSec) => stopPerps(tenant, coveredSec),
   });
+  // NO REQUEST IN THE SPOT HOME: what the Perps home's says, as THIS wallet's
+  // callers read it — `revoked` (stand the Spot worker down) only when the
+  // Spot grant went with it; a Spot grant signed after the kill stays wanted.
+  if (k.outcome === "none") {
+    if (!perpsHome || perpsHome.kill.outcome === "none" || perpsHome.kill.outcome === "failed") return perpsHome?.kill ?? k;
+    if (perpsHome.spot === "newer") return { outcome: "superseded", request: perpsHome.kill.request, perps: perpsHome.kill.perps };
+    return perpsHome.kill.outcome === "revoked" ? perpsHome.kill : { ...perpsHome.kill, outcome: "revoked", removed: false };
+  }
   if (k.outcome === "revoked" && k.removed) {
     log(`${tenant}: Telegram kill honoured — grant${k.perps ? "s (Spot and Perps)" : ""} removed from the store`);
     void confirmKillDone(tenant, { perps: k.perps });
@@ -6474,7 +6582,7 @@ async function perpsRosterForPass(nowSec: number, spotOwners: ReadonlySet<string
       sayTenantAlert(`roster:perps:${entry.tenant}`, `[alert] fleet: the Perps grant roster holds ${unsupportedFleetIdLabel(entry.tenant)}, which is not a Robinhood Chain address — this build never starts a Perps worker for it`);
       continue;
     }
-    if (!spotOwners.has(owner) && killPendingFor(owner)) {
+    if (!spotOwners.has(owner) && killRequestedAnywhere(owner)) {
       const kill = await honourKill(owner, nowSec);
       // Its Perps half revoked this very grant: nothing left to want.
       if (kill.outcome === "revoked" && kill.perps) continue;
@@ -6515,7 +6623,11 @@ function sayUnsupportedHome(dir: string, name: string): void {
  * sweep that follows keeps the original book, as it does for any revoke.
  */
 function pendingKillTenants(): `0x${string}`[] {
-  return childHomeTenants().filter((n) => killRequested(childHome(n)));
+  // And every Perps worker's home (honourKill carries a request there out as
+  // its owner's): the owners, once each.
+  const owners = new Set<`0x${string}`>(childHomeTenants().filter((n) => killRequested(childHome(n))));
+  for (const key of perpsChildHomeKeys()) if (killRequested(childHome(key))) owners.add(workerOwner(key));
+  return [...owners];
 }
 
 /**
@@ -6855,6 +6967,10 @@ export async function reconcile(): Promise<void> {
         })));
     tenants = roster.map((entry) => entry.tenant);
     expiresAtByTenant = new Map(roster.map((entry) => [entry.tenant.toLowerCase(), entry.expiresAt]));
+    lastSpotStoredAt = new Map(roster.map((entry) => {
+      const at = (entry as { updatedAt?: number | null }).updatedAt;
+      return [entry.tenant.toLowerCase(), typeof at === "number" ? at : null];
+    }));
     grantKeys = roster.map((entry) => ({ tenant: entry.tenant.toLowerCase(), key: grantRowKey(entry) }));
   } catch (e) {
     log(`store unreadable, skipping this reconcile: ${e instanceof Error ? e.message : String(e)}`);
