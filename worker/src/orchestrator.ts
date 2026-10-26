@@ -1467,18 +1467,20 @@ export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOpt
   "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint"> & { sharedFlowId?: number }): Promise<ReceiptAttestationReport | TradedReceiptAttestationReport> {
   const tenant = o.tenant.toLowerCase() as `0x${string}`, lease = leases.get(tenant), volume = persistentFleetHome();
   if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
-  const grant = await getGrantStore("spot").get(tenant);
-  if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
-  const assertQuiescent = () => {
-    if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
-        || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
-  };
-  assertQuiescent();
   // An expired grant keeps its stored permission, and the repair may run on it
   // (re-signing between a preview and its commit changes the bound grant).
-  // Expiry retirement must not take this lease part-way: see retireExpiredGrants.
-  maintenanceLeases.set(tenant, lease);
+  // Lent before the first await, so expiry retirement cannot take this lease
+  // part-way (retireExpiredGrants); the startup task may have lent it already.
+  const lent = maintenanceLeases.get(tenant) !== lease;
+  if (lent) maintenanceLeases.set(tenant, lease);
   try {
+    const grant = await getGrantStore("spot").get(tenant);
+    if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
+    const assertQuiescent = () => {
+      if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
+          || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
+    };
+    assertQuiescent();
     // Wait for every already-scheduled copy. New copies queue behind the complete
     // repair and must pass its shared pending gate before touching a cursor.
     return await mirrorSerially(tenant, async () => {
@@ -1487,7 +1489,7 @@ export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOpt
         home: childHome(tenant), volume, lease, assertQuiescent });
     });
   } finally {
-    if (maintenanceLeases.get(tenant) === lease) maintenanceLeases.delete(tenant);
+    if (lent && maintenanceLeases.get(tenant) === lease) maintenanceLeases.delete(tenant);
   }
 }
 
@@ -10124,6 +10126,9 @@ async function runReceiptAttestationIfAsked(): Promise<void> {
     if (!lease) throw new Error("Receipt attestation tenant is still leased by another supervisor.");
     leases.set(tenant, lease); temporary = true;
   }
+  // Lent to the repair in the turn it is taken: expiry retirement must not take
+  // it while the database and read path are prepared (retireExpiredGrants).
+  maintenanceLeases.set(tenant, lease);
   try {
     const shared = await makePgDb(process.env.DATABASE_URL), rpcUrl = process.env.MERRYMEN_RPC_MAINNET ?? "https://rpc.mainnet.chain.robinhood.com";
     // The fleet's read path, failed over as the reconstruction's is (rpc-meter.ts
@@ -10135,6 +10140,7 @@ async function runReceiptAttestationIfAsked(): Promise<void> {
     log(`receipt-attestation| ${JSON.stringify(report)}`);
     log("receipt-attestation| Original grant, account, ledger generation, row IDs, flow time, epoch, high-water mark and mirror witnesses retained. Operator hold and rollout are unchanged.");
   } finally {
+    if (maintenanceLeases.get(tenant) === lease) maintenanceLeases.delete(tenant);
     if (temporary && leases.get(tenant) === lease && !accountingMaintenanceLocalState(tenant).processPresent) await releaseLease(tenant);
   }
 }
