@@ -5934,8 +5934,9 @@ async function retireExpiredGrants(
     // lease and then lets the lease go: that waits for the pass that admits it.
     if (rolloutHeld(lc, process.env, newTenantAdmissions)) continue;
     // A RECEIPT ATTESTATION'S LEASE, under a hold, with no process: retiring
-    // it now would stop that repair part-way and release its lease. Its own
-    // finally releases the lease; with nothing running, nothing waits on it.
+    // it now would stop that repair part-way and release its lease. The
+    // startup task that lent it releases it afterwards, and with nothing
+    // running nothing waits on it; a pass after the repair retires as before.
     if (maintenanceLeases.has(lc) && maintenanceLeases.get(lc) === leases.get(lc)) continue;
     if (!children.has(lc) && !holders.has(lc) && !exitingChildren.has(lc) && !spawning.has(lc) && !restartPending.has(lc) && !leases.has(lc)) continue;
     // A re-sign may have landed since listTenantExpiries. Do not retire that

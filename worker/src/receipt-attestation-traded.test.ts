@@ -6,7 +6,7 @@ import { attestOriginalReceipt } from "./receipt-attestation";
 import { attestReceipt, attestTradedReceipt, MAX_WINDOW_BLOCKS, SCAN_LOOKBACK_BLOCKS, WINDOW_MARGIN_BLOCKS } from "./receipt-attestation-traded";
 import { assertNoPendingReceiptAttestation, readReceiptAttestation } from "./receipt-attestation-state";
 import { receiptAttestationRequest, scopedReceiptAttestationAllowed } from "./receipt-attestation-controls";
-import { BLOCK, BOOKED_AT, DEPOSITOR, HEAD, LOCAL_FLOW, SHARED_FLOW, TEST_ACCOUNT, TEST_TENANT, TOP_UP, TOP_UP_RAW, TX,
+import { BLOCK, BOOKED_AT, DEPOSITOR, LOCAL_FLOW, SHARED_FLOW, TEST_ACCOUNT, TEST_TENANT, TOP_UP, TOP_UP_RAW, TX,
   blockTime, tradedFixture, transferLog } from "./receipt-attestation-traded-fixture";
 import { receiptFixture } from "./receipt-attestation-fixture";
 import { canonicalJson, JOURNAL_GENESIS, journalHash } from "./store";
@@ -426,7 +426,6 @@ test("operator flow selection is one decimal shared id, admitted by the staged-r
   const env = { ...base, MERRYMEN_RECEIPT_ATTEST_FLOW: "428", MERRYMEN_ACCOUNTING_HOLD_TENANTS: TEST_TENANT };
   assert.equal(scopedReceiptAttestationAllowed(env, Object.keys(env).filter(k => k.startsWith("MERRYMEN_RECEIPT"))), true);
   assert.equal(scopedReceiptAttestationAllowed({ ...env, MERRYMEN_RECEIPT_ATTEST_FLOW: "x" }, Object.keys(env).filter(k => k.startsWith("MERRYMEN_RECEIPT"))), false);
-  void HEAD;
 });
 
 test("rows far apart in the key space are all bound: a change several key windows up still refuses the approval", async () => {
