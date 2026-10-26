@@ -340,7 +340,7 @@ export type PerpsCeiling = (typeof PERPS_CEILINGS)[number];
  * Anything else it does not recognise is OFF: a typo in a variable that exists
  * to take capability away must not hand it back.
  */
-function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
+export function perpsCeilingOf(raw: string | undefined): PerpsCeiling {
   const v = (raw ?? "").trim().toLowerCase();
   return v === "paper" ? "paper" : "off";
 }
