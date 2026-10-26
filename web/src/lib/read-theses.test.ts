@@ -665,14 +665,22 @@ describe("the same queries run on the hosted backend", () => {
           issued.push({ sql, args });
           return [];
         },
+        // Postgres's catalogue, asked first (perps-wallets.ts): the record is there.
+        get: async (...args: unknown[]) => {
+          issued.push({ sql, args });
+          return /to_regclass/.test(sql) ? { t: "perps_wallets" } : undefined;
+        },
       }),
     };
     for (const opts of [{}, { agentSlug: SLUG }, { symbol: "TSLA" }]) {
       issued.length = 0;
       await readTheses(opts, (fn) => fn(fake as never), identities, settings);
-      // Plus the one read of the Perps wallets the feed leaves out (rule 17).
+      // Plus the one read of the Perps wallets the feed leaves out (rule 17),
+      // after the catalogue says the record is there.
+      const perpsWallets = /perps_wallets/;
+      assert.equal(issued.filter((q) => /to_regclass\('perps_wallets'\)/.test(q.sql)).length, 1);
       assert.equal(issued.filter((q) => /FROM perps_wallets/.test(q.sql)).length, 1);
-      assert.equal(issued.filter((q) => !/FROM perps_wallets/.test(q.sql)).length, 2, "one query per lane when the first page is short");
+      assert.equal(issued.filter((q) => !perpsWallets.test(q.sql)).length, 2, "one query per lane when the first page is short");
       for (const q of issued) {
         const pg = translateQuery(q.sql);
         assert.ok(!pg.includes("?"), "a placeholder was left unrenumbered");

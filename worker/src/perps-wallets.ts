@@ -18,7 +18,7 @@
  * first Perps worker is about to start, so a fleet with none has no table, and
  * every reader treats an absent table as naming nobody.
  */
-import type { Db } from "./db";
+import { tablePresent, type Db } from "./db";
 
 export const PERPS_WALLETS_DDL = `CREATE TABLE IF NOT EXISTS perps_wallets (
   smart_account TEXT PRIMARY KEY,
@@ -39,23 +39,25 @@ export async function recordPerpsWallet(db: Db, w: { smartAccount: string; owner
     .run(account, owner, w.chainId, w.nowSec);
 }
 
-function missingTable(e: unknown): boolean {
-  const err = e as { code?: unknown; message?: unknown };
-  return err?.code === "42P01" || /no such table: (?:main\.)?perps_wallets\b/.test(String(err?.message ?? ""));
-}
-
 /**
  * The Perps wallets on record, lowercased: an absent table names nobody.
- * THROWS when the table is there and cannot be read — a public read that
- * cannot tell a Perps wallet from a Spot one must say it could not read, never
- * publish both (each caller's own unread answer).
+ * The catalogue is asked first (tablePresent), so a fleet that has never had
+ * one sends no failing statement from every public page load. THROWS when the
+ * table is there and cannot be read — a public read that cannot tell a Perps
+ * wallet from a Spot one must say it could not read, never publish both (each
+ * caller's own unread answer).
  */
 export async function readPerpsWallets(db: Pick<Db, "prepare">): Promise<ReadonlySet<string>> {
-  try {
-    const rows = (await db.prepare("SELECT smart_account FROM perps_wallets").all()) as Array<{ smart_account: unknown }>;
-    return new Set(rows.map((r) => String(r.smart_account).toLowerCase()));
-  } catch (e) {
-    if (missingTable(e)) return new Set();
-    throw e;
-  }
+  if (!(await tablePresent(db, "perps_wallets"))) return new Set();
+  const rows = (await db.prepare("SELECT smart_account FROM perps_wallets").all()) as Array<{ smart_account: unknown }>;
+  return new Set(rows.map((r) => String(r.smart_account).toLowerCase()));
+}
+
+/** The one Perps wallet on record for an owner, or null when there is none or more than one. */
+export async function perpsWalletOf(db: Pick<Db, "prepare">, owner: string): Promise<`0x${string}` | null> {
+  if (!(await tablePresent(db, "perps_wallets"))) return null;
+  const rows = (await db.prepare("SELECT smart_account FROM perps_wallets WHERE owner = ?").all(owner.toLowerCase())) as Array<{ smart_account: unknown }>;
+  if (rows.length !== 1) return null;
+  const account = String(rows[0]!.smart_account).toLowerCase();
+  return ADDRESS.test(account) ? (account as `0x${string}`) : null;
 }
