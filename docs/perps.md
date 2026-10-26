@@ -78,7 +78,9 @@ Perps workers, and nothing live:
   returns. A Perps worker also gives its process slot back, the same way, when
   a Spot worker is waiting for one (Spot first). An unreadable Perps roster
   changes nothing for any Perps worker: none is started, stood down, yielded,
-  wiped or released on that pass.
+  wiped or released on that pass. The one exception is a worker whose
+  last-read grant has expired: that is retired as on any pass (stood down,
+  final-passed, its lease released), because expired authority goes either way.
 - *Durable books.* The perp ledger mirrors to Postgres (own account only, inert
   for a Spot book with no perp rows), the paper checkpoint carries the perp
   book (`perp_json`, recorded stops included), and the ledger-import specs carry
@@ -86,10 +88,16 @@ Perps workers, and nothing live:
   flag leaving `paper`, a yielded slot, the drain) ends in a final mirror pass
   under the Perps account: the one its spawn read from the grant, or after a
   restart the `perps_wallets` record, used only when the book is that
-  account's. With neither, the lease and home are kept. A Spot checkpoint never
-  waits on the `perp_json` column: while it cannot be added, Spot books are
-  written without it. The fleet handover refuses while a Perps book exists,
-  until it covers them.
+  account's. With neither, or a book that is not that one account's, nothing
+  is copied and the lease and home are kept; and a running Perps worker is
+  never handed a grant for another account (an `[alert]` instead: a re-sign
+  names the same, derived account). While the `perp_json` column
+  cannot be added, Spot books are written without it, and paper perp books
+  are not written at all (the log names the SQLSTATE; anything but a lock wait
+  is an `[alert]`). The add is tried at most once a minute, and only that one
+  attempt, with any checkpoint beside it, waits its bounded lock wait (about
+  14 s). The fleet handover refuses while a Perps book exists, until it covers
+  them.
 - *Off every public read (rule 17).* The orchestrator records each Perps
   wallet in `perps_wallets` before its worker first starts (no record, no
   worker), and the directory, leaderboard, theses and decision pages leave
