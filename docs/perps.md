@@ -69,7 +69,11 @@ Perps workers, and nothing live:
   Telegram, groups, DM memory, Fomo or flow broker, IPC channel, public id or
   public roster (rule 17). Its holder status is the owner's, read-only. It is
   held as its owner is (accounting hold, rollout, chain check), never through
-  the new-tenant route, and spawned after every Spot worker.
+  the new-tenant route, and spawned after every Spot worker. While the owner
+  has an unexpired Spot grant, it runs only on the replica holding that Spot
+  lease, so a login is never split across replicas. That is checked at every
+  start and restart, on every pass and the moment the Spot lease drops. One
+  that loses the lease is stood down, final-passed and released.
 - *Only at `MERRYMEN_PERPS=paper`.* The Perps roster is read whatever the flag
   says (being listed is what keeps a Perps book, lease and home from every
   cleanup), but a Perps worker is started only at `paper`. Turned off, a
@@ -78,9 +82,12 @@ Perps workers, and nothing live:
   returns. A Perps worker also gives its process slot back, the same way, when
   a Spot worker is waiting for one (Spot first). An unreadable Perps roster
   changes nothing for any Perps worker: none is started, stood down, yielded,
-  wiped or released on that pass. The one exception is a worker whose
-  last-read grant has expired: that is retired as on any pass (stood down,
-  final-passed, its lease released), because expired authority goes either way.
+  wiped or released on that pass. There are two exceptions, both read from
+  outside the Perps roster. A worker whose last-read grant has expired is
+  retired as on any pass (stood down, final-passed, its lease released),
+  because expired authority goes either way. One whose owner's Spot lease left
+  this replica is stood down; its final pass and release wait for a pass that
+  reads.
 - *Durable books.* The perp ledger mirrors to Postgres (own account only, inert
   for a Spot book with no perp rows), the paper checkpoint carries the perp
   book (`perp_json`, recorded stops included), and the ledger-import specs carry
@@ -104,8 +111,11 @@ Perps workers, and nothing live:
   those accounts out; one that cannot read the record says so rather than
   listing both wallets. A Perps worker publishes no market review.
 - *One feed.* `perps/fleet-feed.ts` publishes the public Lighter feed every
-  hosted Perps worker reads, over what this replica's own Perps workers want,
-  only at `paper`, paused under FLEET_HALT and stopped before the drain.
+  hosted Perps worker reads, over what this replica's own Perps workers want
+  and the markets their books hold. It runs only at `paper`, is paused under
+  FLEET_HALT and is stopped before the drain. A book that will not read keeps
+  the markets it last read, because its positions still need prices to close
+  at their stops; one never read keeps the feed as it was.
 - *The kill and the pause.* A kill from the owner's bot, or one sitting in a
   Perps worker's home, is the owner's whole kill (both wallets, Solana, paper
   off), and every worker it revokes is stood down before the ✅. `/pause` is the

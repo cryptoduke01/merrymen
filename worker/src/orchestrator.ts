@@ -3896,6 +3896,7 @@ export async function writeBootstrapForChild(
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
   if (isPerpsWorkerKey(tenant) && !perpsSpawnable()) return "MERRYMEN_PERPS is not paper";
+  if (isPerpsWorkerKey(tenant) && perpsAffinityLost(tenant)) return "its owner's Spot worker is not leased on this replica";
   const held = operatorHold(tenant);
   if (held) return held;
   if (haltRequested()) return "FLEET_HALT is present";
@@ -6373,6 +6374,10 @@ function standDownLostLeasesNow(): void {
       if (child) killChild(tenant);
       standDownHolder(tenant);
       cancelRestart(tenant);
+      // AND THE OWNER'S PERPS WORKER WITH IT: another replica may take this
+      // Spot lease now, and the login must not be split (perpsAffinityLost).
+      const perpsKey = `${tenant}:perps`;
+      if (!isPerpsWorkerKey(tenant) && (children.has(perpsKey) || restartPending.has(perpsKey)) && perpsAffinityLost(perpsKey)) standDownPerpsForAffinity(perpsKey);
       void releaseLease(tenant);
     } catch (error) {
       // One process refusing a signal must not leave the other tenants on this
@@ -6778,6 +6783,32 @@ function perpsSpawnable(): boolean {
 /** Perps workers stood down to give a Spot worker their process slot: final-passed and released, then started again only in room no Spot worker needs. */
 const perpsYielded = new Set<string>();
 
+/** The owners whose Spot grant was unexpired on the last pass (reconcile). */
+let spotEligibleOwners: ReadonlySet<string> = new Set();
+
+/**
+ * HAS THIS PERPS WORKER LOST THE REPLICA IT MUST RUN ON? One replica per
+ * login: while its owner has an unexpired Spot grant, a Perps worker runs only
+ * beside that owner's Spot lease, because the pause mirror and a kill's
+ * stand-down read and act on this replica's disk and maps. Asked at every
+ * start, restarts included (lateSpawnRefusal), and of every running one on
+ * every pass and the moment a Spot lease drops: lost after it started, the
+ * login would be split across two replicas.
+ */
+function perpsAffinityLost(key: string): boolean {
+  const owner = workerOwner(key);
+  return spotEligibleOwners.has(owner) && leases.get(owner)?.healthy() !== true;
+}
+
+/** Stand a Perps worker down for its owner's Spot lease: final-passed and released as a yielded one is (perpsYielded). */
+function standDownPerpsForAffinity(key: string): void {
+  const running = children.has(key);
+  cancelRestart(key);
+  killChild(key);
+  if (leases.has(key)) perpsYielded.add(key);
+  if (running) log(`${key}: its owner's Spot worker is no longer leased on this replica — Perps worker stood down so the login runs on one replica; its book is kept and its paper positions are frozen`);
+}
+
 /** One pass's Perps roster: the workers wanted, their expiries, when each grant was stored, and whether it read. */
 interface PerpsPass {
   keys: `0x${string}`[];
@@ -6812,7 +6843,7 @@ async function perpsRosterForPass(nowSec: number, spotOwners: ReadonlySet<string
       ? await store.listTenantExpiries()
       : await Promise.all((await store.listTenants()).map(async (tenant) => ({ tenant, expiresAt: (await store.get(tenant))?.expiresAt ?? null })));
   } catch (e) {
-    sayTenantAlert("roster:perps", `[alert] fleet: the Perps grant store is unreadable (${errorKind(e)}) — every Perps worker here is kept exactly as it is this pass: none started, stood down, yielded, wiped or released, except one whose last-read grant has expired, which is retired as on any pass`);
+    sayTenantAlert("roster:perps", `[alert] fleet: the Perps grant store is unreadable (${errorKind(e)}) — every Perps worker here is kept exactly as it is this pass: none started, stood down, yielded, wiped or released, except one whose last-read grant has expired, which is retired as on any pass, and one whose owner's Spot lease left this replica, which is stood down`);
     const keys = knownPerpsKeys();
     lastPerpsPass = {
       keys,
@@ -7395,6 +7426,7 @@ export async function reconcile(): Promise<void> {
     return typeof expiry === "number" && Number.isFinite(expiry) && expiry > nowSec;
   });
   const eligible = new Set(eligibleToSpawn.map((tenant) => tenant.toLowerCase()));
+  spotEligibleOwners = new Set([...eligible].filter((t) => !isPerpsWorkerKey(t)));
   // The heartbeat's count of the whole roster (fleetHealth): admitted per
   // level, held by either operator hold, or expired. After the retirement
   // above, whose re-read of a re-signed key this roster's expiries include.
@@ -7504,8 +7536,7 @@ export async function reconcile(): Promise<void> {
      * (perpsYielded, after this loop).
      */
     if (isPerpsWorkerKey(lc)) {
-      const owner = workerOwner(lc);
-      if (eligible.has(owner) && leases.get(owner)?.healthy() !== true) continue;
+      if (perpsAffinityLost(lc)) continue;
       const spotRestarting = [...restartPending.keys()].filter((t) => !isPerpsWorkerKey(t)).length;
       if (capacityDeferred > 0 || localChildProcessCount() + spotRestarting >= MAX_LOCAL_CHILD_PROCESSES) continue;
     }
@@ -7584,6 +7615,13 @@ export async function reconcile(): Promise<void> {
       continue;
     }
     await spawnChild(lc, cool?.restarts ?? 0);
+  }
+  // A RUNNING PERPS WORKER WHOSE OWNER'S SPOT LEASE IS NOT HERE ANY MORE
+  // (perpsAffinityLost): dropped, or taken by another replica, since it
+  // started. After the spawns above, which may have taken it back. Whatever
+  // the Perps roster said this pass: it is the Spot lease that is read.
+  for (const key of [...children.keys(), ...restartPending.keys()]) {
+    if (isPerpsWorkerKey(key) && perpsAffinityLost(key)) standDownPerpsForAffinity(key);
   }
   // A SPOT WORKER WAITED FOR A SLOT: as many running Perps workers give theirs
   // back, newest first, and are final-passed and released as a ceiling
@@ -12678,24 +12716,47 @@ function perpsFeedConsumers(): string[] {
   return [...keys].filter((k) => isPerpsWorkerKey(k) && leases.get(k)?.healthy() === true);
 }
 
-/** The markets those workers' own books hold a paper position in, read from each book; a book that will not read is skipped. */
+/** Each consumer's held markets as its book last read: what a book that will not read this time still holds. */
+const perpsFeedHeldByKey = new Map<string, readonly number[]>();
+
+/**
+ * The markets those workers' own books hold a paper position in, read from
+ * each book. An unreadable book is not "nothing held": its positions are
+ * still there and still need prices to be closed at their stops. So it keeps
+ * the markets it last read, and one never read in this process fails the
+ * whole read, and the publisher keeps everything it carried. A home with no
+ * book yet holds nothing.
+ */
 async function perpsFeedHeld(): Promise<number[]> {
+  const consumers = new Set(perpsFeedConsumers());
+  for (const key of [...perpsFeedHeldByKey.keys()]) if (!consumers.has(key)) perpsFeedHeldByKey.delete(key);
   const ids = new Set<number>();
   let unread = 0;
-  for (const key of perpsFeedConsumers()) {
-    const handle = openChildLedger(childHome(key));
-    if (!handle) continue;
-    try {
-      const rows = (await handle.db.prepare("SELECT DISTINCT market_id FROM perp_positions WHERE mode = 'paper' AND base <> '0'").all()) as Array<{ market_id: number }>;
-      for (const r of rows) ids.add(Number(r.market_id));
-    } catch {
-      unread += 1;
-    } finally {
-      handle.close();
+  for (const key of consumers) {
+    let read: number[] | null = null;
+    if (!existsSync(path.join(childHome(key), "merrymen.db"))) read = [];
+    else {
+      const handle = openChildLedger(childHome(key));
+      if (handle) {
+        try {
+          const rows = (await handle.db.prepare("SELECT DISTINCT market_id FROM perp_positions WHERE mode = 'paper' AND base <> '0'").all()) as Array<{ market_id: number }>;
+          read = rows.map((r) => Number(r.market_id));
+        } catch {
+          // Kept below as unread.
+        } finally {
+          handle.close();
+        }
+      }
     }
+    if (read) perpsFeedHeldByKey.set(key, read);
+    const held = read ?? perpsFeedHeldByKey.get(key);
+    if (!held) {
+      unread += 1;
+      continue;
+    }
+    for (const id of held) ids.add(id);
   }
-  // Every book unread is not "nothing held": the publisher keeps what it carried.
-  if (unread > 0 && ids.size === 0) throw new Error(`${unread} Perps book${unread === 1 ? "" : "s"} unreadable`);
+  if (unread > 0) throw new Error(`${unread} Perps book${unread === 1 ? "" : "s"} unreadable and never read`);
   return [...ids];
 }
 

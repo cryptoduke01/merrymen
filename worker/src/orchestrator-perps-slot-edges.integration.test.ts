@@ -308,6 +308,81 @@ describe("one replica per login", () => {
     assert.equal(live(o).length, 1);
     assert.equal(live(perpsKey(o)).length, 1, "both start once this replica holds the Spot lease");
   });
+
+  it("a running Perps worker is stood down the moment its owner's Spot lease drops, then final-passed and released", async () => {
+    const o = ownerAt(0xae);
+    await spot.put(o, grant(o, address(0xaf)));
+    await perps.put(o, grant(o, address(0xb0), { purpose: "perps" }));
+    await orch.reconcile();
+    await settle();
+    const running = live(perpsKey(o));
+    assert.equal(running.length, 1);
+    // The Spot lease's connection drops, and another replica takes the login.
+    leaseRefused = new Set([o]);
+    orch.loseLeaseForTest(o);
+    orch.standDownLostLeasesForTest();
+    await settle();
+    assert.ok(running[0]!.signals.length > 0, "stood down with the Spot worker, not left running beside another replica's");
+    await orch.reconcile();
+    await settle();
+    await orch.reconcile();
+    await settle();
+    assert.equal(live(perpsKey(o)).length, 0, "and not started again while the Spot lease is elsewhere");
+    assert.equal(orch.hasLeaseForTest(perpsKey(o) as `0x${string}`), false, "its lease goes to the replica that has the login");
+    leaseRefused = new Set();
+    await orch.reconcile();
+    await settle();
+    assert.equal(live(o).length, 1);
+    assert.equal(live(perpsKey(o)).length, 1, "both come back together once the Spot lease is here");
+  });
+
+  it("a Perps-only login's worker is stood down when a Spot grant arrives and another replica leases it", async () => {
+    const o = ownerAt(0xa7);
+    await perps.put(o, grant(o, address(0xa8), { purpose: "perps" }));
+    await orch.reconcile();
+    await settle();
+    const running = live(perpsKey(o));
+    assert.equal(running.length, 1, "a Perps-only login has nothing to sit beside");
+    leaseRefused = new Set([o]);
+    await spot.put(o, grant(o, address(0xa9)));
+    await orch.reconcile();
+    await settle();
+    assert.ok(running[0]!.signals.length > 0, "the login is now the Spot lease's, which is elsewhere");
+    await orch.reconcile();
+    await settle();
+    assert.equal(live(perpsKey(o)).length, 0);
+    assert.equal(orch.hasLeaseForTest(perpsKey(o) as `0x${string}`), false);
+  });
+});
+
+describe("the fleet feed's held markets", () => {
+  it("an unreadable book keeps the markets it last read: its positions still need prices to close at their stops", async () => {
+    const a = ownerAt(0x7a), b = ownerAt(0x7b);
+    for (const [o, acct] of [[a, address(0x7c)], [b, address(0x7d)]] as const) {
+      await perps.put(o, grant(o, acct, { purpose: "perps" }));
+      await settingsStores.getSettingsStore("perps").put(o, { perpsEnabled: true, perpsMarkets: ["BTC-PERP"] });
+    }
+    await orch.reconcile();
+    await settle();
+    // Each book holds a paper position outside the markets its settings want.
+    for (const [o, market] of [[a, 16], [b, 3]] as const) {
+      const raw = new DatabaseSync(path.join(orch.childHome(perpsKey(o)), "merrymen.db"));
+      await applyLedgerSchema(wrapSqlite(raw));
+      raw.prepare(`INSERT INTO perp_positions (agent_id, mode, market_id, side, base, allocated_margin_micro, source) VALUES (?, 'paper', ?, 'long', '1', '1000000', 'paper')`)
+        .run(o, market);
+      raw.close();
+    }
+    await orch.refreshPerpsFeedForTest();
+    assert.deepEqual([...orch.perpsFeedMarketsForTest()!.markets], [1, 3, 16], "BTC wanted, SOL and TSLA held");
+    const book = path.join(orch.childHome(perpsKey(b)), "merrymen.db");
+    chmodSync(book, 0o000);
+    try {
+      await orch.refreshPerpsFeedForTest();
+      assert.deepEqual([...orch.perpsFeedMarketsForTest()!.markets], [1, 3, 16], "SOL stays while b's book will not read");
+    } finally {
+      chmodSync(book, 0o600);
+    }
+  });
 });
 
 describe("the public reads' exclusion record (perps-wallets.ts)", () => {
