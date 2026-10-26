@@ -114,7 +114,7 @@ import { DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, resolveSubmitt
 import { ownerOperationRow, ownerOperationsNotice, type OwnerOperationReading } from "./owner-operations";
 import { holdAtCaps } from "./budget-seed";
 import { resumeFrom } from "./deposit-log";
-import { scanAndBookDepositWindow } from "./deposit-scan";
+import { bookInferredReceipt, scanAndBookDepositWindow } from "./deposit-scan";
 import { renderWhy } from "./strategies/reasons";
 import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
 import { classRouteLooks, idleAndClassGate } from "./class-entry-gate";
@@ -272,7 +272,7 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
-import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
+import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, receiptFloorAfter, receiptWindow, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { KEY_INSTALL_KIND } from "./telegram/trade-rows";
@@ -572,6 +572,7 @@ import {
   addFlow,
   adjustAgentHwm,
   knownFlowKeys,
+  inferredFlowSinceChainLog,
   lastChainLogBlock,
   recentDecisions,
   recentTradeTxHashes,
@@ -4340,7 +4341,9 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
+    // `head` reads the chain head uncached, for a receipt's window
+    // (flow-inference.ts RULE 4).
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall; head?: () => Promise<bigint> },
   ): Promise<"held" | "settled"> => {
     const record = async (
       deltaUsdg: bigint,
@@ -4398,6 +4401,123 @@ async function main() {
         `${inbound ? "📥 funded" : "📤 withdrawn"} ${fmt(amount)} USDG (${why}) — ` +
           `capital, not performance: the high-water mark moved with it`,
       );
+    };
+
+    /**
+     * WHAT THE DEPOSIT SCANNER CLASSIFIES ONE WINDOW WITH, built in one place:
+     * the receipt an inferred change is booked against (bookInferredChange)
+     * must be judged by exactly the inputs the scan books by, or the two would
+     * call the same transfer different things.
+     */
+    const transferScan = async (
+      s: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+      fromBlock: bigint,
+      toBlock: bigint,
+    ): Promise<Parameters<typeof scanAndBookDepositWindow>[0]> => ({
+      chain: s.chain,
+      smartAccount: s.smartAccount,
+      usdgToken: CASH.USDG as `0x${string}`,
+      fromBlock,
+      toBlock,
+      knownKeys: await knownFlowKeys(agentId, Number(fromBlock)),
+      tradeTxHashes: await recentTradeTxHashes(agentId),
+      // THE OWNER'S OWN OPERATION BUNDLED BESIDE A TRADE: its USDG leg is
+      // the owner's deposit or withdrawal, and the transaction-wide skip
+      // above would hide it for good. The scanner asks which operations
+      // the trade rows of such a transaction are, and lets through only a
+      // root operation of this account none of them is (deposit-log.ts).
+      tradeOpsInTx: (txHash) => tradeOpsInTx(agentId, txHash),
+      // FROM THE GRANT, so the flow classifier knows a class buy is a trade
+      // and not a withdrawal. `tradeTxHashes` usually masks this — but it is
+      // recency-bounded and reads the local ledger, so it fails exactly when
+      // the ledger is empty or the row aged out, which is the case this
+      // whole module exists to handle.
+      custodyAddresses: custodyAddressesOf(s.grant),
+      // WHICH CHAIN'S reserve tokens make an energy purchase `reserve-out`
+      // (never booked here — the worker books it at landing).
+      ...(s.grant ? { chainId: s.grant.chainId } : {}),
+      log: (m) => console.log(`[flows] ${m}`),
+    });
+
+    /**
+     * BOOK A CHANGE NO TRADE EXPLAINS: as its receipt when the chain holds
+     * exactly one transfer that is it, by inference when it does not
+     * (flow-inference.ts RULE 4). Inference alone left a top-up with no
+     * transaction, and the hosted anchor then read contributions as unknown
+     * from the next restart until an operator repaired the row.
+     *
+     * `receiptsInInterval` is what a receipt booked for this open interval
+     * already explains. A look retried after its booking committed (the peak
+     * refresh below threw, say) books only the rest, never the money twice.
+     * And the floor rises BEFORE an inferred booking: one that commits and then
+     * throws must still keep every later window above its movement.
+     */
+    const bookInferredChange = async (
+      deltaUsdg: bigint,
+      head: bigint | null,
+      s?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    ): Promise<void> => {
+      const residual = deltaUsdg - receiptsInInterval;
+      if (residual === 0n) return;
+      // Paper books no capital at all (record() says so), and has no receipt.
+      if (paperActive()) return record(residual, "no trade explains this");
+      let why = "no chain reader was handed to this look";
+      const window = receiptWindow({ baselineHead, floor: receiptFloor, head });
+      if ("none" in window) why = window.none;
+      else if (s) {
+        let read: Parameters<typeof scanAndBookDepositWindow>[0] | null = null;
+        try {
+          read = await transferScan(s, window.fromBlock, window.toBlock);
+        } catch (e) {
+          why = `the ledger could not be read (${errorText(e)})`;
+        }
+        const found = read && await bookInferredReceipt(read, {
+          agentId,
+          mode: "live",
+          deltaUsdg6: residual,
+          flowBookedForTx: (txHash) => hasFlowForTx(agentId, txHash),
+        });
+        if (found && found.kind !== "unmatched") {
+          receiptsInInterval += residual;
+          try {
+            highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+          } catch (e) {
+            // The peaks moved in the ledger with the receipt. The next tick
+            // re-reads both before its book read; this one holds.
+            capitalPeakDirty = true;
+            throw e;
+          }
+          if (found.kind === "booked") {
+            const fl = found.flow;
+            await addEvent(
+              agentId,
+              "ok",
+              `${fl.direction === "in" ? "📥 funded" : "📤 withdrawn"} ${fmt(fl.amountUsdg6)} USDG ` +
+                `(${fl.txHash.slice(0, 10)}…) — capital, not performance: the high-water mark moved with it`,
+            );
+          }
+          return;
+        }
+        if (found) why = found.why;
+      }
+      receiptFloor = receiptFloorAfter(receiptFloor, head);
+      await record(residual, "no trade explains this");
+      const hosted = isHostedMode();
+      console.log(
+        `[flows] booked ${residual > 0n ? "+" : "-"}${fmt(residual > 0n ? residual : -residual)} USDG by inference — ` +
+          `no receipt stood for it (${why})` +
+          (hosted ? "; from the next restart contributions read as unknown until this flow is repaired" : ""),
+      );
+      if (hosted) {
+        await addEvent(
+          agentId,
+          "warn",
+          `that ${residual > 0n ? "deposit" : "withdrawal"} of ${fmt(residual > 0n ? residual : -residual)} USDG was ` +
+            `booked without its transaction (${why}). From the next restart this agent's contributions read as ` +
+            `unknown, so no performance fee is charged and the Brain opens no new positions, until an operator ` +
+            `repairs the flow.`,
+        );
+      }
     };
 
     /**
@@ -4477,34 +4597,25 @@ async function main() {
             chainScanCursor = head;
             return false;
           }
+          // NOR ACROSS A FLOW BOOKED BY INFERENCE. This scan tells a booked log
+          // by its tx#logIndex, and an inferred row has neither: resumed below
+          // one, it books the same deposit again, as chain-log, with both peaks
+          // raised a second time. Homes persist now, so the mark survives a
+          // restart — and with the scan off, a receipt booked for an inferred
+          // change (bookInferredChange) is a mark too. Opening at the head is
+          // what a first scan does anyway.
+          if (await inferredFlowSinceChainLog(agentId, mark)) {
+            console.log(
+              `[flows] deposit scan: a flow was booked by inference after the receipt at block ${mark} — opening at ` +
+                `the head rather than reading that money a second time`,
+            );
+            chainScanCursor = head;
+            return false;
+          }
           chainScanCursor = at;
         }
         from = chainScanCursor;
-        await scanAndBookDepositWindow({
-          chain: s.chain,
-          smartAccount: s.smartAccount,
-          usdgToken: CASH.USDG as `0x${string}`,
-          fromBlock: from,
-          toBlock: head,
-          knownKeys: await knownFlowKeys(agentId, Number(from)),
-          tradeTxHashes: await recentTradeTxHashes(agentId),
-          // THE OWNER'S OWN OPERATION BUNDLED BESIDE A TRADE: its USDG leg is
-          // the owner's deposit or withdrawal, and the transaction-wide skip
-          // above would hide it for good. The scanner asks which operations
-          // the trade rows of such a transaction are, and lets through only a
-          // root operation of this account none of them is (deposit-log.ts).
-          tradeOpsInTx: (txHash) => tradeOpsInTx(agentId, txHash),
-          // FROM THE GRANT, so the flow classifier knows a class buy is a trade
-          // and not a withdrawal. `tradeTxHashes` usually masks this — but it is
-          // recency-bounded and reads the local ledger, so it fails exactly when
-          // the ledger is empty or the row aged out, which is the case this
-          // whole module exists to handle.
-          custodyAddresses: custodyAddressesOf(s.grant),
-          // WHICH CHAIN'S reserve tokens make an energy purchase `reserve-out`
-          // (never booked here — the worker books it at landing).
-          ...(s.grant ? { chainId: s.grant.chainId } : {}),
-          log: (m) => console.log(`[flows] ${m}`),
-        }, {
+        await scanAndBookDepositWindow(await transferScan(s, from, head), {
           agentId,
           mode: paperActive() ? "paper" : "live",
           afterBooked: async (fl) => {
@@ -4560,6 +4671,15 @@ async function main() {
       covered = await scanChainFlows(scan);
     }
 
+    // THE HEAD THIS LOOK'S CASH WAS READ BELOW (flow-inference.ts RULE 4): the
+    // top of a receipt window now, and where the next one starts. Read only
+    // where a receipt could be looked for — live, with the chain seam, the scan
+    // not covering — and never fatal: a head that will not read only means a
+    // change this look finds is booked by inference, as before. The first look
+    // of a process places the floor, above anything an earlier one inferred.
+    const receiptHead = !covered && scan?.head && !paperActive() ? await scan.head().catch(() => null) : null;
+    if (receiptFloor === null) receiptFloor = receiptFloorAfter(null, receiptHead);
+
     // THE LEDGER, READ ONCE AND AFTER THE BALANCE — and the settlement queue
     // only after the ledger. The resolver queues a settlement BEFORE it writes
     // the op's row, so a look that finds the row settled finds its settlement
@@ -4584,6 +4704,9 @@ async function main() {
       // (`since`). The one gap, scan-on only: such an op landing AFTER this
       // read, followed by a tick the scan does not cover.
       takeSettlements();
+      // The block the scan read through is this baseline's, should the scan be
+      // switched off and a later change look for its receipt.
+      baselineHead = chainScanCursor;
     } else if (lastCashUsdg === null) {
       // FIRST OBSERVATION OF THIS PROCESS. Everything hard about hosted
       // accounting is in this branch, so it is worth being exact about what
@@ -4737,13 +4860,18 @@ async function main() {
         console.log(`[flows] an op is still in flight — not inferring a flow from this cash change; baseline kept`);
         return "held";
       }
-      if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "no trade explains this");
+      if (l.verdict.action === "infer") await bookInferredChange(l.verdict.deltaUsdg, receiptHead, scan);
     }
 
     lastCashUsdg = cashUsdg;
     baselineSince = listedAt;
     baselineUnattributed = false;
     ledgerWritesAtSnapshot = ledgerWrites;
+    // The next receipt window starts from this look's head (less its margin).
+    // A head that did not read keeps the older one: a lower start only widens
+    // the window, and the floor still bounds it.
+    baselineHead = receiptHead ?? baselineHead;
+    receiptsInInterval = 0n;
     return opsInFlight ? "held" : "settled";
   };
 
@@ -4812,7 +4940,7 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall },
+    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant; initialRpc?: RpcCall; head?: () => Promise<bigint> },
   ): Promise<"held" | "settled"> => {
     try {
       return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
@@ -4958,6 +5086,21 @@ async function main() {
   let baselineSince: number | null = null;
   /** The open interval holds a settlement nobody could read: it closes uninferred. */
   let baselineUnattributed = false;
+  /**
+   * THE CHAIN HEAD READ AT THE LOOK THAT SET THAT BASELINE, after its cash
+   * (flow-inference.ts RULE 4): where the next receipt window starts, less its
+   * margin. Null until a look has read one.
+   */
+  let baselineHead: bigint | null = null;
+  /**
+   * No receipt window may reach this block or below: above every block a flow
+   * booked by inference may stand for. Null until a look places it (the
+   * process's first, or the first after an inferring look could not read its
+   * head).
+   */
+  let receiptFloor: bigint | null = null;
+  /** What receipts booked for the open interval explain, signed raw 6dp — a retried look books only the rest. */
+  let receiptsInInterval = 0n;
   /** What the stranded resolver settled since the last look (flow-inference.ts rule 2). */
   let settlementQueue: Settlement[] = [];
   /** Every op this process queued a settlement for — a retried row write never shifts twice. */
@@ -12845,22 +12988,26 @@ async function main() {
       // for an owner who funded 154.87 and then added 1,000 and 500.
       // Reading the USDG Transfer logs makes each of those flows exact and gives
       // it a transaction hash, instead of a balance change nobody can point at.
-      // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
-      // figure is measured against those.
+      // The deposit scan that reads every window is off by default: it changes
+      // how CONTRIBUTIONS are counted, and every P&L figure is measured against
+      // those. With it off, a change inference would book still has its
+      // receipt looked for first (flow-inference.ts RULE 4), so the chain seam
+      // is handed over on every live tick.
       const flows = await reconcileFlowsOrRetry(
         agentId,
         balances.cashUsdg,
         equityUsdg,
-        cfg.depositScanEnabled || (initialCapitalLicence !== null && !initialCapitalComplete)
-          ? {
-              chain: makeReconcileChain(client),
-              initialRpc: (method, params) => (client.request as unknown as
-                (args: { method: string; params: unknown[] }) => Promise<unknown>)({ method, params }),
-              smartAccount: grant.smartAccount as `0x${string}`,
-              // So the flow classifier can tell a class trade from a withdrawal.
-              grant,
-            }
-          : undefined,
+        {
+          chain: makeReconcileChain(client),
+          initialRpc: (method, params) => (client.request as unknown as
+            (args: { method: string; params: unknown[] }) => Promise<unknown>)({ method, params }),
+          // Uncached: a head from before this tick's cash read would leave the
+          // receipt window short of the cash it explains.
+          head: () => client.getBlockNumber({ cacheTime: 0 }),
+          smartAccount: grant.smartAccount as `0x${string}`,
+          // So the flow classifier can tell a class trade from a withdrawal.
+          grant,
+        },
       );
       // A HELD LOOK ACCRUES NO FEE AND MOVES NO LIFETIME PEAK. While an op the
       // resolver may still settle is in flight, this equity's cash is not yet
