@@ -5137,7 +5137,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // the Bitquery lane is on and its account is on the research allowlist.
       attachFlowBroker(flowRuntimeNow().service, tenant, proc, smartAccount, log);
     }
-    const tag = `[${tenant.slice(0, 8)}]`;
+    // A Perps worker says so in every line it relays: its owner's Spot worker
+    // shares the same first eight characters.
+    const tag = isPerpsWorkerKey(tenant) ? `[${tenant.slice(0, 8)} perps]` : `[${tenant.slice(0, 8)}]`;
     relayChildOutput(proc.stdout, process.stdout, tag);
     relayChildOutput(proc.stderr, process.stderr, tag);
 
