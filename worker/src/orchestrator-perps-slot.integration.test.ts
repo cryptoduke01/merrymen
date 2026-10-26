@@ -49,7 +49,12 @@ const key = (byte: string) => `0x${byte.repeat(32)}` as `0x${string}`;
 
 /** BOTH: two wallets. PERPS_ONLY: a Perps grant and no Spot one. SPOT_ONLY: the control. */
 const BOTH = address(0xa1), PERPS_ONLY = address(0xb1), SPOT_ONLY = address(0xc1);
-const acct = { [BOTH]: { spot: address(0xa2), perps: address(0xa3) }, [PERPS_ONLY]: { spot: address(0xb2), perps: address(0xb3) }, [SPOT_ONLY]: { spot: address(0xc2), perps: address(0xc3) } };
+const acct: Record<string, { spot: `0x${string}`; perps: `0x${string}` }> = {
+  [BOTH]: { spot: address(0xa2), perps: address(0xa3) },
+  [PERPS_ONLY]: { spot: address(0xb2), perps: address(0xb3) },
+  [SPOT_ONLY]: { spot: address(0xc2), perps: address(0xc3) },
+};
+const accountOf = (owner: string, wallet: "spot" | "perps") => acct[owner]![wallet];
 const perpsKey = (owner: string) => `${owner}:perps`;
 
 let keyByte = 0x10;
@@ -124,10 +129,10 @@ const running = (tenant: string) => spawnedFor(tenant).filter((p) => !p.gone);
 const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 
 async function fleetOfThree(): Promise<void> {
-  await spotStore.put(BOTH, grant(BOTH, acct[BOTH].spot));
-  await perpsStore.put(BOTH, grant(BOTH, acct[BOTH].perps, { purpose: "perps" }));
-  await perpsStore.put(PERPS_ONLY, grant(PERPS_ONLY, acct[PERPS_ONLY].perps, { purpose: "perps" }));
-  await spotStore.put(SPOT_ONLY, grant(SPOT_ONLY, acct[SPOT_ONLY].spot));
+  await spotStore.put(BOTH, grant(BOTH, accountOf(BOTH, "spot")));
+  await perpsStore.put(BOTH, grant(BOTH, accountOf(BOTH, "perps"), { purpose: "perps" }));
+  await perpsStore.put(PERPS_ONLY, grant(PERPS_ONLY, accountOf(PERPS_ONLY, "perps"), { purpose: "perps" }));
+  await spotStore.put(SPOT_ONLY, grant(SPOT_ONLY, accountOf(SPOT_ONLY, "spot")));
   // The owner's bot lives in the Spot settings; it must never reach a Perps worker.
   await getSettingsStore("spot").put(BOTH, { telegramEnabled: true, telegramBotToken: "4242:SECRET-bot-token", telegramAllowlist: [7] });
   await getSettingsStore("perps").put(BOTH, { perpsEnabled: true, perpsMarkets: ["BTC-PERP"] });
@@ -190,7 +195,7 @@ describe("with MERRYMEN_PERPS unset, off or live, nothing Perps happens", () => 
   }
 
   it("a Spot-only fleet at paper reads the Perps store and makes nothing of it", async () => {
-    await spotStore.put(SPOT_ONLY, grant(SPOT_ONLY, acct[SPOT_ONLY].spot));
+    await spotStore.put(SPOT_ONLY, grant(SPOT_ONLY, accountOf(SPOT_ONLY, "spot")));
     process.env.MERRYMEN_PERPS = "paper";
     await reconcile();
     await refreshPerpsFeedForTest();
@@ -221,7 +226,7 @@ describe("at MERRYMEN_PERPS=paper, a login's Perps worker", () => {
       assert.equal(proc.env.MERRYMEN_STORE_DEK, undefined);
       assert.deepEqual(proc.stdio, ["ignore", "pipe", "pipe"], "no IPC channel");
       const g = readJson(path.join(home, "grant.json"));
-      assert.equal(g.smartAccount, acct[owner as keyof typeof acct].perps, "its own wallet's grant");
+      assert.equal(g.smartAccount, accountOf(owner, "perps"), "its own wallet's grant");
       assert.equal(g.purpose, "perps");
       const s = readJson(path.join(home, "settings.json"));
       assert.equal(s.strategy, "perps-only");
@@ -234,7 +239,7 @@ describe("at MERRYMEN_PERPS=paper, a login's Perps worker", () => {
     // The Spot worker beside it keeps the bot and its own grant.
     const spotSettings = readJson(path.join(childHome(BOTH), "settings.json"));
     assert.equal(spotSettings.telegramBotToken, "4242:SECRET-bot-token");
-    assert.equal(readJson(path.join(childHome(BOTH), "grant.json")).smartAccount, acct[BOTH].spot);
+    assert.equal(readJson(path.join(childHome(BOTH), "grant.json")).smartAccount, accountOf(BOTH, "spot"));
     assert.equal(spawnedFor(perpsKey(SPOT_ONLY)).length, 0);
   });
 
@@ -344,7 +349,7 @@ describe("at MERRYMEN_PERPS=paper, a login's Perps worker", () => {
       const body = readJson(file);
       writeFileSync(file, JSON.stringify({ ...body, killedAt: nowSec() - 3600 }));
     }
-    await perpsStore.put(BOTH, grant(BOTH, acct[BOTH].perps, { purpose: "perps" }));
+    await perpsStore.put(BOTH, grant(BOTH, accountOf(BOTH, "perps"), { purpose: "perps" }));
     await reconcile();
     await settle();
     assert.equal(running(perpsKey(BOTH)).length, 1, "the owner's later Perps grant arms");

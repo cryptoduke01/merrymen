@@ -6394,10 +6394,11 @@ export function setPerpsKillForTest(fn: (tenant: `0x${string}`, coveredSec: numb
 }
 
 /**
- * A KILL SENT TO THE BOT A LOGIN'S PERPS WORKER RUNS (its owner has no Spot
- * grant to run the bot on: the bot seat), carried out as the owner's whole
- * kill — every wallet, Solana too — from the Perps worker's home, where the
- * request sits.
+ * A KILL SITTING IN A LOGIN'S PERPS WORKER HOME — where the bot a Perps
+ * worker runs once it holds its owner's bot seat (slice 6a) writes one —
+ * carried out as the owner's whole kill, every wallet and Solana too, from
+ * the home the request sits in. Wired now so that the day a Perps worker can
+ * take a /kill, it is already the login's.
  *
  * THE PERPS GRANT IS THIS REQUEST'S OWN STORE'S: judged first, by the
  * request's cutoff, and the one whose re-sign supersedes it — a Perps grant
