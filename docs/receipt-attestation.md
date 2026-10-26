@@ -178,7 +178,8 @@ by transaction, any source) is left out. Then all of these must hold:
 
 The book must be one live account on this chain in both copies, the selected
 row an unattested inferred deposit of the current epoch, equal in every column
-but id to exactly one row of the original book, booked once in each book, and
+but its id (and the account's letter case) to exactly one row of the original
+book, booked once in each book, and
 already copied by the mirror (its original id at or below the flows cursor).
 The original journal must verify as each (account, epoch) chain the store
 appends to, contiguous from entry 1, in one spelling of the account,
