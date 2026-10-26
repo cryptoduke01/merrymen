@@ -80,6 +80,7 @@ import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, open
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
+import { isPerpsWorkerKey, parseWorkerKey, perpsChildHome, workerOwner } from "./worker-key";
 import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import {
   drainBudgetMs, runFleetDrain, shutdownReceiptDir, takePreviousShutdown, writeShutdownReceipt,
@@ -995,11 +996,24 @@ const CHILD_SECRET_STRIP = [
   "MERRYMEN_BITQUERY_API_KEY",
   "BITQUERY_API_KEY",
   "MERRYMEN_TOKEN",
+  // AN OWNER'S PRIVATE KEY, for `merrymen recover` (recover-cli.ts) and the
+  // CLI that sets it for that one command. No hosted child recovers anything,
+  // and one holding an owner key holds the root of that login's both wallets.
+  "MERRYMEN_RECOVER_OWNER_KEY",
 ] as const;
 
-/** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
+/**
+ * Where a worker keeps its own ~/.merrymen — isolated from every other.
+ *
+ * A Spot worker's home is `children/<owner>`, where it has always been. A
+ * Perps worker's (worker-key.ts) is `children-perps/<owner>`, a sibling root,
+ * so nothing that walks `children/` — the kill and cleanup sweeps, the drain,
+ * the handover, the persistent-home checks — ever meets a home it cannot name.
+ */
 export function childHome(tenant: string): string {
-  return path.join(merrymenHome(), "children", tenant.toLowerCase());
+  const lc = tenant.toLowerCase();
+  if (isPerpsWorkerKey(lc)) return perpsChildHome(merrymenHome(), workerOwner(lc));
+  return path.join(merrymenHome(), "children", lc);
 }
 
 /** The fleet-halt marker: present = stop every child and spawn none. Operator-only. */
@@ -1022,14 +1036,28 @@ export { botWillPoll };
 export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBroker?: boolean } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of CHILD_SECRET_STRIP) delete env[k];
+  const key = parseWorkerKey(tenant.toLowerCase());
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
-  // WHICH TENANT THIS CHILD IS, lowercased. Not a secret and not authority:
-  // the child uses it only to refuse a fomo.json written for someone else
-  // (fomo/child-file.ts readChildFomoFile). Nothing on this side reads it
-  // back — the IPC broker stamps the tenant this process spawned the child
-  // for (attachFomoBroker), never one the child names.
-  env.MERRYMEN_TENANT = tenant.toLowerCase();
+  /**
+   * WHICH WALLET THIS CHILD SERVES, AND ITS OWN FILES, always set here.
+   *
+   * MERRYMEN_WALLET_PURPOSE decides whether a worker arms a Spot or a Perps
+   * grant (settings.ts workerWalletOf; index.ts refuses the other at arm), so
+   * an orchestrator env that carried `perps` would have every Spot child
+   * refuse its own grant, and a typo would stop every child at boot. And the
+   * two file overrides (grant.ts, settings.ts) outrank MERRYMEN_HOME: inherited,
+   * they would point every child at one grant and one settings file.
+   */
+  env.MERRYMEN_WALLET_PURPOSE = key?.purpose ?? "spot";
+  env.MERRYMEN_GRANT_FILE = path.join(env.MERRYMEN_HOME, "grant.json");
+  env.MERRYMEN_SETTINGS_FILE = path.join(env.MERRYMEN_HOME, "settings.json");
+  // WHICH TENANT THIS CHILD IS, lowercased: the owner, for either wallet. Not
+  // a secret and not authority: the child uses it only to refuse a fomo.json
+  // written for someone else (fomo/child-file.ts readChildFomoFile). Nothing
+  // on this side reads it back — the IPC broker stamps the tenant this process
+  // spawned the child for (attachFomoBroker), never one the child names.
+  env.MERRYMEN_TENANT = key?.owner ?? tenant.toLowerCase();
   /**
    * THE ROLLOUT, REDUCED TO THIS TENANT'S OWN LEVEL (fleet-rollout.ts).
    *
@@ -1051,21 +1079,38 @@ export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean; flowBrok
    */
   delete env[FLEET_ROLLOUT_ENV];
   delete env[ROLLOUT_NEW_TENANTS_ENV];
-  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(tenant, process.env, newTenantAdmissions);
+  // The OWNER's level, for either wallet: the rollout names logins, never one
+  // of their workers (worker-key.ts).
+  env[ADMISSION_LEVEL_ENV] = childAdmissionLevel(key?.owner ?? tenant, process.env, newTenantAdmissions);
   // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
   // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
   // on an empty memory it would re-ask about the owner's groups, leave them,
   // and hand out a fresh day's allowances. Never set to "1": an operator's
   // fleet-wide 0 is inherited above and stays.
   if (opts.tgGroupsOff) env.MERRYMEN_TG_GROUPS = "0";
+  /**
+   * A PERPS WORKER IS NEVER A PUBLIC SPEAKER AND NEVER RUNS THE BRAIN.
+   *
+   * Groups off: what a Perps wallet does is withheld from every public surface
+   * (docs/perps.md rule 17), and a group is one. The Brain off: its live mode
+   * submits Spot buys, and both of its variables accept `all`, so a fleet-wide
+   * value would have a Perps wallet spend its perp collateral on tokens. The
+   * worker refuses both itself as well (index.ts); this is the boundary.
+   */
+  if (key?.purpose === "perps") {
+    env.MERRYMEN_TG_GROUPS = "0";
+    delete env.MERRYMEN_BRAIN_LIVE;
+    delete env.MERRYMEN_BRAIN_SHADOW;
+  }
   // THE FLOW BROKER ANSWERS ON THIS CHILD'S CHANNEL (flow-broker.ts
   // FLOW_BROKER_ENV): said only when the Bitquery lane is on here and the
   // child gets the IPC channel, so a child never asks — and never waits — for
   // a broker nobody attached. Never inherited: it describes this process,
   // not a fleet-wide choice an operator's variable could make for it. Who may
   // actually ask is still decided per request, by the research allowlist.
+  // Never a Perps worker's: it asks nothing about tokens.
   delete env[FLOW_BROKER_ENV];
-  if (opts.flowBroker) env[FLOW_BROKER_ENV] = "1";
+  if (opts.flowBroker && key?.purpose !== "perps") env[FLOW_BROKER_ENV] = "1";
   /**
    * WHERE THE CHILDREN AGREE WITH EACH OTHER.
    *
