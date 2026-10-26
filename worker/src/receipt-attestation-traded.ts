@@ -329,16 +329,17 @@ async function chainEvidence(o: TradedReceiptAttestationOptions, local: Read, co
   const custody = attestationCustody(publicGrant);
   const evidence: Plan["evidence"] = [];
   let bytes = 0, refusal: unknown = null;
+  /** A refusal inside the scanner's seam survives the scanner's own catch, which would report it as an unread window. */
+  const kept = (error: unknown): never => { refusal ??= error; throw error; };
+  const inSeam = (reason: string): never => { try { return refuse(reason); } catch (error) { return kept(error); } };
   const rpc: RpcCall = async (method, params) => {
-    authority(o);
+    try { authority(o); } catch (error) { kept(error); }
     const result = await o.rpc(method, params);
     const item = { method, params: [...params], result };
     bytes += Buffer.byteLength(canonicalJson(item));
-    if (bytes > 4_000_000 || evidence.length >= 2048) refuse("chain proof exceeds the bounded repair");
+    if (bytes > 4_000_000 || evidence.length >= 2048) inSeam("chain proof exceeds the bounded repair");
     evidence.push(item); return result;
   };
-  /** A refusal inside the scanner's seam survives the scanner's own catch. */
-  const inSeam = (reason: string): never => { try { return refuse(reason); } catch (error) { refusal = error; throw error; } };
   const header = async (n: bigint) => {
     const b = await rpc("eth_getBlockByNumber", [hex(n), false]) as { number?: unknown; hash?: unknown; timestamp?: unknown } | null;
     if (!b || quantity(b.number) !== n || typeof b.hash !== "string" || !HASH.test(b.hash)) refuse("block evidence is malformed");

@@ -448,3 +448,12 @@ test("rows far apart in the key space are all bound: a change several key window
     assert.equal((await commit(f, preview.approvalDigest)).state, "applied", "another tenant's rows are not this book's evidence");
   } finally { f.close(); }
 });
+
+test("a lease lost while the window is read refuses by its own name, not as an unread window", async () => {
+  const f = await fixture();
+  try {
+    let reads = 0;
+    const rpc: typeof f.rpc = async (method, params) => { if (method === "eth_getLogs" && ++reads === 1) f.setHealthy(false); return f.rpc(method, params); };
+    await refusesWithoutWriting(f, /tenant lease is not held/, { ...f.options, rpc });
+  } finally { f.close(); }
+});
