@@ -126,7 +126,8 @@ import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
 import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
-import { attestOriginalReceipt, type ReceiptAttestationOptions, type ReceiptAttestationReport } from "./receipt-attestation";
+import type { ReceiptAttestationOptions, ReceiptAttestationReport } from "./receipt-attestation";
+import { attestReceipt, type TradedReceiptAttestationReport } from "./receipt-attestation-traded";
 import { assertNoPendingReceiptAttestation, ensureReceiptAttestationSchema } from "./receipt-attestation-state";
 import { receiptAttestationRequest, receiptAttestationTenant } from "./receipt-attestation-controls";
 import {
@@ -1456,11 +1457,18 @@ const accountingMaintenanceLocalState = (tenant: string) => ({
 
 /** The only mutation entry: ownership is derived from actual supervisor state. */
 export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOptions,
-  "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint">): Promise<ReceiptAttestationReport> {
+  "tenant" | "smartAccount" | "shared" | "rpc" | "mode" | "approvedDigest" | "dialect" | "checkpoint"> & { sharedFlowId?: number }): Promise<ReceiptAttestationReport | TradedReceiptAttestationReport> {
   const tenant = o.tenant.toLowerCase() as `0x${string}`, lease = leases.get(tenant), volume = persistentFleetHome();
   if (!lease || !volume) throw new Error("Receipt attestation requires the supervisor's tenant lease and verified persistent volume.");
   const grant = await getGrantStore("spot").get(tenant);
   if (!grant || grant.smartAccount.toLowerCase() !== o.smartAccount.toLowerCase()) throw new Error("Receipt attestation requires the same current stored account permission; do not replace it to repair accounting.");
+  // An expired grant holding a lease is retired by the next reconcile pass
+  // (retireExpiredGrants), and that is this repair's lease: it would stop the
+  // repair part-way, then mirror and release under it. The hold keeps a
+  // re-signed worker stopped, so the owner re-signs first.
+  if (!Number.isFinite(grant.expiresAt) || grant.expiresAt <= Math.floor(Date.now() / 1000) + 3600) {
+    throw new Error("Receipt attestation requires a stored grant that stays unexpired for the next hour; the owner re-signs first, and the maintenance hold keeps its worker stopped.");
+  }
   const assertQuiescent = () => {
     if (stopping || copiesClosed || leases.get(tenant) !== lease || !lease.healthy()
         || accountingMaintenanceLocalState(tenant).processPresent) throw new Error("Receipt attestation requires a quiet supervisor with its original healthy lease.");
@@ -1470,7 +1478,7 @@ export async function attestReceiptUnderSupervisor(o: Pick<ReceiptAttestationOpt
   // repair and must pass its shared pending gate before touching a cursor.
   return mirrorSerially(tenant, async () => {
     assertQuiescent();
-    return attestOriginalReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
+    return attestReceipt({ ...o, tenant, smartAccount: grant.smartAccount, chainId: grant.chainId,
       home: childHome(tenant), volume, lease, assertQuiescent });
   });
 }
@@ -10114,7 +10122,8 @@ async function runReceiptAttestationIfAsked(): Promise<void> {
       if (body.error) throw new Error(body.error.message ?? "Receipt evidence RPC failed");
       return body.result ?? null;
     };
-    const report = await attestReceiptUnderSupervisor({ tenant, smartAccount: request.account, shared, rpc, mode: request.mode, approvedDigest: request.approvedDigest });
+    const report = await attestReceiptUnderSupervisor({ tenant, smartAccount: request.account, shared, rpc, mode: request.mode, approvedDigest: request.approvedDigest,
+      ...(request.flowId === undefined ? {} : { sharedFlowId: request.flowId }) });
     log(`receipt-attestation| ${JSON.stringify(report)}`);
     log("receipt-attestation| Original grant, account, ledger generation, row IDs, flow time, epoch, high-water mark and mirror witnesses retained. Operator hold and rollout are unchanged.");
   } finally {
