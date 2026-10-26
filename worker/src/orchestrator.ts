@@ -6482,6 +6482,8 @@ function mirrorLoginPauses(): void {
     if (isPerpsWorkerKey(key) && leases.get(key)?.healthy()) mirrorLoginPause(key);
   }
 }
+/** Test seam: one tick of the order ferry's pause mirror. */
+export { mirrorLoginPauses as mirrorLoginPausesForTest };
 
 /**
  * A RECORDED CONTROL NOT YET APPLIED HOLDS A PERPS WORKER, or null.
@@ -12522,6 +12524,8 @@ async function refreshPerpsFeed(): Promise<void> {
   if (!perpsFeed && !perpsSpawnable()) return;
   await perpsFeedNow().refresh();
 }
+/** Test seam: the loop's refresh of the perps feed, after a mirror pass. */
+export { refreshPerpsFeed as refreshPerpsFeedForTest };
 /** FLEET_HALT: the socket goes now; the first pass after the halt lifts starts it again. */
 function pausePerpsFeed(): void {
   perpsFeed?.pause();
