@@ -428,3 +428,23 @@ test("operator flow selection is one decimal shared id, admitted by the staged-r
   assert.equal(scopedReceiptAttestationAllowed({ ...env, MERRYMEN_RECEIPT_ATTEST_FLOW: "x" }, Object.keys(env).filter(k => k.startsWith("MERRYMEN_RECEIPT"))), false);
   void HEAD;
 });
+
+test("rows far apart in the key space are all bound: a change several key windows up still refuses the approval", async () => {
+  const f = await fixture();
+  try {
+    const other = `0x${"9f".repeat(20)}`;
+    // Another tenant's rows between, as in the fleet's shared tables, and this account's rows windows apart.
+    await f.shared.prepare("INSERT INTO equity(id,agent_id,eth_wei,cash_usdg,vault_usdg,positions_usdg,equity_usdg,at,epoch,mode) VALUES(60000,?,'1',1,0,0,1,1,1,'live')").run(other);
+    await f.shared.prepare("INSERT INTO equity(id,agent_id,eth_wei,cash_usdg,vault_usdg,positions_usdg,equity_usdg,at,epoch,mode) VALUES(170001,?,'100',154.95446,0,2.4,157.35446,?,1,'live')").run(TEST_ACCOUNT, BOOKED_AT + 900);
+    await f.local.prepare("INSERT INTO fee_accruals(id,agent_id,profit_usdg,fee_usdg,hwm_before_usdg,hwm_after_usdg,at,epoch) VALUES(120000,?,0.1,0.02,100.6,100.7,?,1)").run(TEST_ACCOUNT, BOOKED_AT + 900);
+    const preview = await attestTradedReceipt(f.options);
+    await f.shared.prepare("UPDATE equity SET cash_usdg=154 WHERE id=170001").run();
+    await refusesWithoutWriting(f, /approval does not match/, { ...f.options, mode: "commit", approvedDigest: preview.approvalDigest });
+    await f.shared.prepare("UPDATE equity SET cash_usdg=154.95446 WHERE id=170001").run();
+    await f.local.prepare("UPDATE fee_accruals SET fee_usdg=0.03 WHERE id=120000").run();
+    await refusesWithoutWriting(f, /approval does not match/, { ...f.options, mode: "commit", approvedDigest: preview.approvalDigest });
+    await f.local.prepare("UPDATE fee_accruals SET fee_usdg=0.02 WHERE id=120000").run();
+    await f.shared.prepare("UPDATE equity SET cash_usdg=2 WHERE id=60000").run();
+    assert.equal((await commit(f, preview.approvalDigest)).state, "applied", "another tenant's rows are not this book's evidence");
+  } finally { f.close(); }
+});

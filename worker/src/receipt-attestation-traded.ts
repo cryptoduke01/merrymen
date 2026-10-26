@@ -62,7 +62,7 @@ export const MAX_WINDOW_BLOCKS = 1_200_000n;
 const SKEW_SEC = 600;
 /** A tick books its flow and journals it in one transaction: one second apart at most, give or take. */
 const ENTRY_SKEW_SEC = 5;
-const PAGE = 5_000;
+const KEY_WINDOW = 50_000;
 const MAX_ROWS = 5_000_000;
 const HASH = /^0x[0-9a-f]{64}$/i;
 const HEX = /^0x[0-9a-f]+$/i;
@@ -139,18 +139,25 @@ interface Read {
   barred: Set<string>;
 }
 
-/** Every row of one account, in bounded pages of a unique integer key. */
+/**
+ * Every row of one account, in key order, read in fixed windows of the unique
+ * integer key. The shared tables hold the whole fleet and have no index on
+ * LOWER(agent_id): a key window is a primary-key range, so one digest is one
+ * pass over the table, and memory is bounded by one window.
+ */
 async function eachRow(db: Db, table: string, key: "id" | "seq", account: string, visit: (row: Row) => void): Promise<void> {
-  let after = 0, seen = 0;
-  for (;;) {
-    const page = await db.prepare(`SELECT * FROM ${table} WHERE LOWER(agent_id) = ? AND ${key} > ? ORDER BY ${key} LIMIT ${PAGE}`).all(account, after) as Row[];
+  const top = await db.prepare(`SELECT MAX(${key}) AS top FROM ${table}`).get() as { top?: unknown } | undefined;
+  const last = top?.top === null || top?.top === undefined ? 0 : safeInteger(top.top);
+  let previous = 0, seen = 0;
+  for (let from = 0; from < last; from += KEY_WINDOW) {
+    const page = await db.prepare(`SELECT * FROM ${table} WHERE LOWER(agent_id) = ? AND ${key} > ? AND ${key} <= ? ORDER BY ${key}`)
+      .all(account, from, Math.min(from + KEY_WINDOW, last)) as Row[];
     for (const row of page) {
       const k = safeInteger(row[key]);
-      if (k <= after) refuse("accounting evidence is out of order");
+      if (k <= previous) refuse("accounting evidence is out of order");
       if (++seen > MAX_ROWS) refuse("accounting evidence exceeds the bounded repair");
-      after = k; visit(row);
+      previous = k; visit(row);
     }
-    if (page.length < PAGE) return;
   }
 }
 async function streamed(db: Db, table: string, key: "id" | "seq", account: string, also?: (row: Row) => void): Promise<string> {
