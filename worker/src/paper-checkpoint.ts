@@ -28,6 +28,10 @@ export const PAPER_CHECKPOINT_ALTERS: readonly string[] = ["ALTER TABLE paper_ch
 
 /** The databases whose checkpoint migration this process has run, or is running. */
 const altered = new WeakMap<Db, Promise<void>>();
+/** When each database's migration last failed: not tried again for PERP_JSON_RETRY_MS. */
+const alterFailedAt = new WeakMap<Db, number>();
+/** How long a failed perp_json migration waits before it is tried again — a mirror pass's length, about. */
+const PERP_JSON_RETRY_MS = 60_000;
 
 /**
  * Create the checkpoint table and bring it up to date.
@@ -40,21 +44,39 @@ const altered = new WeakMap<Db, Promise<void>>();
  * behind it. The runner asks the catalogue first and skips a column already
  * there, and the one ADD it does make waits a bounded time for its lock
  * (ledger-migrations.ts ADD_COLUMN_LOCK). Concurrent passes share the one
- * attempt; a failed one is forgotten, so the next pass tries again, and it
- * throws to its caller (mirrorTenant records `failed.paper_checkpoints`). The
- * CREATE stays per call, as it always was.
+ * attempt. The CREATE stays per call, as it always was.
+ *
+ * A FAILED ONE NEVER HOLDS A SPOT BOOK. Only a book with a paper perp book
+ * needs `perp_json`; every other checkpoint writes and restores exactly as it
+ * did before the column existed. So a migration that could not take its lock
+ * (another session holding paper_checkpoints) answers false, and is not tried
+ * again for PERP_JSON_RETRY_MS — not by the next tenant in the same pass, each
+ * of which would otherwise wait the full bounded lock wait behind the same
+ * holder. The callers decide: the mirror writes a book without perps the old
+ * way and fails only a book that has some; the restore reads either shape.
+ * True once the column is there.
  */
-export async function ensurePaperCheckpointSchema(db: Db): Promise<void> {
+export async function ensurePaperCheckpointSchema(db: Db): Promise<boolean> {
   await db.exec(PAPER_CHECKPOINT_SCHEMA);
   let done = altered.get(db);
   if (!done) {
+    const failedAt = alterFailedAt.get(db);
+    if (failedAt !== undefined && Date.now() - failedAt < PERP_JSON_RETRY_MS) return false;
     done = applyLedgerMigrations(db, PAPER_CHECKPOINT_ALTERS).catch((e: unknown) => {
       altered.delete(db);
+      alterFailedAt.set(db, Date.now());
       throw e;
     });
     altered.set(db, done);
   }
-  await done;
+  try {
+    await done;
+    alterFailedAt.delete(db);
+    return true;
+  } catch (e) {
+    console.warn(`[paper] paper_checkpoints.perp_json could not be added yet (${e instanceof Error ? e.name : "Error"}) — books without perps are checkpointed as before; tried again in ${PERP_JSON_RETRY_MS / 1000}s`);
+    return false;
+  }
 }
 
 /** One paper perp position as a checkpoint carries it. Integers are canonical decimal strings. */
@@ -543,7 +565,7 @@ async function multipliersFor(db: Db, account: string): Promise<MultiplierOf> {
 
 export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<number> {
   if (!await child.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='paper_book'").get()) return 0;
-  await ensurePaperCheckpointSchema(shared);
+  const withPerps = await ensurePaperCheckpointSchema(shared);
   const snapshots = await child.tx(async db => {
     const books = await db.prepare(`SELECT p.*, a.epoch FROM paper_book p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)`).all() as Checkpoint[];
     for (const book of books) {
@@ -570,6 +592,19 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
     // The durable row is written in today's units, so a restore from it never
     // carries a legacy basis back into a book (see normalizedBasis).
     b.basis_json = JSON.stringify(normalizedBasis(b.shares, b.basis_json, multiplierOf).basis);
+    // WITHOUT THE COLUMN (its migration waiting on a lock): a book with no
+    // perps is written exactly as before the column existed; one with perps
+    // is not written at all this pass, and its tenant's mirror says so.
+    if (!withPerps) {
+      if (b.perp_json !== null && b.perp_json !== undefined) throw new Error("paper_checkpoints.perp_json is not there yet; this paper perp book is checkpointed once it is");
+      await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
+        vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
+        WHERE excluded.epoch > paper_checkpoints.epoch OR (excluded.epoch=paper_checkpoints.epoch AND excluded.updated_at>=paper_checkpoints.updated_at)`)
+        .run(b.agent_id,b.epoch,b.cash_usdg,b.vault_usdg,b.hwm_usdg,b.shares,b.basis_json,b.updated_at);
+      count++;
+      continue;
+    }
     // perp_json travels with the rest of the row and is replaced with it —
     // including by NULL, because a newer book with no paper perp book is a
     // book whose perps are gone, and keeping the older ones would resurrect
