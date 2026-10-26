@@ -641,3 +641,39 @@ test("THE perp_json MIGRATION NEVER HOLDS A SPOT BOOK: with paper_checkpoints lo
     console.warn = warn;
   }
 });
+
+test("A perp_json MIGRATION THAT IS NOT A LOCK WAIT IS AN ALERT, and a paper perp book's refusal names its SQLSTATE", async () => {
+  const ACCT = `0x${"cd".repeat(20)}`;
+  const agentRow = `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, status, created_at, hwm_usdg, accrued_fee_usdg, epoch, mode, x_verified, hwm_withdrawn_usdg)
+    VALUES (?, 'a', ?, ?, 1, '{}', 0, 9999999999, 'active', 0, 0, 0, 1, 'paper', 0, 0)`;
+  const child = wrapSqlite(new DatabaseSync(":memory:"));
+  await applyLedgerSchema(child);
+  await child.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  await child.prepare("INSERT INTO paper_book (agent_id, cash_usdg, vault_usdg, hwm_usdg, shares) VALUES (?, 100, 0, 100, '{}')").run(ACCT);
+  // A paper perp book: its checkpoint needs the column.
+  await child.prepare("INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water) VALUES (?, 'paper', '1000000', '5')").run(ACCT);
+  const sharedRaw = new DatabaseSync(":memory:");
+  const inner = wrapSqlite(sharedRaw);
+  await applyLedgerSchema(inner);
+  await inner.exec(PAPER_CHECKPOINT_SCHEMA);
+  await inner.prepare(agentRow).run(ACCT, ACCT, ACCT);
+  const shared = {
+    prepare: (sql: string) => inner.prepare(sql),
+    tx: (fn: never) => inner.tx(fn),
+    async exec(sql: string) {
+      // Postgres's own shape: name "error", the reason in code.
+      if (/ALTER TABLE paper_checkpoints/i.test(sql)) throw Object.assign(new Error("must be owner of table paper_checkpoints"), { name: "error", code: "42501" });
+      return inner.exec(sql);
+    },
+  } as unknown as Parameters<typeof mirrorPaperCheckpoints>[1];
+  const said: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
+  try {
+    await assert.rejects(mirrorPaperCheckpoints(child, shared), /perp_json is not there yet \(42501\)/);
+    assert.ok(said.some((l) => l.startsWith("[alert]") && l.includes("42501")), said.join("\n"));
+    assert.ok(!said.some((l) => l.includes("must be owner")), "the driver's text is never logged");
+  } finally {
+    console.warn = warn;
+  }
+});

@@ -30,6 +30,8 @@ export const PAPER_CHECKPOINT_ALTERS: readonly string[] = ["ALTER TABLE paper_ch
 const altered = new WeakMap<Db, Promise<void>>();
 /** When each database's migration last failed: not tried again for PERP_JSON_RETRY_MS. */
 const alterFailedAt = new WeakMap<Db, number>();
+/** And why: the last failure's SQLSTATE (failureCode), for the error a paper perp book's checkpoint carries. */
+const alterFailedCode = new WeakMap<Db, string>();
 /** How long a failed perp_json migration waits before it is tried again — a mirror pass's length, about. */
 const PERP_JSON_RETRY_MS = 60_000;
 
@@ -46,14 +48,17 @@ const PERP_JSON_RETRY_MS = 60_000;
  * (ledger-migrations.ts ADD_COLUMN_LOCK). Concurrent passes share the one
  * attempt. The CREATE stays per call, as it always was.
  *
- * A FAILED ONE NEVER HOLDS A SPOT BOOK. Only a book with a paper perp book
- * needs `perp_json`; every other checkpoint writes and restores exactly as it
- * did before the column existed. So a migration that could not take its lock
- * (another session holding paper_checkpoints) answers false, and is not tried
- * again for PERP_JSON_RETRY_MS — not by the next tenant in the same pass, each
+ * A FAILED ONE HOLDS A SPOT BOOK ONCE A WINDOW AT MOST. Only a book with a
+ * paper perp book needs `perp_json`; every other checkpoint writes and
+ * restores exactly as it did before the column existed. So a migration that
+ * failed — most likely its lock held by another session, but whatever the
+ * cause, named by its SQLSTATE in the log — answers false, and is not tried
+ * again for PERP_JSON_RETRY_MS: not by the next tenant in the same pass, each
  * of which would otherwise wait the full bounded lock wait behind the same
- * holder. The callers decide: the mirror writes a book without perps the old
- * way and fails only a book that has some; the restore reads either shape.
+ * holder. The one attempt in each window still waits that bounded wait (about
+ * 14 s on Postgres), and so does a checkpoint running beside it. The callers
+ * decide: the mirror writes a book without perps the old way and fails only a
+ * book that has some, naming the same code; the restore reads either shape.
  * True once the column is there.
  */
 export async function ensurePaperCheckpointSchema(db: Db): Promise<boolean> {
@@ -65,6 +70,7 @@ export async function ensurePaperCheckpointSchema(db: Db): Promise<boolean> {
     done = applyLedgerMigrations(db, PAPER_CHECKPOINT_ALTERS).catch((e: unknown) => {
       altered.delete(db);
       alterFailedAt.set(db, Date.now());
+      alterFailedCode.set(db, failureCode(e));
       throw e;
     });
     altered.set(db, done);
@@ -74,9 +80,22 @@ export async function ensurePaperCheckpointSchema(db: Db): Promise<boolean> {
     alterFailedAt.delete(db);
     return true;
   } catch (e) {
-    console.warn(`[paper] paper_checkpoints.perp_json could not be added yet (${e instanceof Error ? e.name : "Error"}) — books without perps are checkpointed as before; tried again in ${PERP_JSON_RETRY_MS / 1000}s`);
+    const code = failureCode(e);
+    // A lock wait passes by itself; anything else (a missing privilege, say)
+    // will not, and a Perps book stays uncheckpointed until someone looks.
+    console.warn(code === LOCK_NOT_AVAILABLE
+      ? `[paper] paper_checkpoints.perp_json could not be added yet (${code}, its lock held elsewhere) — books without perps are checkpointed as before; tried again in ${PERP_JSON_RETRY_MS / 1000}s`
+      : `[alert] paper_checkpoints.perp_json could not be added (${code}) — not a lock wait; books without perps are checkpointed as before, paper perp books are not; tried again in ${PERP_JSON_RETRY_MS / 1000}s`);
     return false;
   }
+}
+
+const LOCK_NOT_AVAILABLE = "55P03";
+
+/** A failure's SQLSTATE, which never quotes table contents, or its class name. */
+function failureCode(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : e instanceof Error ? e.name : "Error";
 }
 
 /** One paper perp position as a checkpoint carries it. Integers are canonical decimal strings. */
@@ -596,7 +615,8 @@ export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<numbe
     // perps is written exactly as before the column existed; one with perps
     // is not written at all this pass, and its tenant's mirror says so.
     if (!withPerps) {
-      if (b.perp_json !== null && b.perp_json !== undefined) throw new Error("paper_checkpoints.perp_json is not there yet; this paper perp book is checkpointed once it is");
+      if (b.perp_json !== null && b.perp_json !== undefined)
+        throw new Error(`paper_checkpoints.perp_json is not there yet (${alterFailedCode.get(shared) ?? "unknown"}); this paper perp book is checkpointed once it is`);
       await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
         vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
