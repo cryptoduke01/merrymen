@@ -239,6 +239,13 @@ be attested before its owner re-signs. A re-sign between the preview and
 stale, but after a commit is interrupted it refuses every retry and leaves the
 pending barriers in place. Re-sign after `applied`.
 
+**One deployed commit from the preview to `applied`.** Both books are bound by
+digests of whole rows, as in the untouched-book protocol, so a deploy that adds
+a column to a protected table (the shared ledger migrates on the next mirror
+pass) changes the evidence: before the commit it makes the approval stale, and
+after an interrupted commit it refuses every retry. Between the preview and
+`applied`, change only variables; the redeploys they cause keep the image.
+
 **Reads.** Chain evidence goes through the fleet's read path (`chainReadRpc`,
 as for the untouched-book protocol): a house endpoint that refuses, a spent
 quota included, fails over to the chain's public RPC. A window still unread
