@@ -1658,7 +1658,9 @@ describe("the orchestrator ferries it where the contract says", () => {
     const unreadable = rec.indexOf("store unreadable, skipping this reconcile");
     const wanted = rec.indexOf("const wanted = new Set(");
     const killBranch = rec.indexOf("grant removed — standing it down");
-    const sweep = rec.indexOf("await sweepTgGroups(wanted, listedAtMs);");
+    // Every wanted worker and every Perps worker's owner (whose bot's DM memory
+    // is the login's), and only on a pass whose Perps roster read.
+    const sweep = rec.indexOf("if (perps.readable) await sweepTgGroups(new Set([...wanted, ...perps.keys.map((k) => workerOwner(k))]), listedAtMs);");
     assert.ok(stamp > 0 && list > stamp, "the bound is taken before the listing is asked for");
     assert.match(rec.slice(list, unreadable), /await store\.listTenantExpiries\(\)/, "the expiry-aware roster is read after the bound");
     assert.match(rec.slice(list, unreadable), /await store\.listTenants\(\)/, "the fallback roster is read after the bound");

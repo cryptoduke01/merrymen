@@ -24,6 +24,8 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import type { ExecMode } from "../exec-mode";
 import type { AgentLimits, PerpOrderIntent, TradeIntent } from "../policy";
+import { perpsWalletRefusal } from "../policy";
+import { rejectRuleLabel, ownerRejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { buildOpenDraft } from "./drafts";
 import { createPaperPerpExecutor, PerpRefused, type PerpExecutor } from "./executor";
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "./feed-reader";
@@ -508,6 +510,56 @@ describe("the wiring in index.ts", () => {
     // A Spot worker never starts the lane's loop, and its strategist is never shown perps.
     assert.match(CODE, /if \(cfg\.workerWallet === "perps"\) await perpLane\.armed\(\)/);
     assert.match(CODE, /\.\.\.\(c\.workerWallet === "perps"\s*\?\s*\{\s*perps: \{/);
+  });
+
+  it("A PERPS WALLET'S WORKER REFUSES EVERY NON-PERP INTENT, first, with no trades row", () => {
+    // An owner's /buy, /transfer, app trade, self-test or energy buy is not a
+    // producer the settings can turn off; it would spend the perp collateral.
+    const locked = fn("processIntentLocked");
+    const refusal = locked.indexOf("const walletRefusal = perpsWalletRefusal(cfg.workerWallet, intent);");
+    const admission = locked.indexOf("const admissionRule = admissionRefusal(");
+    assert.ok(refusal > 0 && refusal < admission, "before admission, so nothing is reserved or read");
+    const body = locked.slice(refusal, locked.indexOf("\n    }\n", refusal));
+    assert.match(body, /lastTradeOutcome = \{ status: "rejected", rejectRule: walletRefusal\.rule \};\s*return;/);
+    // The rule itself: every non-perp kind on a Perps wallet, nothing on Spot.
+    for (const kind of ["swap", "curve-trade", "transfer", "energy-buy", "equity-order"] as const) {
+      assert.deepEqual(perpsWalletRefusal("perps", { kind }), { rule: "perps-wallet-spot" });
+      assert.equal(perpsWalletRefusal("spot", { kind }), null);
+    }
+    assert.equal(perpsWalletRefusal("perps", { kind: "perp-order" }), null);
+    assert.equal(perpsWalletRefusal("perps", { kind: "perp-margin" }), null);
+    assert.doesNotMatch(body, /recordTrade|addTrade|reserveBudget/, "never the public tape, never the budget");
+    // Told to the owner in words, and never on a public lane (rule 17).
+    assert.equal(rejectRuleLabel("perps-wallet-spot"), null, "not in the public register");
+    assert.ok(ownerRejectRuleLabel("perps-wallet-spot"), "the owner is told in words");
+    assert.ok(rejectRuleRemedy("perps-wallet-spot"));
+  });
+
+  it("A PERPS WALLET'S WORKER PUBLISHES NO MARKET REVIEW — its source is a public one (rule 17)", () => {
+    const at = CODE.indexOf("quietReview = async () => {");
+    assert.ok(at > 0, "found the market review");
+    const head = CODE.slice(at, CODE.indexOf("const clock = reviewClock(agentId);", at));
+    assert.match(head, /if \(cfg\.workerWallet === "perps"\) return;/);
+  });
+
+  it("A PERPS WALLET'S WORKER NEVER RUNS THE BRAIN, whatever MERRYMEN_BRAIN_LIVE or _SHADOW say", () => {
+    // The Brain reviews tokens and its live mode submits Spot buys.
+    const tick = fn("tick");
+    const gate = tick.indexOf("shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)");
+    assert.ok(gate > 0, "found the Brain block's gate");
+    const line = tick.slice(tick.lastIndexOf("\n", gate), tick.indexOf("\n", gate));
+    assert.match(line, /^\s*if \(cfg\.workerWallet !== "perps" && \(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\)/);
+  });
+
+  it("SIGTERM stops the protective loop and waits for it, within the drain budget, before the ledger closes", () => {
+    const at = CODE.indexOf('process.on("SIGTERM", () => {');
+    const handler = CODE.slice(at, CODE.indexOf("\n  });\n", at));
+    const stop = handler.indexOf("const protectStopped = perpLane.stopProtect()");
+    const drain = handler.indexOf("drainIntentChain({");
+    const waited = handler.indexOf("protectStopped.then(() => true)");
+    const close = handler.indexOf("closeStore();");
+    assert.ok(stop > 0 && stop < drain && drain < waited && waited < close, `${stop} < ${drain} < ${waited} < ${close}`);
+    assert.match(handler.slice(drain, waited), /drainStartedAt \+ DRAIN_INTENT_CHAIN_MS - Date\.now\(\)/, "bounded by what is left of the same budget");
   });
 
   it("every paper_book read-modify-write runs under the lane's lock, and the tick reads cash with the perp term", () => {

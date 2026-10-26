@@ -56,6 +56,7 @@ import { DERIVED_ID, basisJoin, basisScope, fillFigures, markFigures, publicatio
 import { withReadDb } from "@/lib/ledger";
 import { postIdOf } from "@/lib/post-id";
 import { PUBLISHABLE_SOURCES, publishableThesis, type PublicThesis, type ThesisRow } from "@/lib/thesis";
+import { readPerpsWallets } from "../../../worker/src/perps-wallets";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 
@@ -453,9 +454,20 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
         .all(...args, ...args, VIEW_DEPTH, Math.max(VIEW_PAIRS, limit + 20)) as Promise<Group[]>;
     };
 
+    // NEVER A PERPS WALLET'S AGENT (docs/perps.md rule 17; perps-wallets.ts):
+    // whatever its rows say, an account the orchestrator recorded as a Perps
+    // wallet publishes nothing. A record that cannot be read publishes nothing.
+    let perpsWallets: ReadonlySet<string>;
+    try {
+      perpsWallets = await readPerpsWallets(db);
+    } catch {
+      return { source: "none", theses: [], tradesComplete: false };
+    }
+    const perpsWallet = (r: Group): boolean => perpsWallets.has(String(r.agent_id).toLowerCase());
+
     // The gate alone, for counting while paging. The post it builds here is
     // thrown away; `gated` below builds the one that is returned.
-    const gate = (r: Group): boolean => publishableThesis({ ...r, slug: slugFor.get(String(r.agent_id).toLowerCase()) ?? null }) !== null;
+    const gate = (r: Group): boolean => !perpsWallet(r) && publishableThesis({ ...r, slug: slugFor.get(String(r.agent_id).toLowerCase()) ?? null }) !== null;
 
     // THE ACTION LANE PAGES until enough posts pass the gate or the window
     // runs out, and records which: an empty lane from a scan that stopped at
@@ -569,6 +581,7 @@ export async function readTheses(opts: ReadThesesOptions = {}, readDb = withRead
       } catch { /* Unknown mode must not acquire a badge or hide a post. */ }
     }));
     const gated = (r: Group, unchangedSince: number | null): FeedThesis | null => {
+      if (perpsWallet(r)) return null;
       const slug = slugFor.get(String(r.agent_id).toLowerCase()) ?? null;
       const post = publishableThesis({ ...r, slug, public_book: slug ? bookFor.get(slug) === true : false });
       if (!post) return null;

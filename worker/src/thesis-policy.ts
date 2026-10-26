@@ -1024,6 +1024,16 @@ const PERP_WHY =
 
 export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner: string; remedy: string }>> =
   Object.freeze({
+    // A PERPS WALLET'S WORKER TRADES PERPETUALS AND NOTHING ELSE (index.ts
+    // processIntentLocked): a token trade asked of it — typed in a chat,
+    // queued from the app, a self-test — is refused before anything is read,
+    // and no `trades` row is written for it. Withheld as every perp rule is:
+    // its slug would say the account is a Perps wallet's.
+    "perps-wallet-spot": {
+      why: PERP_WHY,
+      owner: "this is the agent of your Perps wallet, which trades perpetuals only and never buys, sells or sends tokens",
+      remedy: "Trade tokens from your Spot wallet's agent instead; your Perps wallet trades perpetuals only.",
+    },
     "perp-unpriced": {
       why: PERP_WHY,
       owner:

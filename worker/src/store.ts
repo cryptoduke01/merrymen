@@ -826,9 +826,9 @@ export const PERP_EQUITY_ALTERS: readonly string[] = [
   // there takes an AccessExclusiveLock. Each runs once per database (the
   // runner skips a column the catalog already has), and the runner waits a
   // bounded time for that lock and retries rather than queueing every reader
-  // behind a long one (ledger-migrations.ts ADD_COLUMN_LOCK). Nothing writes
-  // them on the shared ledger yet: the mirror's equity list names none of them
-  // until slice 4.
+  // behind a long one (ledger-migrations.ts ADD_COLUMN_LOCK). On the shared
+  // ledger the mirror writes them, as columns it copies only when the child
+  // has them (ledger-mirror.ts LOG_TABLES, the equity entry's `optional`).
   "ALTER TABLE equity ADD COLUMN perp_collateral_micro TEXT",
   "ALTER TABLE equity ADD COLUMN perp_isolated_margin_micro TEXT",
   "ALTER TABLE equity ADD COLUMN perp_unrealized_micro TEXT",

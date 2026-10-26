@@ -380,7 +380,8 @@ describe("the orchestrator's wiring", () => {
   });
 
   it("does not open an IPC channel of its own: the spawn's stdio is still Fomo's decision", () => {
-    assert.match(SRC, /stdio: fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\]/);
+    // A Perps worker's spawn opens none at all: it asks nothing of either broker.
+    assert.match(SRC, /stdio: perpsSlot \|\| fomoBootNow\(\)\.off \? \["ignore", "pipe", "pipe"\] : \["ignore", "pipe", "pipe", "ipc"\]/);
   });
 
   it("says the lane's switches at boot, right after Fomo's", () => {

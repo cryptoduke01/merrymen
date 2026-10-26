@@ -27,8 +27,8 @@ the finished product; this table says how much of it main carries.
 |---|---|---|
 | 1. Core and permission wall | the Lighter route, market and ABI constants, the `perp-lighter-v1` wall option, the canonical-wall marker, the signers' carry-forward. `POST /api/grants` refuses every perps grant (`perp-not-offered`) | merged (#359) |
 | 2. Two wallets per login | wallet purpose and the Kernel index 1 derivation, the Perps grant and settings stores, wallet-aware revocation and renewal, and **the Perps half of every kill**. No route creates, renews, funds or shows a Perps wallet (`perps-wallet-not-offered`) | merged (#361) |
-| 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | in review |
-| 4. Orchestrator and hosted operation | per-wallet worker slots, the hosted stand-down, the final mirror | not yet |
+| 3. Worker engine, paper only | `worker/src/perps`, the vendored signer, the perp ledger and budgets, the paper venue and the paper lane, run only by a Perps wallet's worker; the kill also stands paper books down. `MERRYMEN_PERPS=live` is off in this build | merged (#362) |
+| 4. Orchestrator and hosted operation, paper only | a Perps worker per login (`0x<owner>:perps`, home `children-perps/<owner>`) run only at `MERRYMEN_PERPS=paper`; the paper perp book in the mirror, the checkpoint and the handover specs; one public Lighter feed per orchestrator; the kill and `/pause` reaching both wallets' workers. The **live** stand-down is not in it (see below) | in review |
 | 5. Web API, desk and CLI | making and funding a Perps wallet, the desk, onboarding, `status` and `recover` for the Perps wallet | not yet |
 | 6. Other surfaces | Telegram, MCP, the partner API, then the phone clients | not yet |
 
@@ -51,12 +51,99 @@ starts a Perps worker yet. There is no live executor, reconciler or on-chain leg
 `MERRYMEN_PERPS=live` is off, and a live account with perps on is refused
 `perp-live-not-yet`. The signer is vendored and hash-checked but loaded only by
 its own tests. The hosted checkpoint of paper perp state and the mirror of the
-perp ledger are slice 4's. The style profiles (`perpsStyle`) and the Brain
+perp ledger are slice 4's (below). The style profiles (`perpsStyle`) and the Brain
 driver came later on the branch and are not in this build: `perpsDriver` is
 `perp-trend`, `strategist` or `manual`, and `perp-trend` trades the 4 h
 `swing-trend` signal. A Perps worker builds no LLM strategist (its strategy is
 `perps-only`), so `strategist` resolves to `manual` there, never to
 `perp-trend`.
+
+**What slice 4 carries, and what it does not.** Hosted operation of **paper**
+Perps workers, and nothing live:
+
+- *A worker per wallet.* The orchestrator keeps each login's Perps worker under
+  the key `0x<owner>:perps` (`worker-key.ts`) with its home at
+  `children-perps/<owner>`, so no Spot path moves. It reads the Perps grant and
+  settings stores by owner, hands the child `MERRYMEN_WALLET_PURPOSE=perps`,
+  its own pinned grant and settings files and no venue key, and gives it no
+  Telegram, groups, DM memory, Fomo or flow broker, IPC channel, public id or
+  public roster (rule 17). Its holder status is the owner's, read-only. It is
+  held as its owner is (accounting hold, rollout, chain check), never through
+  the new-tenant route, and spawned after every Spot worker. While the owner
+  has an unexpired Spot grant, it runs only on the replica holding that Spot
+  lease, so a login is never split across replicas. That is checked at every
+  start and restart, on every pass and the moment the Spot lease drops. One
+  that loses the lease is stood down, final-passed and released.
+- *Only at `MERRYMEN_PERPS=paper`.* The Perps roster is read whatever the flag
+  says (being listed is what keeps a Perps book, lease and home from every
+  cleanup), but a Perps worker is started only at `paper`. Turned off, a
+  running one is stood down as a kill stands one down, its last rows mirrored
+  and its lease given back; its paper positions are frozen until `paper`
+  returns. A Perps worker also gives its process slot back, the same way, when
+  a Spot worker is waiting for one (Spot first). An unreadable Perps roster
+  changes nothing for any Perps worker: none is started, stood down, yielded,
+  wiped or released on that pass. There are two exceptions, both read from
+  outside the Perps roster. A worker whose last-read grant has expired is
+  retired as on any pass (stood down, final-passed, its lease released),
+  because expired authority goes either way. One whose owner's Spot lease left
+  this replica is stood down; its final pass and release wait for a pass that
+  reads.
+- *Durable books.* The perp ledger mirrors to Postgres (own account only, inert
+  for a Spot book with no perp rows), the paper checkpoint carries the perp
+  book (`perp_json`, recorded stops included), and the ledger-import specs carry
+  the perp tables. Every way a Perps worker stops (kill, removal, expiry, the
+  flag leaving `paper`, a yielded slot, the drain) ends in a final mirror pass
+  under the Perps account: the one its spawn read from the grant, or after a
+  restart the `perps_wallets` record, used only when the book is that
+  account's. With neither, or a book that is not that one account's, nothing
+  is copied and the lease and home are kept; and a running Perps worker is
+  never handed a grant for another account (an `[alert]` instead: a re-sign
+  names the same, derived account). While the `perp_json` column
+  cannot be added, Spot books are written without it, and paper perp books
+  are not written at all (the log names the SQLSTATE; anything but a lock wait
+  is an `[alert]`). The add is tried at most once a minute, and only that one
+  attempt, with any checkpoint beside it, waits its bounded lock wait (about
+  14 s). The fleet handover refuses while a Perps book exists, until it covers
+  them.
+- *Off every public read (rule 17).* The orchestrator records each Perps
+  wallet in `perps_wallets` before its worker first starts (no record, no
+  worker), and the directory, leaderboard, theses and decision pages leave
+  those accounts out; one that cannot read the record says so rather than
+  listing both wallets. A Perps worker publishes no market review.
+- *One feed.* `perps/fleet-feed.ts` publishes the public Lighter feed every
+  hosted Perps worker reads, over what this replica's own Perps workers want
+  and the markets their books hold. It runs only at `paper`, is paused under
+  FLEET_HALT and is stopped before the drain. A book that will not read keeps
+  the markets it last read, because its positions still need prices to close
+  at their stops; one never read keeps the feed as it was.
+- *The kill and the pause.* A kill from the owner's bot, or one sitting in a
+  Perps worker's home, is the owner's whole kill (both wallets, Solana, paper
+  off), and every worker it revokes is stood down before the ✅. `/pause` is the
+  login's: the Spot home's pause is mirrored into the Perps home. A kill in the
+  owner's recovery journal, not yet carried out, holds the Perps worker: it does
+  not start. A recorded pause not yet applied, or a durable pause, starts it
+  paused instead (its protective loop still closes at stops), and it stays
+  paused until the owner's Spot home is armed and says otherwise.
+
+**Not in slice 4.** The live hosted stand-down (closing at Lighter, bringing
+money home, Lighter's 1 USDG withdrawal minimum), the venue key's hand-over,
+the live checkpoint and `custodySentence` come with the live executor, after
+the paper slices. **A Perps worker runs no bot in this build**: the bot seat a
+Perps-only login needs (the Perps worker running the owner's bot when there is
+no Spot grant, and a Perps-aware bot) is slice 6a's. Until then a Perps-only
+owner stops from the web and the phones.
+
+**Known limitation: a lost Perps home.** A Perps worker whose persistent home
+is lost (the volume replaced, not handed over) does not start again. Its
+import receipt (`tenant_ledger_import`, key `0x<owner>:perps`) is never
+released by any automatic path, the attested-gap registration refuses a Perps
+key, and the Perps smart account is fixed per owner, so a re-sign does not
+help. It fails closed: the orchestrator logs that the persistent original
+book is unconfirmed on every pass, and nothing is lost, because the mirrored
+perp rows and `paper_checkpoints.perp_json` stay in Postgres. An operator
+recovery path (admitting a fresh Perps book and restoring `perp_json` into
+it) is not built yet. Until it is, never replace a volume while Perps books
+are on it; the handover already refuses.
 
 ## One login, two wallets
 
@@ -67,8 +154,8 @@ A login holds two wallets, derived from **one owner key**:
 - **Perps**: Kernel index 1 (`accountIndexForPurpose`), a different address.
   It holds the Lighter account and nothing else.
 
-Each wallet has its own grant, session key, settings, ledger rows and (from
-slice 4) worker. A grant says which wallet it is for in `purpose`: absent is
+Each wallet has its own grant, session key, settings, ledger rows and worker
+(hosted from slice 4). A grant says which wallet it is for in `purpose`: absent is
 Spot, `"perps"` is Perps, and anything else is refused, never read as Spot
 (`grantPurpose`). A Perps claim names its wallet in the signed binding text
 (`Account purpose: perps`), so a signature over a Spot claim cannot be replayed
@@ -402,11 +489,15 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     keeps its stops and closes on its own rules. A grant signed after a
     Telegram kill keeps its settings too. A paper strategy that could not be
     turned off makes the kill incomplete, said as that and never as a grant
-    that may still sign. The live stand-down below arrives with the hosted
-    worker in slice 4, and the kill answer gains a third state then,
-    `closing`, because closing positions takes up to 15 minutes hosted and can
-    end with money left at Lighter; Telegram and `get_attention` report how it
-    ended.
+    that may still sign. From slice 4, hosted, the running Perps worker is
+    stood down before the ✅ (its restart cancelled, its process signalled, its
+    grant copy removed; a copy that will not go keeps the kill pending), and a
+    kill sitting in a Perps worker's home is carried out as the owner's whole
+    kill, the Perps grant judged first. The live stand-down below arrives with
+    the live executor, after the paper slices, and the kill answer gains a
+    third state then, `closing`, because closing positions takes up to 15
+    minutes hosted and can end with money left at Lighter; Telegram and
+    `get_attention` report how it ended.
 
     *The stand-down.* Order: close each position with a
     reduce-only IOC within `perpsMaxSlippageBps` of mark (up to three
@@ -956,9 +1047,9 @@ before all six are merged and deployed with perps off.
 - There is no testnet venue; the first live deposit, key registration and
   withdrawal happen on mainnet with a small amount.
 - Hosted, a Telegram /kill reaches the Perps wallet only through a process
-  answering the owner's bot, and until the Perps worker exists (slice 4) that
-  is the Spot agent's. A Perps-only owner's kill paths are the web and the
-  phones until then.
+  answering the owner's bot, and until the bot seat lands (slice 6a) that is
+  the Spot agent's: a Perps worker runs no bot. A Perps-only owner's kill paths
+  are the web and the phones until then.
 - Start over (`/api/grants/discard`) revokes both wallets' grants and resets
   the Spot paper book, but does not stop the Solana strategy. "Kill all agents"
   is the control that stops everything.

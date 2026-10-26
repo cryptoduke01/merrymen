@@ -493,11 +493,16 @@ describe("SIGTERM: stop starting things, let the chain finish, leave", () => {
       // And the Telegram poll: an owner's message that arrives now is left
       // unconsumed for the next process, not taken by one that is leaving.
       "telegramPoll.stop();",
+      // And the perps protective loop, whose exits no drain refusal reaches:
+      // stopped before the wait, and waited for before the ledger closes.
+      "const protectStopped = perpLane.stopProtect()",
       "drainIntentChain({",
       "tail: () => intentChain,",
       // And the tick that put the trade there: its work after the chain empties.
       "tick: () => tickClock.settled(),",
       "budgetMs: DRAIN_INTENT_CHAIN_MS,",
+      "const left = Math.max(0, drainStartedAt + DRAIN_INTENT_CHAIN_MS - Date.now());",
+      "protectStopped.then(() => true),",
       "closeStore();",
       "process.exit(0);",
     ];

@@ -212,7 +212,8 @@ describe("the orchestrator writes nothing in a child's home in place", () => {
   it("grant.json, at spawn and on a re-sign under a running child", () => {
     assert.match(
       body(ORCH, "async function writeGrantForChild("),
-      /writeFileAtomicSync\(path\.join\(home, "grant\.json"\), JSON\.stringify\(grant, null, 2\), 0o600\);/,
+      // The child's copy: the stored grant less a Lighter key's sealed half (grantFileFor).
+      /writeFileAtomicSync\(path\.join\(home, "grant\.json"\), JSON\.stringify\(grantFileFor\(grant\), null, 2\), 0o600\);/,
     );
     const refresh = body(ORCH, "async function refreshGrantForChild(");
     assert.match(refresh, /writeFileAtomicSync\(file, next, 0o600\);/);
