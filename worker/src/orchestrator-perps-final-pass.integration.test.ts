@@ -106,28 +106,46 @@ const live = (tenant: string) => spawned.filter((p) => p.env.MERRYMEN_HOME === o
 const used: `0x${string}`[] = [];
 const ownerAt = (n: number) => { const o = address(n); used.push(o); return o; };
 
-/** The shared database, as the hosted fleet has it: ledger, mirror state, owner controls. */
-async function sharedDb(opts: { controls?: boolean } = {}) {
+/**
+ * The shared database, as the hosted fleet has it: ledger, mirror state, owner
+ * controls. `onRecordRead` runs once, the first time anything reads the
+ * perps_wallets record (not when the orchestrator writes it).
+ */
+async function sharedDb(opts: { controls?: boolean; onRecordRead?: () => void } = {}) {
   const raw = new DatabaseSync(":memory:");
-  const shared = wrapSqlite(raw);
-  await applyLedgerSchema(shared);
-  await shared.exec(MIRROR_STATE_DDL);
-  if (opts.controls !== false) await ensureTelegramSchema(shared);
+  const inner = wrapSqlite(raw);
+  await applyLedgerSchema(inner);
+  await inner.exec(MIRROR_STATE_DDL);
+  if (opts.controls !== false) await ensureTelegramSchema(inner);
+  let onRecordRead = opts.onRecordRead ?? null;
+  const shared: typeof inner = {
+    prepare(sql) {
+      if (onRecordRead && /perps_wallets/.test(sql) && !/INSERT|CREATE/.test(sql)) {
+        const f = onRecordRead;
+        onRecordRead = null;
+        f();
+      }
+      return inner.prepare(sql);
+    },
+    exec: (sql) => inner.exec(sql),
+    tx: (fn) => inner.tx(fn),
+  };
   orch.setRetirementMemoryStoreForTest({ shared, dek, dialect: "sqlite" });
   const fills = (account: string) =>
     (raw.prepare("SELECT agent_id FROM perp_fills WHERE agent_id = ?").all(account.toLowerCase()) as unknown[]).length;
   return { raw, shared, fills };
 }
 
-/** What a hosted Perps worker leaves in its home: its agent, its paper account, one fill. */
-async function perpsBook(owner: `0x${string}`, account: `0x${string}`): Promise<void> {
+/** What a hosted Perps worker leaves in its home: its agent, its paper account, one fill. `alsoAgent` is a second agents row no Perps book should hold. */
+async function perpsBook(owner: `0x${string}`, account: `0x${string}`, alsoAgent?: `0x${string}`): Promise<void> {
   const home = orch.childHome(perpsKey(owner));
   mkdirSync(home, { recursive: true });
   const raw = new DatabaseSync(path.join(home, "merrymen.db"));
   try {
     await applyLedgerSchema(wrapSqlite(raw));
-    raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
-      VALUES (?, ?, ?, 4663, '{}', 1, 9999999999)`).run(account, owner, account);
+    for (const agent of [account, ...(alsoAgent ? [alsoAgent] : [])])
+      raw.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at)
+        VALUES (?, ?, ?, 4663, '{}', 1, 9999999999)`).run(agent, owner, agent);
     raw.prepare(`INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro, nonce_high_water) VALUES (?, 'paper', '1000000', '5')`)
       .run(account.toLowerCase());
     raw.prepare(`INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, base, price, quote_micro, fee_micro,
@@ -263,6 +281,38 @@ describe("a stopped Perps worker's final pass", () => {
     assert.ok(existsSync(path.join(orch.childHome(perpsKey(p)), "merrymen.db")));
   });
 
+  it("a book that is not one account's: nothing is copied, and its lease and home are kept", async () => {
+    const { fills } = await sharedDb();
+    const o = ownerAt(0xb9), perpsAcct = address(0xba);
+    await perps.put(o, grant(o, perpsAcct, { purpose: "perps" }));
+    await passes(1);
+    assert.equal(live(perpsKey(o)).length, 1);
+    await perpsBook(o, perpsAcct, address(0xbb));
+    await perps.remove(o);
+    await passes(3);
+    assert.equal(fills(perpsAcct), 0, "no account's rows are settled as another's");
+    assert.equal(orch.hasLeaseForTest(perpsKey(o)), true, "the lease is kept");
+    assert.ok(existsSync(path.join(orch.childHome(perpsKey(o)), "merrymen.db")), "and the home");
+    assert.ok(said.some((l) => l.includes("This Perps book is not one account's")), "and it is said");
+  });
+
+  it("a lease lost while the account is read leaves no recovery barrier, and copies nothing", async () => {
+    let o = "" as `0x${string}`;
+    const { fills } = await sharedDb({ onRecordRead: () => orch.loseLeaseForTest(perpsKey(o)) });
+    o = ownerAt(0xbc);
+    const perpsAcct = address(0xbd);
+    await perps.put(o, grant(o, perpsAcct, { purpose: "perps" }));
+    await passes(1);
+    assert.equal(live(perpsKey(o)).length, 1);
+    await perpsBook(o, perpsAcct);
+    orch.forgetPerpsSlotAccountsForTest();
+    await perps.remove(o);
+    await passes(3);
+    assert.equal(fills(perpsAcct), 0, "no copy without the lease");
+    assert.ok(!existsSync(path.join(orch.childHome(perpsKey(o)), "ledger-source-blocked.json")), "and no barrier left behind");
+    assert.ok(existsSync(path.join(orch.childHome(perpsKey(o)), "merrymen.db")), "the book is kept");
+  });
+
   it("its grant expiring under it: stood down, final-passed by expiry retirement, its lease back", async () => {
     const { fills } = await sharedDb();
     const o = ownerAt(0xc1), perpsAcct = address(0xc3);
@@ -277,6 +327,24 @@ describe("a stopped Perps worker's final pass", () => {
     assert.equal(fills(perpsAcct), 1, "its last fill is on the shared tape");
     assert.equal(orch.hasLeaseForTest(perpsKey(o)), false, "its lease is given back");
     assert.ok(await perps.get(o), "expiry keeps the stored grant");
+  });
+});
+
+describe("a re-sign under a running Perps worker", () => {
+  it("is never handed over when it names another account: the worker keeps its own, and the record is unchanged", async () => {
+    const { readPerpsWallets } = await import("./perps-wallets");
+    const { shared } = await sharedDb();
+    const o = ownerAt(0xe1), perpsAcct = address(0xe2), other = address(0xe3);
+    await perps.put(o, grant(o, perpsAcct, { purpose: "perps" }));
+    await passes(1);
+    assert.equal(live(perpsKey(o)).length, 1);
+    await perps.put(o, grant(o, other, { purpose: "perps" }));
+    await passes(1);
+    const handed = JSON.parse(readFileSync(path.join(orch.childHome(perpsKey(o)), "grant.json"), "utf8")) as { smartAccount: string };
+    assert.equal(handed.smartAccount.toLowerCase(), perpsAcct, "the running worker's grant still names its own account");
+    assert.equal(live(perpsKey(o)).length, 1, "and the worker is not stood down by the refresh");
+    assert.deepEqual([...await readPerpsWallets(shared)], [perpsAcct], "no account the record never named runs");
+    assert.ok(said.some((l) => l.includes("names another account than the running Perps worker's")), "it is an alert");
   });
 });
 

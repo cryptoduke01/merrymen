@@ -121,7 +121,7 @@ import { parseLinkedChatAt, parsePollHealth, tokenTagOf, type PollHealth } from 
 import { conditionAlertTimes } from "./telegram/condition-alert-state";
 import { linksToPromote } from "./telegram/link";
 import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
-import { makePgDb, translateSchema, withAdvisoryLock, type Db } from "./db";
+import { makePgDb, tablePresent, translateSchema, withAdvisoryLock, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
@@ -2461,6 +2461,17 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
     log(`${tenant}: the Perps store returned a grant that is not the Perps wallet's — not handed over`);
     return;
   }
+  // NOR A PERPS GRANT FOR ANOTHER ACCOUNT. A Perps grant's owner is its login
+  // (grant-store.ts toRecord) and its account that owner's index-1 derivation,
+  // so a re-sign names the same account. One that did not would move a running
+  // Perps worker to an account the public reads' exclusion record never named
+  // (perps-wallets.ts: written only before a spawn), with the book's rows
+  // under the old one: kept off the worker, it is a fault to look at.
+  const runningAccount = children.get(tenant)?.smartAccount ?? perpsSlotAccounts.get(tenant);
+  if (slotOf(tenant).perps && runningAccount && grant.smartAccount.toLowerCase() !== runningAccount.toLowerCase()) {
+    log(`[alert] ${tenant}: the Perps store's grant names another account than the running Perps worker's — not handed over; a Perps book is one account's`);
+    return;
+  }
 
   const file = path.join(childHome(tenant), "grant.json");
   const next = JSON.stringify(grantFileFor(grant), null, 2);
@@ -3682,15 +3693,23 @@ async function mirrorGuardedLedger(tenant: string, child: Db, shared: Db, home =
     // — the store can no longer name it. While the grant stands the two must
     // agree (ledger-mirror.ts agreedAccount). A Spot worker's is the grant's.
     let account = isPerpsWorkerKey(tenant) ? children.get(tenant)?.smartAccount ?? perpsSlotAccounts.get(tenant) : undefined;
-    // NOT IN THIS PROCESS'S MEMORY (a restart since): the durable record the
-    // orchestrator wrote before the worker first ran (perps-wallets.ts), and
-    // only when it names exactly one account and the book itself is that
-    // account's. Read before the pending marker, so a record that cannot be
-    // read leaves no recovery barrier behind.
-    if (isPerpsWorkerKey(tenant) && !account) {
-      const recorded = await perpsWalletOf(shared, workerOwner(tenant));
-      const own = recorded ? (await child.prepare("SELECT smart_account FROM agents").all()) as Array<{ smart_account: string }> : [];
-      if (recorded && own.length === 1 && own[0]!.smart_account.toLowerCase() === recorded) account = recorded;
+    if (isPerpsWorkerKey(tenant)) {
+      // THE BOOK SAYS WHOSE IT IS. A Perps book is one account's, and the
+      // mirror counts every other account's perp rows as foreign and moves
+      // past them, so whatever names the account must agree with the book's
+      // own agents row — or nothing is copied, and the lease and home are kept.
+      const own = (await tablePresent(child, "agents"))
+        ? ((await child.prepare("SELECT smart_account FROM agents").all()) as Array<{ smart_account: string }>).map((r) => r.smart_account.toLowerCase())
+        : [];
+      // NOT IN THIS PROCESS'S MEMORY (a restart since): the durable record the
+      // orchestrator wrote before the worker first ran (perps-wallets.ts),
+      // when it names exactly one account and that is the book's.
+      if (!account && own.length === 1 && (await perpsWalletOf(shared, workerOwner(tenant))) === own[0]) account = own[0] as `0x${string}`;
+      if (account && own.some((a) => a !== account!.toLowerCase()))
+        throw new Error("This Perps book is not one account's; nothing is copied, and its lease and home are kept for review.");
+      // All of this before the pending marker: a read that fails, or a lease
+      // lost while it ran, leaves no recovery barrier behind.
+      if (stillOwned && !stillOwned()) throw new Error("Ledger mirror ownership changed while its account was read.");
     }
     const marker = path.join(home, LEDGER_SOURCE_BLOCK);
     writeFileAtomicSync(marker, JSON.stringify({ version: 1, state: "pending-mirror" }), 0o600, { durable: true });
@@ -4863,8 +4882,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     }
     const storedGrant = await slotGrant(tenant);
     // A Perps worker's account, known from here on: its final pass needs it
-    // even when this spawn is turned away below (mirrorGuardedLedger).
-    if (isPerpsWorkerKey(tenant) && storedGrant && grantFitsSlot(tenant, storedGrant)) perpsSlotAccounts.set(tenant, storedGrant.smartAccount.toLowerCase() as `0x${string}`);
+    // even when this spawn is turned away below (mirrorGuardedLedger). Never
+    // over one already known: only a grant handed over moves it.
+    if (isPerpsWorkerKey(tenant) && storedGrant && grantFitsSlot(tenant, storedGrant) && !perpsSlotAccounts.has(tenant)) perpsSlotAccounts.set(tenant, storedGrant.smartAccount.toLowerCase() as `0x${string}`);
     if (storedGrant && (!Number.isFinite(storedGrant.expiresAt) || storedGrant.expiresAt <= Math.floor(Date.now() / 1000))) {
       const cause = await pausedSourceCause(tenant);
       if (cause) await reportFleetSource(tenant, storedGrant, lease, cause);
@@ -6791,7 +6811,7 @@ async function perpsRosterForPass(nowSec: number, spotOwners: ReadonlySet<string
       ? await store.listTenantExpiries()
       : await Promise.all((await store.listTenants()).map(async (tenant) => ({ tenant, expiresAt: (await store.get(tenant))?.expiresAt ?? null })));
   } catch (e) {
-    sayTenantAlert("roster:perps", `[alert] fleet: the Perps grant store is unreadable (${errorKind(e)}) — every Perps worker here is kept exactly as it is this pass: none started, stood down, wiped or released`);
+    sayTenantAlert("roster:perps", `[alert] fleet: the Perps grant store is unreadable (${errorKind(e)}) — every Perps worker here is kept exactly as it is this pass: none started, stood down, yielded, wiped or released, except one whose last-read grant has expired, which is retired as on any pass`);
     const keys = knownPerpsKeys();
     lastPerpsPass = {
       keys,
@@ -7389,7 +7409,8 @@ export async function reconcile(): Promise<void> {
   // THE PERPS WORKERS' OWN LINE, said when it changes or every five minutes.
   const perpsLine = perps.keys.length === 0 && perps.readable ? null
     : `perps roster: ${perps.keys.length} Perps wallet${perps.keys.length === 1 ? "" : "s"}${perps.readable ? "" : " (store unreadable: kept as they are)"}, ` +
-      (perpsMaySpawn ? `${eligibleToSpawn.length - activeCount} unexpired may run (MERRYMEN_PERPS=paper)` : "none may run (MERRYMEN_PERPS is not paper)");
+      (perpsMaySpawn ? `${eligibleToSpawn.length - activeCount} unexpired may run (MERRYMEN_PERPS=paper)`
+        : !perps.readable ? "none may start this pass" : "none may run (MERRYMEN_PERPS is not paper)");
   if (perpsLine !== lastPerpsRosterLog.line || (perpsLine && Date.now() - lastPerpsRosterLog.at > 5 * 60_000)) {
     if (perpsLine) log(perpsLine);
     lastPerpsRosterLog = { line: perpsLine, at: Date.now() };
