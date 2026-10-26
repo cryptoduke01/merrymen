@@ -14,9 +14,10 @@
  *   budgets   — perp orders count against the day's caps after a refresh and
  *               a restart, per rail, by fill once known and by worst notional
  *               until then; exits never count as spend.
- *   paper     — a reset takes the paper perp book with the cash. (Its ride on
- *               the hosted checkpoint, and the mirror's copy of the perp
- *               ledger, are hosted operation: slice 4.)
+ *   paper     — a reset takes the paper perp book with the cash.
+ *   mirror    — the shared copy moves forward only, never carries the signed
+ *               bytes, copies only the worker's own account, and copies an
+ *               unchanged ledger as nothing.
  *   migration — the schema lands over an existing ledger without touching a
  *               row, the shared ledger's migration leaves `equity` alone, and
  *               every statement translates for Postgres.
@@ -29,6 +30,7 @@ import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { verifyChain } from "./audit";
 import { translateSchema, wrapSqlite, type Db } from "./db";
+import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
 import type { PerpSignedTx } from "./store";
 import type { PerpOrderIntent } from "./policy";
 import { readFileSync } from "node:fs";
@@ -593,11 +595,16 @@ describe("epochs and equity", () => {
 });
 
 // ── paper ─────────────────────────────────────────────────────────────────────
-//
-// The paper perp book riding the hosted checkpoint (paper_checkpoints.perp_json)
-// and the mirror carrying the perp ledger to the shared database are hosted
-// operation, and land with it in slice 4. Here: the reset, which the worker's
-// own ledger does in one transaction.
+
+/** A shared or fresh database with the real schema, as the orchestrator builds one. */
+async function ledgerDb(): Promise<{ db: Db; raw: DatabaseSync }> {
+  const r = new DatabaseSync(":memory:");
+  others.push(r);
+  const db = wrapSqlite(r);
+  await store.applyLedgerSchema(db);
+  await db.exec(MIRROR_STATE_DDL);
+  return { db, raw: r };
+}
 
 describe("the paper perp book is reset with the paper cash", () => {
   it("resets the paper perp book with the paper cash, and never touches the live one", async () => {
@@ -615,6 +622,107 @@ describe("the paper perp book is reset with the paper cash", () => {
     assert.equal((await store.getPerpPositions(id, "paper", { includeFlat: true })).length, 0);
     assert.equal((await store.getPerpPositions(id, "live")).length, 1);
     assert.equal(await store.getNonceHighWater(id, "paper"), hw, "the high-water survives a reset");
+  });
+});
+
+// ── the mirror ────────────────────────────────────────────────────────────────
+//
+// The store's own ledger here holds every agent this file made, so every pass
+// below is also a pass over other accounts' perp rows: each is copied under
+// the one account the pass names, and the rest are counted foreign.
+
+describe("the mirror carries the perp ledger up, forward only", () => {
+  const PERP_COPIED = ["perp_fills", "perp_funding", "perp_orders", "perp_order_legs", "perp_transfers", "perp_positions", "perp_accounts"];
+
+  it("copies every perp table — never the signed bytes or an incident's detail — and an unchanged ledger as nothing", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const { id: orderId } = await liveOpen(id, 23_000_000n);
+    await store.insertPerpFill(fill(id, { orderId }));
+    await store.insertPerpFunding({ agentId: id, mode: "live", marketId: 1, fundingId: "501", fundingHour: 7200, paymentMicro: -3n });
+    await store.upsertPerpTransfer({ agentId: id, mode: "live", direction: "deposit", amountMicro: 5_000_000n, initiator: "agent", state: "landed", chainId: 4663, txHash: `0x${"12".repeat(32)}`, logIndex: 0 });
+    await store.upsertPerpPosition({ agentId: id, mode: "live", source: "venue", marketId: 1, side: "long", base: 20_000n, allocatedMarginMicro: 11_500_000n, imfBp: 5000, marginMode: "isolated" });
+    // A gapped paper stop: the resting child is gone, the level it was protected at stands.
+    await store.upsertPerpPosition({
+      agentId: id, mode: "paper", source: "paper", marketId: 2, side: "short", base: 30n, entryPrice: 790_000n, allocatedMarginMicro: 12_450_000n,
+      imfBp: 5000, marginMode: "isolated", stopTrigger: null, stopPrice: null, recordedStopTrigger: 829_500n, recordedStopPrice: 845_000n, fundingHourApplied: 3600,
+    });
+    await store.patchPerpAccount(id, "live", { accountIndex: 22_149, incident: { kind: "foreign-key", at: 7, detail: { pubkey: "secret-ish" } } });
+
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    const first = await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal(first.failed, undefined, JSON.stringify(first.failed));
+    for (const t of PERP_COPIED) assert.ok((first.copied[t] ?? 0) > 0, `${t} arrived`);
+    const order = shared.raw.prepare("SELECT status, tx_info, tx_hash FROM perp_orders WHERE id = ?").get(orderId) as Record<string, unknown>;
+    assert.equal(order.status, "submitted");
+    assert.equal(order.tx_info, null, "the signed bytes stay in the child");
+    const incident = shared.raw.prepare("SELECT incident_json FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { incident_json: string };
+    assert.deepEqual(JSON.parse(incident.incident_json), { at: 7, kind: "foreign-key" }, "kind and time, never the detail");
+    const gapped = shared.raw.prepare("SELECT stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").get(acct) as Record<string, unknown>;
+    assert.deepEqual({ ...gapped }, { stop_trigger: null, recorded_stop_trigger: "829500", recorded_stop_price: "845000" }, "the level the position is protected at travels with it");
+    assert.equal(Number((shared.raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id <> ?").get(acct) as { n: number }).n), 0, "no other account's fill came up under this one");
+    assert.ok((first.copied.perp_fills_foreign ?? 0) > 0, "…and they are counted, not lost");
+
+    const again = await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    for (const t of PERP_COPIED) assert.equal(again.copied[t], undefined, `${t}: an unchanged ledger copies as nothing`);
+    assert.equal(Number((shared.raw.prepare("SELECT COUNT(*) AS n FROM perp_fills WHERE agent_id = ?").get(acct) as { n: number }).n), 1);
+
+    // The answer arrives: the resolved row replaces the submitted one.
+    await store.resolvePerpOrder({ agentId: id, mode: "live", id: orderId, status: "filled", filledBase: 20_000n, filledQuoteMicro: 23_000_000n });
+    raw.prepare("UPDATE perp_orders SET updated_at = updated_at + 1 WHERE id = ?").run(orderId);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
+
+    // A STALE CHILD NEVER REGRESSES A ROW: walk the child's copy back and
+    // make it look newer, as a ledger restored from an old backup would.
+    raw.prepare("UPDATE perp_orders SET status = 'submitted', updated_at = updated_at + 10 WHERE id = ?").run(orderId);
+    raw.prepare("UPDATE perp_transfers SET state = 'submitted', updated_at = updated_at + 10 WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT status FROM perp_orders WHERE id = ?").get(orderId) as { status: string }).status, "filled");
+    assert.equal((shared.raw.prepare("SELECT state FROM perp_transfers WHERE agent_id = ?").get(acct) as { state: string }).state, "landed");
+
+    // A nonce high-water never falls in shared storage, whatever the child says.
+    const high = (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water;
+    raw.prepare("UPDATE perp_accounts SET nonce_high_water = '1', updated_at = updated_at + 20 WHERE agent_id = ? AND mode = 'live'").run(acct);
+    await mirrorTenant({ tenant: "t1", child, shared: shared.db, account: acct });
+    assert.equal(
+      (shared.raw.prepare("SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(acct) as { nonce_high_water: string }).nonce_high_water,
+      high,
+    );
+  });
+
+  it("flattens a shared position the child has since closed — recorded stop and all — and not one it has merely not re-read", async () => {
+    const id = await agent();
+    const acct = id.toLowerCase();
+    const shared = await ledgerDb();
+    const child = wrapSqlite(raw);
+    await store.setAgentMode(id, "paper", 1, false);
+    await store.upsertPerpPosition({
+      agentId: id, mode: "paper", source: "paper", marketId: 3, side: "long", base: 7n, allocatedMarginMicro: 1n,
+      stopTrigger: 700n, stopPrice: 690n, recordedStopTrigger: 700n, recordedStopPrice: 690n,
+    });
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    // The child's paper reset deletes its rows and touches its account row.
+    await store.resetPaperLedger(id, 1000);
+    raw.prepare("DELETE FROM perp_accounts WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    assert.equal((shared.raw.prepare("SELECT base FROM perp_positions WHERE agent_id = ?").get(acct) as { base: string }).base, "7", "silence is not flatness");
+    await store.patchPerpAccount(id, "paper", { paperCollateralMicro: 0n });
+    raw.prepare("UPDATE perp_accounts SET updated_at = updated_at + 5 WHERE agent_id = ?").run(acct);
+    await mirrorTenant({ tenant: "t2", child, shared: shared.db, account: acct });
+    const flat = shared.raw.prepare("SELECT base, side, stop_trigger, recorded_stop_trigger, recorded_stop_price FROM perp_positions WHERE agent_id = ?").get(acct) as Record<string, unknown>;
+    assert.deepEqual({ ...flat }, { base: "0", side: null, stop_trigger: null, recorded_stop_trigger: null, recorded_stop_price: null }, "flat as the worker's own flatten writes it: no level claimed for a position that is not there");
+  });
+
+  it("skips a child ledger from before perps, with nothing to say and nothing failed", async () => {
+    const old = new DatabaseSync(":memory:");
+    others.push(old);
+    old.exec("CREATE TABLE agents (smart_account TEXT PRIMARY KEY)");
+    const shared = await ledgerDb();
+    const r = await mirrorTenant({ tenant: "t3", child: wrapSqlite(old), shared: shared.db });
+    assert.equal(Object.keys(r.copied).some((k) => k.startsWith("perp")), false);
+    assert.equal(Object.keys(r.failed ?? {}).some((k) => k.startsWith("perp")), false);
   });
 });
 
