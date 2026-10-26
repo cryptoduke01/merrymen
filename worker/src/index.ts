@@ -9043,6 +9043,25 @@ async function main() {
     const perpIntent = intent.kind === "perp-order" || intent.kind === "perp-margin";
     const tradeTarget = intent.kind === "equity-order" ? intent.ticker : perpIntent ? "" : intent.target;
 
+    // ── A PERPS WALLET TRADES PERPETUALS, AND NOTHING ELSE ──────────────────
+    //
+    // Its paper cash is the perp book's collateral, and its Spot producers are
+    // off (settings.ts mergeSettings) — but an owner's own orders are not
+    // producers. A Telegram /buy, a plain-words trade, a /transfer, an app or
+    // MCP trade file, the self-test probe or an energy buy would all reach the
+    // queue as a swap, a curve trade, a transfer or an energy buy, and spend
+    // that collateral on tokens. So every non-perp intent is refused here,
+    // first, before admission, a reservation or a read: nothing is held open
+    // and nothing could replay. NO `trades` ROW, as for a perp refusal: that
+    // table is the public tape, and a Perps wallet's agent never appears on it
+    // (docs/perps.md rule 17). The owner who asked is told, from
+    // lastTradeOutcome (thesis-policy.ts "perps-wallet-spot").
+    if (cfg.workerWallet === "perps" && !perpIntent) {
+      console.log(`[perps] REFUSED ${intent.kind}: a Perps wallet's worker trades perpetuals only`);
+      lastTradeOutcome = { status: "rejected", rejectRule: "perps-wallet-spot" };
+      return;
+    }
+
     // ── ADMISSION, BEFORE ANYTHING ELSE IS ASKED ────────────────────────────
     //
     // A tenant brought back after a hold may be at `observe` (start nothing)

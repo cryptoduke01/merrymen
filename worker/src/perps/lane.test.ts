@@ -24,6 +24,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import type { ExecMode } from "../exec-mode";
 import type { AgentLimits, PerpOrderIntent, TradeIntent } from "../policy";
+import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 import { buildOpenDraft } from "./drafts";
 import { createPaperPerpExecutor, PerpRefused, type PerpExecutor } from "./executor";
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "./feed-reader";
@@ -508,6 +509,20 @@ describe("the wiring in index.ts", () => {
     // A Spot worker never starts the lane's loop, and its strategist is never shown perps.
     assert.match(CODE, /if \(cfg\.workerWallet === "perps"\) await perpLane\.armed\(\)/);
     assert.match(CODE, /\.\.\.\(c\.workerWallet === "perps"\s*\?\s*\{\s*perps: \{/);
+  });
+
+  it("A PERPS WALLET'S WORKER REFUSES EVERY NON-PERP INTENT, first, with no trades row", () => {
+    // An owner's /buy, /transfer, app trade, self-test or energy buy is not a
+    // producer the settings can turn off; it would spend the perp collateral.
+    const locked = fn("processIntentLocked");
+    const refusal = locked.indexOf('if (cfg.workerWallet === "perps" && !perpIntent) {');
+    const admission = locked.indexOf("const admissionRule = admissionRefusal(");
+    assert.ok(refusal > 0 && refusal < admission, "before admission, so nothing is reserved or read");
+    const body = locked.slice(refusal, locked.indexOf("\n    }\n", refusal));
+    assert.match(body, /lastTradeOutcome = \{ status: "rejected", rejectRule: "perps-wallet-spot" \};\s*return;/);
+    assert.doesNotMatch(body, /recordTrade|addTrade|reserveBudget/, "never the public tape, never the budget");
+    assert.ok(rejectRuleLabel("perps-wallet-spot"), "the owner is told in words");
+    assert.ok(rejectRuleRemedy("perps-wallet-spot"));
   });
 
   it("A PERPS WALLET'S WORKER NEVER RUNS THE BRAIN, whatever MERRYMEN_BRAIN_LIVE or _SHADOW say", () => {

@@ -942,6 +942,12 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // the owner to change.
   "rollout-hold": "trading is on hold for this agent while the service brings agents back",
   draining: "the agent was restarting and took no new trades",
+  // A PERPS WALLET'S WORKER TRADES PERPETUALS AND NOTHING ELSE (index.ts
+  // processIntentLocked): a token trade asked of it — typed in Telegram,
+  // queued from the app, a self-test — is refused before anything is read.
+  // Never on the public tape (no `trades` row is written for it), but the
+  // owner who asked is told.
+  "perps-wallet-spot": "this is the agent of the Perps wallet, which trades perpetuals only and never buys, sells or sends tokens",
 });
 
 /**
@@ -1244,6 +1250,8 @@ export function rejectRuleLabel(rule: string | null | undefined): string | null 
 export function rejectRuleRemedy(rule: string | null | undefined): string | null {
   if (!rule) return null;
   switch (rule) {
+    case "perps-wallet-spot":
+      return "Trade tokens from your Spot wallet's agent instead; your Perps wallet trades perpetuals only.";
     case "no-exit":
       return "Re-sign your trading permission at /grant so it covers that token — renewal revokes old permissions on-chain and requires network fees.";
     case "asset-allowlist":
